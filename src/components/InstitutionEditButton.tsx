@@ -5,7 +5,7 @@ import { SettingsActionButton } from "@/components/settings/SettingsPageScaffold
 import { notifySettingsDataChanged } from "@/lib/client/settingsCache";
 import { useI18n } from "@/lib/i18n";
 
-type InstitutionType = "family_member" | "person" | "organization" | "bank" | "insurance" | "brokerage" | "fund_company" | "payment" | "ewallet" | "debt" | "other";
+type InstitutionType = "family_member" | "person" | "organization" | "bank" | "insurance" | "brokerage" | "fund_company" | "payment" | "debt" | "other";
 const TYPE_LABEL_KEYS: Record<InstitutionType, string> = {
   family_member: "institution.type.family_member",
   person: "institution.type.person",
@@ -15,7 +15,6 @@ const TYPE_LABEL_KEYS: Record<InstitutionType, string> = {
   brokerage: "institution.type.brokerage",
   fund_company: "institution.type.fund_company",
   payment: "institution.type.payment",
-  ewallet: "institution.type.ewallet",
   debt: "institution.type.debt",
   other: "institution.type.other",
 };

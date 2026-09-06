@@ -1,5 +1,5 @@
 import { PrismaClient } from "@prisma/client";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import { PrismaBetterSqlite3WithSafeRollback } from "./sqlite-adapter";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 
@@ -15,7 +15,7 @@ function createClient(): PrismaClient {
   }
 
   if (connectionString === ":memory:" || connectionString.startsWith("file:")) {
-    const adapter = new PrismaBetterSqlite3({
+    const adapter = new PrismaBetterSqlite3WithSafeRollback({
       url: connectionString,
     });
     return new PrismaClient({
@@ -27,7 +27,7 @@ function createClient(): PrismaClient {
   const pool = globalForPrisma.prismaPool ?? new Pool({
     connectionString,
     max: Number(process.env.PG_POOL_MAX ?? 8),
-    connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 5_000),
+    connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 15_000),
     idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS ?? 30_000),
     keepAlive: true,
     keepAliveInitialDelayMillis: Number(process.env.PG_KEEPALIVE_INITIAL_DELAY_MS ?? 10_000),

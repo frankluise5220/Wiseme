@@ -43,7 +43,7 @@ export async function resolveOrCreateAdvanceAccount(tx: Db, input: ResolveAdvanc
   const existing = await tx.account.findFirst({
     where: {
       householdId: input.householdId,
-      kind: "loan",
+      kind: { in: ["settlement", "loan"] },
       debtDirection: "receivable",
       isPlaceholder: { not: true },
       ...relationWhere,
@@ -56,7 +56,10 @@ export async function resolveOrCreateAdvanceAccount(tx: Db, input: ResolveAdvanc
   if (existing) {
     const account = existing.isActive
       ? existing
-      : await tx.account.update({ where: { id: existing.id }, data: { isActive: true }, select: { id: true, name: true, isActive: true } });
+      : await tx.account.update({ where: { id: existing.id }, data: { isActive: true, kind: "settlement" }, select: { id: true, name: true, isActive: true } });
+    if (existing.isActive) {
+      await tx.account.update({ where: { id: existing.id }, data: { kind: "settlement" } });
+    }
     return { account, objectId, objectName };
   }
 
@@ -75,7 +78,7 @@ export async function resolveOrCreateAdvanceAccount(tx: Db, input: ResolveAdvanc
   const account = await tx.account.create({
     data: {
       name: objectName,
-      kind: "loan",
+      kind: "settlement",
       debtDirection: "receivable",
       currency: cashAccount.currency,
       groupId: defaultGroup.id,

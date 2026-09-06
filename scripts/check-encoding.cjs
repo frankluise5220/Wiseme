@@ -105,6 +105,10 @@ function checkUtf8(buffer) {
   return roundTrip.equals(buffer);
 }
 
+function hasUtf8Bom(buffer) {
+  return buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf;
+}
+
 function main() {
   const files = collectFiles();
   const issues = [];
@@ -116,6 +120,10 @@ function main() {
     if (!checkUtf8(buffer)) {
       issues.push({ file: file.rel, type: "encoding", detail: "not valid UTF-8" });
       continue;
+    }
+
+    if (hasUtf8Bom(buffer)) {
+      issues.push({ file: file.rel, type: "bom", detail: "starts with UTF-8 BOM; strip it before committing" });
     }
 
     if (text.includes("\r\n")) {

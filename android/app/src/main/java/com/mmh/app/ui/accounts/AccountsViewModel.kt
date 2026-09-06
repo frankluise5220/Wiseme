@@ -80,7 +80,7 @@ class AccountsViewModel @Inject constructor(
     }
 
     private fun buildGroups(accounts: List<AccountListRowDto>): List<AccountGroup> {
-        val order = listOf("cash", "bank_debit", "ewallet", "bank_credit", "loan", "other")
+        val order = listOf("cash", "bank_debit", "ewallet", "bank_credit", "settlement", "loan", "other")
         return accounts
             .groupBy { it.kind.ifBlank { "other" } }
             .map { (kind, list) ->
@@ -100,7 +100,8 @@ class AccountsViewModel @Inject constructor(
             "bank_debit" -> "\u501f\u8bb0\u5361"
             "ewallet" -> "\u7b2c\u4e09\u65b9\u4f59\u989d"
             "bank_credit" -> "\u4fe1\u7528\u5361"
-            "loan" -> "\u8d1f\u503a"
+            "settlement" -> "\u5f80\u6765\u6b3e"
+            "loan" -> "\u8d37\u6b3e"
             else -> "\u5176\u4ed6"
         }
     }

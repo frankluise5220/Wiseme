@@ -46,7 +46,7 @@ const RESTORE_FILE_PICKER_TYPES = (t: I18nT) => [
   {
     description: t("settings.database.backupFilePickerDesc"),
     accept: {
-      "application/json": [".mmh-backup"],
+      "application/json": ["mmhbackup"],
     },
   },
 ];

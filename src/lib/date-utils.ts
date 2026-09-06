@@ -157,6 +157,65 @@ export function parseDateInputToUtc(value: string): Date | null {
   return Number.isFinite(date.getTime()) ? date : null;
 }
 
+const FLEXIBLE_DATE_ISO_RE = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s].*)?$/;
+const FLEXIBLE_DATE_CN_RE = /^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?(?:[T\s].*)?$/;
+const FLEXIBLE_DATE_COMPACT_RE = /^(\d{4})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?:[T\s].*)?$/;
+const FLEXIBLE_DATE_MDY_RE = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?:[T\s].*)?$/;
+
+function ymdFromCalendarParts(year: number, month: number, day: number): string | null {
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (!Number.isFinite(date.getTime())) return null;
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return formatDateUtc(date);
+}
+
+/**
+ * Leniently parse a date-like value into a "YYYY-MM-DD" string (UTC calendar
+ * date); returns null when nothing recognizable is present. Supported shapes:
+ * Date objects, "YYYY-M-D" with "-" "/" "." separators (optionally followed by
+ * a time part), "YYYY年M月D日", compact "YYYYMMDD", "M/D/YYYY" and "D/M/YYYY"
+ * (disambiguated when one part exceeds 12; US order wins otherwise), plus a
+ * loose fallback for text dates such as "Jan 15, 2026".
+ */
+export function parseFlexibleDateToYmd(value: unknown): string | null {
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? formatDateUtc(value) : null;
+  }
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  let match = FLEXIBLE_DATE_ISO_RE.exec(raw);
+  if (match) return ymdFromCalendarParts(Number(match[1]), Number(match[2]), Number(match[3]));
+
+  match = FLEXIBLE_DATE_CN_RE.exec(raw);
+  if (match) return ymdFromCalendarParts(Number(match[1]), Number(match[2]), Number(match[3]));
+
+  match = FLEXIBLE_DATE_COMPACT_RE.exec(raw);
+  if (match) return ymdFromCalendarParts(Number(match[1]), Number(match[2]), Number(match[3]));
+
+  // Day-first vs month-first: when one part exceeds 12 it must be the day;
+  // otherwise default to US order (M/D/YYYY).
+  match = FLEXIBLE_DATE_MDY_RE.exec(raw);
+  if (match) {
+    const first = Number(match[1]);
+    const second = Number(match[2]);
+    const year = Number(match[3]);
+    return first > 12 && second <= 12
+      ? ymdFromCalendarParts(year, second, first)
+      : ymdFromCalendarParts(year, first, second);
+  }
+
+  // Loose fallback only for text that plausibly contains a full date (e.g.
+  // "Jan 15, 2026"); guards against strings like "10:30" mapping to today.
+  if (raw.length >= 8 && /\d{4}/.test(raw)) {
+    const date = new Date(raw);
+    if (!Number.isFinite(date.getTime())) return null;
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }
+  return null;
+}
+
 const CN_FUND_HOLIDAYS = new Set<string>([
   "2024-01-01",
   "2024-02-10", "2024-02-11", "2024-02-12", "2024-02-13", "2024-02-14", "2024-02-15", "2024-02-16", "2024-02-17",
@@ -191,6 +250,48 @@ const US_FUND_HOLIDAYS = new Set<string>([
   "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
 ]);
 
+// Hong Kong securities market holidays for HK-linked funds.
+const HK_FUND_HOLIDAYS = new Set<string>([
+  "2024-01-01",
+  "2024-02-12", "2024-02-13",
+  "2024-03-29", "2024-04-01", "2024-04-04",
+  "2024-05-01", "2024-05-15",
+  "2024-06-10",
+  "2024-07-01",
+  "2024-09-18",
+  "2024-10-01", "2024-10-11",
+  "2024-12-25", "2024-12-26",
+  "2025-01-01",
+  "2025-01-29", "2025-01-30", "2025-01-31",
+  "2025-04-04", "2025-04-18", "2025-04-21",
+  "2025-05-01", "2025-05-05", "2025-05-31",
+  "2025-07-01",
+  "2025-10-01", "2025-10-07", "2025-10-29",
+  "2025-12-25", "2025-12-26",
+  "2026-01-01",
+  "2026-02-17", "2026-02-18", "2026-02-19",
+  "2026-04-03", "2026-04-06", "2026-04-07",
+  "2026-05-01", "2026-05-25",
+  "2026-06-19",
+  "2026-07-01",
+  "2026-10-01", "2026-10-19",
+  "2026-12-25",
+]);
+
+// Japan Exchange Group market holidays for Japan-linked funds.
+const JP_FUND_HOLIDAYS = new Set<string>([
+  "2024-01-01", "2024-01-02", "2024-01-03", "2024-01-08", "2024-02-12", "2024-02-23",
+  "2024-03-20", "2024-04-29", "2024-05-03", "2024-05-06", "2024-07-15", "2024-08-12",
+  "2024-09-16", "2024-09-23", "2024-10-14", "2024-11-04", "2024-12-31",
+  "2025-01-01", "2025-01-02", "2025-01-03", "2025-01-13", "2025-02-11", "2025-02-24",
+  "2025-03-20", "2025-04-29", "2025-05-05", "2025-05-06", "2025-07-21", "2025-08-11",
+  "2025-09-15", "2025-09-23", "2025-10-13", "2025-11-03", "2025-11-24", "2025-12-31",
+  "2026-01-01", "2026-01-02", "2026-01-12", "2026-02-11", "2026-02-23", "2026-03-20",
+  "2026-04-29", "2026-05-04", "2026-05-05", "2026-05-06", "2026-07-20", "2026-08-11",
+  "2026-09-21", "2026-09-22", "2026-09-23", "2026-10-12", "2026-11-03", "2026-11-23",
+  "2026-12-31",
+]);
+
 function isWeekendUtc(ms: number) {
   const dow = new Date(ms).getUTCDay();
   return dow === 0 || dow === 6;
@@ -204,11 +305,21 @@ function isUsFundHoliday(dateStr: string) {
   return US_FUND_HOLIDAYS.has(dateStr);
 }
 
+function isHkFundHoliday(dateStr: string) {
+  return HK_FUND_HOLIDAYS.has(dateStr);
+}
+
+function isJpFundHoliday(dateStr: string) {
+  return JP_FUND_HOLIDAYS.has(dateStr);
+}
+
 export function isTradingClosedDate(dateStr: string, tradingCalendar?: string | null) {
   const [y, m, d] = dateStr.split("-").map(Number);
   const ms = Date.UTC(y, (m || 1) - 1, d || 1);
   if (isWeekendUtc(ms)) return true;
   if (tradingCalendar === "cn_fund") return isCnFundHoliday(dateStr);
+  if (tradingCalendar === "hk_fund") return isHkFundHoliday(dateStr);
+  if (tradingCalendar === "jp_fund") return isJpFundHoliday(dateStr);
   if (tradingCalendar === "us_fund") return isUsFundHoliday(dateStr);
   return false;
 }
@@ -227,6 +338,21 @@ export function addTradingDaysUtc(dateStr: string, n: number, tradingCalendar?: 
   const rm = String(result.getUTCMonth() + 1).padStart(2, "0");
   const rd = String(result.getUTCDate()).padStart(2, "0");
   return `${ry}-${rm}-${rd}`;
+}
+
+export function subtractTradingDaysUtc(dateStr: string, n: number, tradingCalendar?: string | null) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  let ms = Date.UTC(y, m - 1, d);
+  while (isTradingClosedDate(formatDateUtc(new Date(ms)), tradingCalendar)) {
+    ms -= 24 * 60 * 60 * 1000;
+  }
+  let subtracted = 0;
+  while (subtracted < n) {
+    ms -= 24 * 60 * 60 * 1000;
+    const nextDate = formatDateUtc(new Date(ms));
+    if (!isTradingClosedDate(nextDate, tradingCalendar)) subtracted++;
+  }
+  return formatDateUtc(new Date(ms));
 }
 
 export function countTradingDaysUtc(startDateStr: string, endDateStr: string, tradingCalendar?: string | null) {

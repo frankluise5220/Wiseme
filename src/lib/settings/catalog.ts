@@ -73,6 +73,7 @@ const SETTINGS_GROUP_LABEL_KEYS: Record<string, string> = {
   automation: "settings.group.automation",
   display: "settings.group.display",
   system: "settings.group.system",
+  feedback: "settings.group.feedback",
 };
 
 const SETTINGS_GROUP_DESCRIPTION_KEYS: Record<string, string> = {
@@ -81,12 +82,14 @@ const SETTINGS_GROUP_DESCRIPTION_KEYS: Record<string, string> = {
   automation: "settings.group.automation.desc",
   display: "settings.group.display.desc",
   system: "settings.group.system.desc",
+  feedback: "settings.group.feedback.desc",
 };
 
 const SETTINGS_ITEM_LABEL_KEYS: Record<string, string> = {
   ledgers: "settings.ledgers",
   users: "settings.users",
   accounts: "settings.accounts",
+  "basic-data": "settings.basicDataSubmenu",
   institutions: "settings.institutions",
   counterparties: "settings.counterparties",
   "family-members": "settings.familyMembers",
@@ -100,6 +103,7 @@ const SETTINGS_ITEM_LABEL_KEYS: Record<string, string> = {
   display: "settings.display",
   database: "settings.database",
   "system-update": "settings.systemUpdate",
+  feedback: "settings.feedback",
 };
 
 const SETTINGS_ITEM_DESCRIPTION_KEYS: Record<string, string> = {
@@ -107,6 +111,7 @@ const SETTINGS_ITEM_DESCRIPTION_KEYS: Record<string, string> = {
   ledgers: "settings.item.ledgers.desc",
   users: "settings.item.users.desc",
   accounts: "settings.item.accounts.desc",
+  "basic-data": "settings.basicDataSubmenu.desc",
   institutions: "settings.item.institutions.desc",
   counterparties: "settings.item.counterparties.desc",
   "family-members": "settings.item.family-members.desc",
@@ -121,6 +126,7 @@ const SETTINGS_ITEM_DESCRIPTION_KEYS: Record<string, string> = {
   "color-scheme": "settings.item.color-scheme.desc",
   database: "settings.item.database.desc",
   "system-update": "settings.item.system-update.desc",
+  feedback: "settings.item.feedback.desc",
 };
 
 function localize(t: TranslateFn, key: string | undefined, fallback: string): string {

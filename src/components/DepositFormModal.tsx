@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { parseNumber } from "@/lib/investment-config";
 import { DateStepper } from "./DateStepper";
 import { CalcInput } from "./CalcInput";
+import { EntryTagsField } from "./EntryTagsField";
 import { ModalLayerProvider, getNextModalLayerZIndex, useModalLayerZIndex } from "./ModalLayer";
 import { SmartSelect, type SmartSelectOption } from "./SmartSelect";
 import { useAccountSSFilter } from "./accountSSFilter";
@@ -34,6 +35,8 @@ type Entry = {
   depositInterest?: number | null;
   depositSourceEntryId?: string | null;
   fundArrivalDate?: string | null;
+  tags?: Array<{ id?: string; tagId?: string }> | null;
+  tagIds?: string[] | null;
 };
 
 type NestedFieldData = Record<string, Array<{ id: string; name: string; type?: string }>>;
@@ -194,6 +197,11 @@ export function DepositFormModal({
   const [depositAccountId, setDepositAccountId] = useState(initDepositAccountId);
   const [selectedRedeemLotId, setSelectedRedeemLotId] = useState("");
   const [memo, setMemo] = useState(initMemo);
+  const [selectedTagIds, setSelectedTagIds] = useState<string[]>(() =>
+    mode === "edit" && entry
+      ? (entry.tags as Array<{ id: string }> | undefined)?.map((tag) => tag.id) ?? (entry.tagIds as string[] | undefined) ?? []
+      : [],
+  );
   const [submitting, setSubmitting] = useState(false);
   const [requestId, setRequestId] = useState<string | null>(null);
   const [editEntryId, setEditEntryId] = useState<string | null>(null);
@@ -475,6 +483,7 @@ export function DepositFormModal({
     setDepositAccountId("");
     setSelectedRedeemLotId("");
     setMemo("");
+    setSelectedTagIds([]);
     setRequestId(null);
     setEditEntryId(null);
     setEditingRedeemSource(null);
@@ -524,6 +533,8 @@ export function DepositFormModal({
         depositSourceEntryId?: string | null;
         fundSubtype?: string;
         fundArrivalDate?: string | null;
+        tags?: Array<{ id?: string; tagId?: string }> | null;
+        tagIds?: string[] | null;
       }>).detail;
       if (!detail?.requestId || !detail.entryId) return;
       setRequestId(detail.requestId);
@@ -547,6 +558,13 @@ export function DepositFormModal({
       const detailAnnualRate = detail.depositAnnualRate ?? detail.fundNav ?? null;
       setAnnualRate(detailAnnualRate != null ? String(detailAnnualRate) : "");
       setMemo(detail.note ?? "");
+      setSelectedTagIds(
+        Array.isArray(detail.tags)
+          ? detail.tags.map((tag: { id?: string; tagId?: string }) => tag.id ?? tag.tagId ?? "").filter(Boolean)
+          : Array.isArray(detail.tagIds)
+            ? detail.tagIds.filter((id: string) => !!id)
+            : [],
+      );
       setArrivalAmount(detail.amount ? String(Math.abs(detail.amount)) : "");
       setInterestAmount(
         detail.depositInterest != null && Number.isFinite(detail.depositInterest)
@@ -810,6 +828,7 @@ export function DepositFormModal({
     setInterestEdited(false);
     setArrivalEdited(false);
     setMemo("");
+    setSelectedTagIds([]);
     if (isRedeem) {
       setSelectedRedeemLotId("");
     }
@@ -857,6 +876,7 @@ export function DepositFormModal({
       fd.set("amount", String(isRedeem ? redeemAmount : cashAmt));
       fd.set("fundName", fundName.trim());
       fd.set("note", memo);
+      fd.set("tagIds", JSON.stringify(selectedTagIds));
       if (depositAccountId) fd.set("accountId", depositAccountId);
       fd.set("cashAccountId", cashAccountId);
       fd.set("fundProductType", "deposit");
@@ -1293,6 +1313,8 @@ export function DepositFormModal({
                   className="form-input"
                 />
               </div>
+
+              <EntryTagsField value={selectedTagIds} onChange={setSelectedTagIds} />
 
               <div className="flex justify-end gap-2 pt-1">
                 {mode === "create" ? (

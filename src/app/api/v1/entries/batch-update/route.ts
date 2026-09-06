@@ -6,7 +6,8 @@ import { getHouseholdScope } from "@/lib/server/household-scope";
 import { recalcFundPositions } from "@/lib/fund/recalcPosition";
 import { recalcPreciousMetalPositions } from "@/lib/metal/recalcPosition";
 import { recalcAndSaveAccountBalance } from "@/lib/server/account-balance";
-import { getFundFeeRateByDate } from "@/lib/fund/feeRate";
+import { getFundFeeRateByDate, setFundFeeRateByDate } from "@/lib/fund/feeRate";
+import { findFundTransactionForEntryId, syncFundTransactionsFromTxRecords } from "@/lib/fund/transactions";
 import { allocateBuyFailedRefunds, calculateConfirmedBuyUnits } from "@/lib/fund/refund-link";
 import { getAccountFundUnitsDecimals, roundFundUnits } from "@/lib/fund/unit-precision";
 import { prepareEntryUndo, saveEntryUndo } from "@/lib/server/entry-undo";
@@ -17,7 +18,7 @@ import { syncIndependentBusinessTransactionFromTxRecord } from "@/lib/server/bus
 import { upsertStatementCategoryRuleFromSavedRecord } from "@/lib/statement/category-rules";
 import { replaceEntryTags, resolveWritableTagIds } from "@/lib/server/entry-tags";
 import { creditBillEffectiveDate } from "@/lib/credit/billing";
-import { toStatementMonth } from "@/lib/date-utils";
+import { addTradingDaysUtc, toStatementMonth } from "@/lib/date-utils";
 
 /**
  * Batch-updates transaction records.
@@ -38,8 +39,10 @@ import { toStatementMonth } from "@/lib/date-utils";
  *     institution?: string;    // counterparty institution name/short name, pass empty string to clear
  *     tagId?: string;           // readable Tag.id, pass empty string to clear all tags
  *     remark?: string;         // note, pass empty string to clear
- *     fundConfirmDate?: string;// confirm date YYYY-MM-DD, pass empty string to clear
- *     fundArrivalDate?: string;// arrival date YYYY-MM-DD, pass empty string to clear
+ *     fundConfirmDate?: string;// confirm date YYYY-MM-DD or T+N offset, pass empty string to clear
+ *     fundArrivalDate?: string;// arrival date YYYY-MM-DD or T+N offset, pass empty string to clear
+ *     fundFee?: string | number;// fund fee amount, pass empty string to clear
+ *     feeRate?: string | number;// fund fee rate percentage, e.g. 0.15
  *     cashAccountId?: string;  // cash account Account.id (lands on accountId/toAccountId by fundSubtype)
  *     fundAccountId?: string;  // fund account Account.id (lands on accountId/toAccountId by fundSubtype)
  *     accountName?: string;    // legacy call compat: source account name
@@ -67,6 +70,8 @@ type BatchUpdateItem = {
   remark?: string;
   fundConfirmDate?: string;
   fundArrivalDate?: string;
+  fundFee?: string | number;
+  feeRate?: string | number;
   cashAccountId?: string;
   fundAccountId?: string;
   accountName?: string;
@@ -79,7 +84,7 @@ function ymd(value: Date) {
 }
 
 function parseAmountUpdate(raw: string, baseAmountAbs: number) {
-  const normalized = raw.replace(/[,，￥¥\s]/g, "");
+  const normalized = raw.replace(/[,，￥¥%％\s]/g, "");
   if (!normalized) return null;
   if (!/^[\d.+\-*/()]+$/.test(normalized)) return null;
 
@@ -88,6 +93,17 @@ function parseAmountUpdate(raw: string, baseAmountAbs: number) {
 
   const computed = evaluateArithmeticExpression(expr);
   return typeof computed === "number" && Number.isFinite(computed) ? Math.abs(computed) : null;
+}
+
+function parseTradingDayOffsetUpdate(raw: string) {
+  const normalized = raw.replace(/[,，￥¥%％\s]/g, "");
+  if (!normalized) return null;
+  if (!/^[\d.+\-*/()]+$/.test(normalized)) return null;
+
+  const computed = evaluateArithmeticExpression(normalized);
+  if (typeof computed !== "number" || !Number.isFinite(computed)) return null;
+  if (computed < 0 || !Number.isInteger(computed)) return null;
+  return computed;
 }
 
 export async function POST(req: NextRequest) {
@@ -123,27 +139,91 @@ export async function POST(req: NextRequest) {
         source: true,
         accountId: true,
         accountName: true,
-        account: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true } },
+        account: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } },
         toAccountId: true,
         toAccountName: true,
-        toAccount: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true } },
+        toAccount: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } },
         categoryId: true,
         categoryName: true,
         note: true,
         EntryTag: { select: { tagId: true, Tag: { select: { name: true } } } },
         counterpartyInstitutionName: true,
         paymentChannelName: true,
+        fundCode: true,
+        fundProductType: true,
+        fundUnits: true,
+        fundNav: true,
+        fundFee: true,
+        fundArrivalAmount: true,
+        fundSourceEntryId: true,
         fundConfirmDate: true,
         fundArrivalDate: true,
       },
     });
-    const existingMap = new Map(existingRecords.map((record) => [record.id, record]));
-    const notFoundIds = ids.filter((id) => !existingMap.has(id));
+    type ExistingRecord = (typeof existingRecords)[number];
+    const existingMap = new Map<string, ExistingRecord>(existingRecords.map((record) => [record.id, record]));
+    let notFoundIds = ids.filter((id) => !existingMap.has(id));
+    const updateById = new Map(updates.map((item) => [String(item.id ?? "").trim(), item]));
+    const directFundUpdateIds = notFoundIds.filter((id) => {
+      const item = updateById.get(id);
+      return item?.fundFee !== undefined
+        || item?.feeRate !== undefined
+        || item?.cashAccountId !== undefined
+        || item?.fundAccountId !== undefined;
+    });
+    const directFundTransactions = directFundUpdateIds.length > 0
+      ? await prisma.fundTransaction.findMany({
+          where: { id: { in: directFundUpdateIds }, deletedAt: null, householdId: ctx.householdId },
+          include: {
+            Account: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } },
+            CashAccount: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } },
+          },
+        })
+      : [];
+    for (const row of directFundTransactions) {
+      const cashReceiptLike = row.fundSubtype === "redeem" || row.fundSubtype === "switch_out" || row.fundSubtype === "dividend_cash";
+      existingMap.set(row.id, {
+        id: row.id,
+        date: row.applyDate,
+        postedAt: null,
+        type: TransactionType.investment,
+        amount: cashReceiptLike
+          ? Number(row.arrivalAmount ?? row.grossAmount ?? 0)
+          : -Math.abs(Number(row.grossAmount ?? 0)),
+        fundSubtype: row.fundSubtype,
+        source: row.source,
+        accountId: cashReceiptLike ? row.fundAccountId : (row.cashAccountId ?? row.fundAccountId),
+        accountName: cashReceiptLike ? row.Account.name : (row.CashAccount?.name ?? row.Account.name),
+        account: cashReceiptLike ? row.Account : (row.CashAccount ?? row.Account),
+        toAccountId: cashReceiptLike ? row.cashAccountId : row.fundAccountId,
+        toAccountName: cashReceiptLike ? (row.CashAccount?.name ?? null) : row.Account.name,
+        toAccount: cashReceiptLike ? row.CashAccount : row.Account,
+        categoryId: null,
+        categoryName: null,
+        note: row.note,
+        EntryTag: [],
+        counterpartyInstitutionName: null,
+        paymentChannelName: null,
+        fundCode: row.fundCode,
+        fundProductType: row.fundProductType,
+        fundUnits: row.units,
+        fundNav: row.nav,
+        fundFee: row.fee,
+        fundArrivalAmount: row.arrivalAmount,
+        fundSourceEntryId: null,
+        fundConfirmDate: row.confirmDate,
+        fundArrivalDate: row.arrivalDate,
+      } as unknown as ExistingRecord);
+    }
+    if (directFundTransactions.length > 0) {
+      const directIds = new Set(directFundTransactions.map((row) => row.id));
+      notFoundIds = notFoundIds.filter((id) => !directIds.has(id));
+    }
     const undo = await prepareEntryUndo(prisma, ctx.householdId, existingRecords.map((record) => record.id));
 
     const accountIds = Array.from(new Set(updates.flatMap((item) => [item.account, item.viewAccount, item.toAccount, item.cashAccountId, item.fundAccountId].map((id) => String(id ?? "").trim()).filter(Boolean))));
     const accounts = accountIds.length > 0
-      ? await prisma.account.findMany({ where: { id: { in: accountIds }, isActive: true, ...hidFilter }, select: { id: true, name: true, kind: true, investProductType: true, billingDay: true } })
+      ? await prisma.account.findMany({ where: { id: { in: accountIds }, isActive: true, ...hidFilter }, select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } })
       : [];
     const accountById = new Map(accounts.map((account) => [account.id, account]));
     const existingAccountById = new Map(
@@ -196,6 +276,16 @@ export async function POST(req: NextRequest) {
     const touchedRecordIds = new Set<string>();
     const balanceAccountIds = new Set<string>();
     const amountTouchedIds = new Set<string>();
+    const fundFeeTouchedIds = new Set<string>();
+    const feeRateTouchedIds = new Set<string>();
+    const fundPositionRecalcRequests = new Map<string, Set<string>>();
+    const addFundPositionRecalcRequest = (accountId: string | null | undefined, fundCode: string | null | undefined) => {
+      const acct = String(accountId ?? "").trim();
+      const code = String(fundCode ?? "").trim();
+      if (!acct || !code) return;
+      if (!fundPositionRecalcRequests.has(acct)) fundPositionRecalcRequests.set(acct, new Set());
+      fundPositionRecalcRequests.get(acct)!.add(code);
+    };
 
     for (const item of updates) {
       const id = String(item.id ?? "").trim();
@@ -377,27 +467,6 @@ export async function POST(req: NextRequest) {
         changed.push({ id, date: ymd(existing.date), oldValue: existing.note ?? "", newValue: remark, field: "remark" });
       }
 
-      if (item.fundConfirmDate !== undefined) {
-        const value = String(item.fundConfirmDate).trim();
-        if (value) {
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return NextResponse.json({ ok: false, code: "INVALID_DATE", error: "确认日期格式必须是 YYYY-MM-DD" }, { status: 400 });
-          data.fundConfirmDate = new Date(`${value}T00:00:00.000Z`);
-        } else {
-          data.fundConfirmDate = null;
-        }
-        changed.push({ id, date: ymd(existing.date), oldValue: existing.fundConfirmDate ? ymd(existing.fundConfirmDate) : "", newValue: value, field: "fundConfirmDate" });
-      }
-
-      if (item.fundArrivalDate !== undefined) {
-        const value = String(item.fundArrivalDate).trim();
-        if (value) {
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return NextResponse.json({ ok: false, code: "INVALID_DATE", error: "到账日期格式必须是 YYYY-MM-DD" }, { status: 400 });
-          data.fundArrivalDate = new Date(`${value}T00:00:00.000Z`);
-        } else {
-          data.fundArrivalDate = null;
-        }
-        changed.push({ id, date: ymd(existing.date), oldValue: existing.fundArrivalDate ? ymd(existing.fundArrivalDate) : "", newValue: value, field: "fundArrivalDate" });
-      }
 
       if (item.cashAccountId !== undefined || item.fundAccountId !== undefined) {
         const isRedeemLike = existing.fundSubtype === "redeem" || existing.fundSubtype === "dividend_cash" || existing.fundSubtype === "switch_out";
@@ -525,6 +594,161 @@ export async function POST(req: NextRequest) {
       const finalToAccountId = typeof data.toAccountId === "string" ? data.toAccountId : existing.toAccountId;
       const finalAccount = resolveAccountMeta(finalAccountId);
       const finalToAccount = resolveAccountMeta(finalToAccountId);
+      const needsFundSync = item.fundConfirmDate !== undefined
+        || item.fundArrivalDate !== undefined
+        || item.fundFee !== undefined
+        || item.feeRate !== undefined
+        || item.cashAccountId !== undefined
+        || item.fundAccountId !== undefined;
+      const linkedFundTransaction = needsFundSync
+        ? await findFundTransactionForEntryId(prisma, { id, householdId: ctx.householdId, syncLegacy: false }).catch(() => null)
+        : null;
+      const currentFundCode = String(linkedFundTransaction?.fundCode ?? existing.fundCode ?? "").trim();
+      const currentProductType = String(linkedFundTransaction?.fundProductType ?? existing.fundProductType ?? "");
+      const currentSubtype = String(linkedFundTransaction?.fundSubtype ?? existing.fundSubtype ?? "");
+      const dateCashReceiptLike = currentSubtype === "redeem" || currentSubtype === "switch_out" || currentSubtype === "dividend_cash";
+      const fundAccountIdForDateRule = linkedFundTransaction?.fundAccountId ?? (dateCashReceiptLike ? finalAccountId : finalToAccountId);
+      const fundTradingCalendar = resolveAccountMeta(fundAccountIdForDateRule)?.tradingCalendar ?? "cn_fund";
+      if (item.fundConfirmDate !== undefined) {
+        let value = String(item.fundConfirmDate).trim();
+        if (value) {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+            data.fundConfirmDate = new Date(`${value}T00:00:00.000Z`);
+          } else {
+            const offset = parseTradingDayOffsetUpdate(value);
+            if (offset == null) return NextResponse.json({ ok: false, code: "INVALID_DATE", error: "Fund confirm date must be YYYY-MM-DD or a non-negative T+N offset" }, { status: 400 });
+            const nextYmd = addTradingDaysUtc(ymd(data.date instanceof Date ? data.date : existing.date), offset, fundTradingCalendar);
+            data.fundConfirmDate = new Date(`${nextYmd}T00:00:00.000Z`);
+            value = nextYmd;
+          }
+        } else {
+          data.fundConfirmDate = null;
+        }
+        changed.push({ id, date: ymd(existing.date), oldValue: existing.fundConfirmDate ? ymd(existing.fundConfirmDate) : "", newValue: value, field: "fundConfirmDate" });
+      }
+
+      if (item.fundArrivalDate !== undefined) {
+        let value = String(item.fundArrivalDate).trim();
+        if (value) {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+            data.fundArrivalDate = new Date(`${value}T00:00:00.000Z`);
+          } else {
+            const offset = parseTradingDayOffsetUpdate(value);
+            if (offset == null) return NextResponse.json({ ok: false, code: "INVALID_DATE", error: "Fund arrival date must be YYYY-MM-DD or a non-negative T+N offset" }, { status: 400 });
+            const nextYmd = addTradingDaysUtc(ymd(data.date instanceof Date ? data.date : existing.date), offset, fundTradingCalendar);
+            data.fundArrivalDate = new Date(`${nextYmd}T00:00:00.000Z`);
+            value = nextYmd;
+          }
+        } else {
+          data.fundArrivalDate = null;
+        }
+        changed.push({ id, date: ymd(existing.date), oldValue: existing.fundArrivalDate ? ymd(existing.fundArrivalDate) : "", newValue: value, field: "fundArrivalDate" });
+      }
+
+      if (item.fundFee !== undefined || item.feeRate !== undefined || item.cashAccountId !== undefined || item.fundAccountId !== undefined) {
+        const hasFeeUpdate = item.fundFee !== undefined || item.feeRate !== undefined;
+        const feeSupported = !hasFeeUpdate || (
+          finalType === TransactionType.investment
+          && currentFundCode
+          && currentProductType !== "metal"
+          && currentProductType !== "wealth"
+          && currentSubtype !== "dividend_cash"
+          && currentSubtype !== "dividend_reinvest"
+        );
+        if (!feeSupported) {
+          return NextResponse.json({ ok: false, code: "FUND_FEE_NOT_SUPPORTED", error: "Selected record does not support fund fee updates" }, { status: 400 });
+        }
+
+        const cashReceiptLike = currentSubtype === "redeem" || currentSubtype === "switch_out";
+        const fundAccountId = linkedFundTransaction?.fundAccountId ?? (cashReceiptLike ? finalAccountId : finalToAccountId);
+        if (!fundAccountId) {
+          return NextResponse.json({ ok: false, code: "FUND_ACCOUNT_REQUIRED", error: "Fund account is required for fee updates" }, { status: 400 });
+        }
+        const feeType = cashReceiptLike ? "redeem" : "buy";
+        const feeEffectiveDate = data.fundConfirmDate instanceof Date
+          ? data.fundConfirmDate
+          : linkedFundTransaction?.confirmDate ?? existing.fundConfirmDate ?? (data.date instanceof Date ? data.date : existing.date);
+
+        let requestedFee: number | null | undefined;
+        let requestedFeeRate: number | null = null;
+        if (hasFeeUpdate && item.feeRate !== undefined) {
+          const raw = typeof item.feeRate === "number" ? String(item.feeRate) : String(item.feeRate ?? "").trim();
+          const baseRate = await getFundFeeRateByDate(fundAccountId, currentFundCode, feeEffectiveDate, feeType);
+          const parsed = raw ? parseAmountUpdate(raw, Math.max(0, baseRate)) : 0;
+          if (parsed == null) return NextResponse.json({ ok: false, code: "INVALID_FEE_RATE", error: "Fee rate must be a non-negative number or expression" }, { status: 400 });
+          requestedFeeRate = parsed;
+          await setFundFeeRateByDate(fundAccountId, currentFundCode, parsed, feeEffectiveDate, feeType);
+          feeRateTouchedIds.add(id);
+          changed.push({ id, date: ymd(existing.date), oldValue: String(baseRate), newValue: String(parsed), field: "feeRate" });
+        }
+
+        if (hasFeeUpdate && item.fundFee !== undefined) {
+          const raw = typeof item.fundFee === "number" ? String(item.fundFee) : String(item.fundFee ?? "").trim();
+          if (!raw) {
+            requestedFee = null;
+          } else {
+            const baseFee = Math.max(0, Number(linkedFundTransaction?.fee ?? existing.fundFee ?? 0));
+            const parsed = parseAmountUpdate(raw, baseFee);
+            if (parsed == null) return NextResponse.json({ ok: false, code: "INVALID_FUND_FEE", error: "Fund fee must be a non-negative number or expression" }, { status: 400 });
+            requestedFee = parsed;
+          }
+          fundFeeTouchedIds.add(id);
+          changed.push({ id, date: ymd(existing.date), oldValue: String(Number(linkedFundTransaction?.fee ?? existing.fundFee ?? 0)), newValue: requestedFee == null ? "" : String(requestedFee), field: "fundFee" });
+        }
+
+        if (linkedFundTransaction) {
+          const nav = Number(linkedFundTransaction.nav ?? 0);
+          const units = Number(linkedFundTransaction.units ?? 0);
+          const grossAmount = Math.max(0, Number(linkedFundTransaction.grossAmount ?? 0));
+          const refundAmount = Math.max(0, Number(linkedFundTransaction.refundAmount ?? 0));
+          const feeBaseAmount = cashReceiptLike && nav > 0 && units > 0 ? nav * units : Math.max(0, grossAmount - refundAmount);
+          const finalFee = requestedFee !== undefined
+            ? requestedFee
+            : requestedFeeRate != null && feeBaseAmount > 0
+              ? Number((feeBaseAmount * requestedFeeRate / 100).toFixed(2))
+              : undefined;
+          const fundTransactionData: Record<string, unknown> = {};
+          if (item.cashAccountId !== undefined || item.fundAccountId !== undefined) {
+            const nextCashAccountId = item.cashAccountId !== undefined ? String(item.cashAccountId).trim() : "";
+            const nextFundAccountId = item.fundAccountId !== undefined ? String(item.fundAccountId).trim() : "";
+            if (nextCashAccountId) fundTransactionData.cashAccountId = nextCashAccountId;
+            if (nextFundAccountId) fundTransactionData.fundAccountId = nextFundAccountId;
+          }
+          if (finalFee !== undefined) {
+            const feeValue = finalFee != null && finalFee > 0 ? finalFee : null;
+            fundTransactionData.fee = feeValue;
+            data.fundFee = feeValue;
+          }
+          if (!cashReceiptLike && finalFee !== undefined && nav > 0) {
+            const fundUnitsDecimals = await getAccountFundUnitsDecimals(fundAccountId);
+            const nextUnits = calculateConfirmedBuyUnits({
+              grossAmount,
+              refundAmount,
+              fee: finalFee ?? 0,
+              nav,
+              roundUnits: (value) => roundFundUnits(value, fundUnitsDecimals),
+            });
+            if (nextUnits != null) {
+              fundTransactionData.units = nextUnits;
+              data.fundUnits = nextUnits;
+            }
+          }
+          if (cashReceiptLike && finalFee !== undefined && nav > 0 && units > 0) {
+            const nextArrivalAmount = Math.max(0, nav * units - (finalFee ?? 0));
+            const arrivalAmount = Number(nextArrivalAmount.toFixed(2));
+            fundTransactionData.arrivalAmount = arrivalAmount;
+            data.fundArrivalAmount = arrivalAmount;
+            data.amount = arrivalAmount;
+          }
+          if (Object.keys(fundTransactionData).length > 0) {
+            await prisma.fundTransaction.update({ where: { id: linkedFundTransaction.id }, data: fundTransactionData });
+          }
+          addFundPositionRecalcRequest(fundAccountId, currentFundCode);
+        } else if (requestedFee !== undefined) {
+          data.fundFee = requestedFee != null && requestedFee > 0 ? requestedFee : null;
+        }
+      }
+
       if (finalType === TransactionType.expense || finalType === TransactionType.income) {
         const finalDate = data.date instanceof Date ? data.date : existing.date;
         const finalPostedAt = Object.prototype.hasOwnProperty.call(data, "postedAt")
@@ -554,7 +778,7 @@ export async function POST(req: NextRequest) {
       }
 
       const hasRecordDataUpdate = Object.keys(data).length > 0;
-      if (!hasRecordDataUpdate && !tagUpdateRequested) continue;
+      if (!hasRecordDataUpdate && !tagUpdateRequested && item.fundFee === undefined && item.feeRate === undefined) continue;
 
       const result = hasRecordDataUpdate
         ? await prisma.txRecord.updateMany({
@@ -602,12 +826,16 @@ export async function POST(req: NextRequest) {
         where: { id: { in: Array.from(touchedRecordIds) }, deletedAt: null, ...hidFilter },
         select: {
           id: true,
+          date: true,
           type: true,
           fundCode: true,
           fundSubtype: true,
           source: true,
           amount: true,
           fundNav: true,
+          fundUnits: true,
+          fundFee: true,
+          fundArrivalAmount: true,
           fundConfirmDate: true,
           fundArrivalDate: true,
           fundSourceEntryId: true,
@@ -619,7 +847,9 @@ export async function POST(req: NextRequest) {
         },
       });
 
-      const fundCodesByInvestAcc = new Map<string, Set<string>>();
+      const fundCodesByInvestAcc = new Map<string, Set<string>>(
+        Array.from(fundPositionRecalcRequests.entries()).map(([acctId, codes]) => [acctId, new Set(codes)]),
+      );
       const metalAccountsToRecalc = new Set<string>();
 
       for (const r of touched) {
@@ -640,10 +870,15 @@ export async function POST(req: NextRequest) {
           fundCodesByInvestAcc.get(investAccId)!.add(r.fundCode);
         }
 
-        if (amountTouchedIds.has(r.id) && r.fundSubtype === "buy" && r.fundConfirmDate && r.fundNav != null && Number(r.fundNav) > 0) {
+        const shouldRefreshBuyFee = (amountTouchedIds.has(r.id) || feeRateTouchedIds.has(r.id) || fundFeeTouchedIds.has(r.id))
+          && r.fundSubtype === "buy"
+          && r.fundNav != null
+          && Number(r.fundNav) > 0;
+        if (shouldRefreshBuyFee) {
           const investIdForFee = r.toAccountId;
           if (!investIdForFee) continue;
-          const feeRateRaw = await getFundFeeRateByDate(investIdForFee, r.fundCode, r.fundConfirmDate, "buy");
+          const feeEffectiveDate = r.fundConfirmDate ?? r.date;
+          const feeRateRaw = await getFundFeeRateByDate(investIdForFee, r.fundCode, feeEffectiveDate, "buy");
           const feeRate = feeRateRaw / 100;
           const amountAbs = Math.abs(Number(r.amount));
           const related = await prisma.txRecord.findMany({
@@ -691,7 +926,9 @@ export async function POST(req: NextRequest) {
           })));
           const refundAmount = refundAmountByBuyId.get(r.id) ?? 0;
           const confirmedAmount = Math.max(0, amountAbs - refundAmount);
-          const fee = Number((confirmedAmount * feeRate).toFixed(2));
+          const fee = fundFeeTouchedIds.has(r.id)
+            ? Math.max(0, Number(r.fundFee ?? 0))
+            : Number((confirmedAmount * feeRate).toFixed(2));
           const nav = Number(r.fundNav);
           const fundUnitsDecimals = await getAccountFundUnitsDecimals(investIdForFee);
           const units = calculateConfirmedBuyUnits({
@@ -705,6 +942,30 @@ export async function POST(req: NextRequest) {
             where: { id: r.id },
             data: { fundFee: fee, ...(units != null ? { fundUnits: units } : {}) },
           });
+        }
+
+        const shouldRefreshRedeemFee = (feeRateTouchedIds.has(r.id) || fundFeeTouchedIds.has(r.id))
+          && (r.fundSubtype === "redeem" || r.fundSubtype === "switch_out")
+          && r.fundNav != null
+          && r.fundUnits != null
+          && Number(r.fundNav) > 0
+          && Number(r.fundUnits) > 0;
+        if (shouldRefreshRedeemFee) {
+          const investIdForFee = r.accountId;
+          if (!investIdForFee) continue;
+          const nav = Number(r.fundNav);
+          const units = Number(r.fundUnits);
+          const grossAmount = nav * units;
+          const fee = fundFeeTouchedIds.has(r.id)
+            ? Math.max(0, Number(r.fundFee ?? 0))
+            : Number((grossAmount * (await getFundFeeRateByDate(investIdForFee, r.fundCode, r.fundConfirmDate ?? r.createdAt, "redeem")) / 100).toFixed(2));
+          const arrivalAmount = Number(Math.max(0, grossAmount - fee).toFixed(2));
+          await prisma.txRecord.update({
+            where: { id: r.id },
+            data: { fundFee: fee, fundArrivalAmount: arrivalAmount, amount: arrivalAmount },
+          });
+          if (r.accountId) balanceAccountIds.add(r.accountId);
+          if (r.toAccountId) balanceAccountIds.add(r.toAccountId);
         }
       }
 
@@ -722,6 +983,7 @@ export async function POST(req: NextRequest) {
       for (const id of touchedRecordIds) {
         await syncIndependentBusinessTransactionFromTxRecord(prisma, { businessEntryId: id }).catch(() => {});
       }
+      await syncFundTransactionsFromTxRecords(Array.from(touchedRecordIds), prisma).catch(() => {});
     }
 
     await saveEntryUndo(

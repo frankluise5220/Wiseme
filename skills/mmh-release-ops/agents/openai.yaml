@@ -1,4 +1,0 @@
-interface:
-  display_name: "MMH Release Ops"
-  short_description: "Operate MMH NAS release checks."
-  default_prompt: "Use $mmh-release-ops to prepare, verify, or troubleshoot an MMH NAS release."

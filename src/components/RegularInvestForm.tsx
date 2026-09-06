@@ -11,14 +11,14 @@ import { useAccountSSFilter } from "./accountSSFilter";
 import { CATEGORY_SMART_SELECT_BEHAVIOR, type CategorySmartSelectOption } from "./categorySmartSelect";
 import { NestedAddModal } from "./EntityCreateForm";
 import { useI18n } from "@/lib/i18n";
-import { scheduledTaskTypeLabel, type ScheduledTaskType } from "@/lib/scheduled-task";
+import { scheduledTaskTypeLabel, type LoanScheduledPlanRole, type ScheduledTaskType } from "@/lib/scheduled-task";
 import { sortOptionsByRecent, useRecentAccountIds } from "@/lib/client/recentAccounts";
 import { useCloseOnNavigation } from "@/lib/client/useCloseOnNavigation";
 import { formatDateUtc, lastDayOfMonthUtc } from "@/lib/date-utils";
 import { decodeYearlyExecutionDay, encodeYearlyExecutionDay, isYearlyExecutionDay } from "@/lib/scheduled-task-date";
 import {
   INSTALLMENT_REPAYMENT_METHOD,
-  isInstallmentRepaymentMethod,
+  allowsZeroAnnualRateRepaymentMethod,
   normalizeLoanRepaymentMethod,
 } from "@/lib/loan-repayment";
 
@@ -317,6 +317,7 @@ interface RegularInvestFormData {
   accountId: string;
   fundCode: string;
   fundName: string;
+  planName: string;
   categoryId: string;
   categoryName: string;
   insuranceProductId: string;
@@ -356,6 +357,7 @@ interface EditData {
   accountId: string;
   fundCode: string;
   fundName: string | null;
+  planName?: string | null;
   amount: number;
   intervalUnit: string;
   intervalValue: number;
@@ -374,6 +376,7 @@ interface EditData {
   annualRate?: number | null;
   repaymentMethod?: string | null;
   repaymentIntervalMonths?: number | null;
+  taskLoanPlanRole?: LoanScheduledPlanRole | null;
   skipPendingPreceding: boolean;
 }
 
@@ -529,19 +532,21 @@ export function RegularInvestForm({
       const executionDay = editData.executionDay != null ? String(editData.executionDay) : "";
       const secondaryExecutionDay = editData.secondaryExecutionDay != null ? String(editData.secondaryExecutionDay) : "";
       const yearlyExecutionDayValue = editData.executionDay != null ? String(editData.executionDay) : "";
+      const taskFallbackName = editData.fundName || editData.taskCategoryName || (
+        editTaskType === "income"
+          ? t("transaction.type.income")
+          : editTaskType === "expense"
+            ? t("transaction.type.expense")
+            : scheduledTaskTypeLabel(editTaskType)
+      );
       return {
         taskType: editTaskType,
         accountId: editData.accountId || "",
         // Non-fund plans use fundCode as a storage compatibility field. Never
         // expose that task-type enum as a fund code in the form.
         fundCode: isFundEditTask ? editData.fundCode || "" : "",
-        fundName: editData.fundName || editData.taskCategoryName || (
-          editTaskType === "income"
-            ? t("transaction.type.income")
-            : editTaskType === "expense"
-              ? t("transaction.type.expense")
-              : scheduledTaskTypeLabel(editTaskType)
-        ),
+        fundName: taskFallbackName,
+        planName: editData.planName || taskFallbackName,
         categoryId: editData.taskCategoryId || "",
         categoryName: editData.taskCategoryName || "",
         insuranceProductId: editData.taskInsuranceProductId || "",
@@ -588,6 +593,7 @@ export function RegularInvestForm({
       accountId: investmentAccounts && investmentAccounts.length > 0 ? "" : accountId,
       fundCode: prefilledFundCode ?? "",
       fundName: prefilledFundName ?? "",
+      planName: prefilledFundName ?? "",
       categoryId: "",
       categoryName: "",
       insuranceProductId: "",
@@ -619,6 +625,15 @@ export function RegularInvestForm({
   }
 
   const [formData, setFormData] = useState<RegularInvestFormData>(getDefaultFormData);
+
+  function derivedNamePatch(prev: RegularInvestFormData, nextFundName: string) {
+    const currentPlanName = prev.planName.trim();
+    const previousFundName = prev.fundName.trim();
+    if (!currentPlanName || currentPlanName === previousFundName) {
+      return { fundName: nextFundName, planName: nextFundName };
+    }
+    return { fundName: nextFundName };
+  }
 
   useEffect(() => {
     setFormData(getDefaultFormData());
@@ -714,7 +729,7 @@ export function RegularInvestForm({
   async function handleFundCodeBlur() {
     const code = formData.fundCode.trim();
     if (!code || code.length !== 6) {
-      setFormData(d => ({ ...d, fundName: "" }));
+      setFormData(d => ({ ...d, ...derivedNamePatch(d, "") }));
       return;
     }
 
@@ -733,9 +748,9 @@ export function RegularInvestForm({
       const res = await fetch(`/api/v1/fund/name?code=${code}`);
       const data = await res.json();
       if (data.ok && data.name) {
-        setFormData(f => ({ ...f, fundName: data.name }));
+        setFormData(f => ({ ...f, ...derivedNamePatch(f, data.name) }));
       } else {
-        setFormData(f => ({ ...f, fundName: "" }));
+        setFormData(f => ({ ...f, ...derivedNamePatch(f, "") }));
       }
     } finally {
       setNameLoading(false);
@@ -777,9 +792,9 @@ export function RegularInvestForm({
       const res = await fetch(`/api/v1/fund/name?code=${code}`);
       const data = await res.json();
       if (data.ok && data.name) {
-        setFormData(f => ({ ...f, fundName: data.name }));
+        setFormData(f => ({ ...f, ...derivedNamePatch(f, data.name) }));
       } else {
-        setFormData(f => ({ ...f, fundName: "" }));
+        setFormData(f => ({ ...f, ...derivedNamePatch(f, "") }));
       }
     } finally {
       setNameLoading(false);
@@ -833,9 +848,9 @@ export function RegularInvestForm({
       return;
     }
     const submitRepaymentMethod = normalizeLoanRepaymentMethod(formData.repaymentMethod);
-    const isInstallmentLoanRepayment = isInstallmentRepaymentMethod(submitRepaymentMethod);
+    const allowsZeroLoanAnnualRate = allowsZeroAnnualRateRepaymentMethod(submitRepaymentMethod);
     const isFixedLoanRepayment = formData.taskType === "loan_repayment" && FIXED_LOAN_REPAYMENT_METHODS.has(submitRepaymentMethod);
-    const loanAnnualRate = parseLoanAnnualRateInput(formData.annualRate, isInstallmentLoanRepayment);
+    const loanAnnualRate = parseLoanAnnualRateInput(formData.annualRate, allowsZeroLoanAnnualRate);
     const loanRepaymentIntervalMonths = parseInt(lockedLoanRepaymentIntervalMonths || "1", 10);
     if (isFixedLoanRepayment) {
       if (loanAnnualRate == null) {
@@ -907,6 +922,7 @@ export function RegularInvestForm({
       const submitFundName = isOrdinaryTask
         ? (formData.categoryName.trim() || formData.fundName.trim() || taskTypeTitle)
         : (formData.fundName.trim() || formData.fundCode.trim() || scheduledTaskTypeLabel(formData.taskType));
+      const submitPlanName = formData.planName.trim() || (mode === "create" ? submitFundName : "");
       const submitCashAccountId = isOrdinaryTask ? "" : formData.cashAccountId || "";
 
       if (mode === "edit" && editData) {
@@ -921,6 +937,7 @@ export function RegularInvestForm({
           fd.set("accountId", formData.accountId);
           fd.set("fundCode", submitFundCode);
           fd.set("fundName", submitFundName);
+          fd.set("planName", submitPlanName);
           fd.set("categoryId", isOrdinaryTask ? formData.categoryId : "");
           fd.set("categoryName", isOrdinaryTask ? formData.categoryName.trim() : "");
           fd.set("note", isOrdinaryTask ? formData.note.trim() : "");
@@ -954,6 +971,7 @@ export function RegularInvestForm({
             accountId: formData.accountId,
             fundCode: submitFundCode,
             fundName: submitFundName,
+            planName: submitPlanName,
             categoryId: isOrdinaryTask ? formData.categoryId || null : null,
             categoryName: isOrdinaryTask ? formData.categoryName.trim() || null : null,
             note: isOrdinaryTask ? formData.note.trim() || null : null,
@@ -1000,6 +1018,7 @@ export function RegularInvestForm({
           fd.set("accountId", formData.accountId);
           fd.set("fundCode", submitFundCode);
           fd.set("fundName", submitFundName);
+          fd.set("planName", submitPlanName);
           fd.set("categoryId", isOrdinaryTask ? formData.categoryId : "");
           fd.set("categoryName", isOrdinaryTask ? formData.categoryName.trim() : "");
           fd.set("note", isOrdinaryTask ? formData.note.trim() : "");
@@ -1034,6 +1053,7 @@ export function RegularInvestForm({
             insuranceProductId: formData.insuranceProductId || null,
             fundCode: submitFundCode,
             fundName: submitFundName,
+            planName: submitPlanName || submitFundName,
             categoryId: isOrdinaryTask ? formData.categoryId || null : null,
             categoryName: isOrdinaryTask ? formData.categoryName.trim() || null : null,
             note: isOrdinaryTask ? formData.note.trim() || null : null,
@@ -1097,6 +1117,10 @@ export function RegularInvestForm({
   const isInsuranceTask = formData.taskType === "insurance_premium";
   const isOrdinaryTask = isOrdinaryTaskType(formData.taskType);
   const scheduleLocked = isLoanTask || mode === "edit";
+  // Loan-derived fields and the schedule-derived repayment amount are locked
+  // when editing a loan plan: the repayment table is the source of truth and
+  // auto-debit edits only allow funding account and next run date changes.
+  const loanDerivedFieldsLocked = isLoanTask && mode === "edit";
   const lockedEditInterval = mode === "edit" && editData
     ? normalizeBiweekFormData(editData.intervalUnit || "day", String(editData.intervalValue || 1))
     : null;
@@ -1107,6 +1131,13 @@ export function RegularInvestForm({
   const displayedIntervalValue = isLoanTask ? lockedLoanRepaymentIntervalMonths || "1" : lockedEditInterval?.intervalValue ?? formData.intervalValue;
   const isOneTimeInterval = displayedIntervalUnit === "once";
   const startDateLocked = mode === "edit";
+  // The "cycle" row flattens to 3 columns (unit / interval / execution day)
+  // whenever the optional secondary execution day is not rendered; the 4th
+  // column only appears for single-interval week/month/year in create mode.
+  const showSecondaryExecutionDay = !isOneTimeInterval
+    && mode !== "edit"
+    && positiveIntervalValue(formData.intervalValue) === 1
+    && (displayedIntervalUnit === "week" || displayedIntervalUnit === "month" || displayedIntervalUnit === "year");
   const nextRunDateMin = mode === "edit" ? toDateInput(editData?.startDate) : undefined;
   const readonlyTransferFromLabel =
     cashOptions.find((option) => option.id === formData.cashAccountId)?.label
@@ -1121,40 +1152,43 @@ export function RegularInvestForm({
     confirmDaysTouchedRef.current = false;
     arrivalDaysTouchedRef.current = false;
     const nextIsOrdinaryTask = isOrdinaryTaskType(taskType);
-    setFormData((prev) => ({
-      ...prev,
-      taskType,
-      accountId: taskType === "fund_regular_invest"
-        ? ""
-        : taskType === "loan_repayment"
-          ? ""
-          : taskType === "transfer"
-            ? ""
-            : nextIsOrdinaryTask
-              ? (ordinaryAccountList.some((item) => item.id === prev.accountId) ? prev.accountId : "")
-              : selectedInsuranceProduct?.accountId ?? "",
-      fundCode: taskType === "fund_regular_invest" && prev.taskType === "fund_regular_invest" ? prev.fundCode : "",
-      fundName: taskType === "fund_regular_invest"
+    setFormData((prev) => {
+      const nextFundName = taskType === "fund_regular_invest"
         ? prev.fundName
         : nextIsOrdinaryTask
           ? (taskType === "income" ? t("transaction.type.income") : t("transaction.type.expense"))
-          : scheduledTaskTypeLabel(taskType),
-      categoryId: nextIsOrdinaryTask && isOrdinaryTaskType(prev.taskType) && prev.taskType === taskType ? prev.categoryId : "",
-      categoryName: nextIsOrdinaryTask && isOrdinaryTaskType(prev.taskType) && prev.taskType === taskType ? prev.categoryName : "",
-      insuranceProductId: taskType === "insurance_premium" ? prev.insuranceProductId : "",
-      policyholderGroupId: taskType === "insurance_premium" ? prev.policyholderGroupId : "",
-      intervalUnit: taskType === "insurance_premium" ? "month" : prev.intervalUnit,
-      intervalValue: taskType === "insurance_premium" ? "1" : prev.intervalValue,
-      executionDay: taskType === "insurance_premium" ? "" : prev.executionDay,
-      cashAccountId: nextIsOrdinaryTask ? "" : prev.cashAccountId,
-      feeRate: taskType === "fund_regular_invest" ? prev.feeRate : "0",
-      confirmDays: taskType === "fund_regular_invest" ? prev.confirmDays : "0",
-      arrivalDays: taskType === "fund_regular_invest" ? prev.arrivalDays : "0",
-      annualRate: taskType === "loan_repayment" ? prev.annualRate : "",
-      repaymentMethod: taskType === "loan_repayment" ? normalizeLoanRepaymentMethod(prev.repaymentMethod) : "自由还款",
-      repaymentIntervalMonths: taskType === "loan_repayment" ? prev.repaymentIntervalMonths : "1",
-      skipPendingPreceding: taskType === "fund_regular_invest" ? prev.skipPendingPreceding : false,
-    }));
+          : scheduledTaskTypeLabel(taskType);
+      return {
+        ...prev,
+        ...derivedNamePatch(prev, nextFundName),
+        taskType,
+        accountId: taskType === "fund_regular_invest"
+          ? ""
+          : taskType === "loan_repayment"
+            ? ""
+            : taskType === "transfer"
+              ? ""
+              : nextIsOrdinaryTask
+                ? (ordinaryAccountList.some((item) => item.id === prev.accountId) ? prev.accountId : "")
+                : selectedInsuranceProduct?.accountId ?? "",
+        fundCode: taskType === "fund_regular_invest" && prev.taskType === "fund_regular_invest" ? prev.fundCode : "",
+        categoryId: nextIsOrdinaryTask && isOrdinaryTaskType(prev.taskType) && prev.taskType === taskType ? prev.categoryId : "",
+        categoryName: nextIsOrdinaryTask && isOrdinaryTaskType(prev.taskType) && prev.taskType === taskType ? prev.categoryName : "",
+        insuranceProductId: taskType === "insurance_premium" ? prev.insuranceProductId : "",
+        policyholderGroupId: taskType === "insurance_premium" ? prev.policyholderGroupId : "",
+        intervalUnit: taskType === "insurance_premium" ? "month" : prev.intervalUnit,
+        intervalValue: taskType === "insurance_premium" ? "1" : prev.intervalValue,
+        executionDay: taskType === "insurance_premium" ? "" : prev.executionDay,
+        cashAccountId: nextIsOrdinaryTask ? "" : prev.cashAccountId,
+        feeRate: taskType === "fund_regular_invest" ? prev.feeRate : "0",
+        confirmDays: taskType === "fund_regular_invest" ? prev.confirmDays : "0",
+        arrivalDays: taskType === "fund_regular_invest" ? prev.arrivalDays : "0",
+        annualRate: taskType === "loan_repayment" ? prev.annualRate : "",
+        repaymentMethod: taskType === "loan_repayment" ? normalizeLoanRepaymentMethod(prev.repaymentMethod) : "自由还款",
+        repaymentIntervalMonths: taskType === "loan_repayment" ? prev.repaymentIntervalMonths : "1",
+        skipPendingPreceding: taskType === "fund_regular_invest" ? prev.skipPendingPreceding : false,
+      };
+    });
   }
 
   function handleIntervalUnitChange(intervalUnit: string) {
@@ -1288,6 +1322,16 @@ export function RegularInvestForm({
                 ))}
               </div>
 
+              <div className="space-y-1">
+                <div className="text-xs font-medium text-slate-600">{t("regularInvest.planName")}</div>
+                <input
+                  className="h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-300"
+                  value={formData.planName}
+                  onChange={(e) => setFormData(d => ({ ...d, planName: e.target.value }))}
+                  placeholder={t("regularInvest.placeholder.planName")}
+                />
+              </div>
+
               {isTransferTask ? (
                 <div className={`grid items-end gap-3 rounded-lg border border-slate-100 bg-slate-50/60 p-2 ${mode === "edit" ? "grid-cols-2" : "grid-cols-[1fr_auto_1fr]"}`}>
                   <div className="space-y-1">
@@ -1297,13 +1341,15 @@ export function RegularInvestForm({
                         {readonlyTransferFromLabel}
                       </div>
                     ) : (
-                      <SmartSelect mode="single" value={formData.cashAccountId}
-                        onChange={(id) => setFormData(d => ({ ...d, cashAccountId: id }))}
-                        options={cashOptions}
-                        placeholder={t("regularInvest.placeholder.transferFrom")}
-                        onCreateClick={() => setNestedEntityType("cash-account")}
-                        createLabel={t("settings.accounts.add")}
-                        onCycleOwnerFilter={cfCycle} ownerFilterLabel={cfLabel} />
+                      <div className={REQUIRED_FIELD_CLASS}>
+                        <SmartSelect mode="single" value={formData.cashAccountId}
+                          onChange={(id) => setFormData(d => ({ ...d, cashAccountId: id }))}
+                          options={cashOptions}
+                          placeholder={t("regularInvest.placeholder.transferFrom")}
+                          onCreateClick={() => setNestedEntityType("cash-account")}
+                          createLabel={t("settings.accounts.add")}
+                          onCycleOwnerFilter={cfCycle} ownerFilterLabel={cfLabel} />
+                      </div>
                     )}
                   </div>
 
@@ -1320,9 +1366,9 @@ export function RegularInvestForm({
                           const nextTarget = transferTargetOptions.find((item) => item.id === fromId);
                           setFormData(d => ({
                             ...d,
+                            ...derivedNamePatch(d, nextTarget?.label ?? d.fundName),
                             cashAccountId: toId,
                             accountId: fromId,
-                            fundName: nextTarget?.label ?? d.fundName,
                           }));
                         }}
                         disabled={!formData.cashAccountId && !formData.accountId}
@@ -1336,10 +1382,16 @@ export function RegularInvestForm({
 
                   <div className="space-y-1">
                     <div className="text-xs font-medium text-slate-600">{t("txForm.transferTo")}</div>
-                    <SmartSelect mode="single" value={formData.accountId}
-                      onChange={(id) => setFormData(d => ({ ...d, accountId: id, fundName: transferTargetOptions.find((item) => item.id === id)?.label ?? "转账" }))}
-                      options={transferTargetOptions}
-                      placeholder={t("regularInvest.placeholder.transferTo")} />
+                    <div className={REQUIRED_FIELD_CLASS}>
+                      <SmartSelect mode="single" value={formData.accountId}
+                        onChange={(id) => setFormData(d => ({
+                          ...d,
+                          ...derivedNamePatch(d, transferTargetOptions.find((item) => item.id === id)?.label ?? t("transaction.type.transfer")),
+                          accountId: id,
+                        }))}
+                        options={transferTargetOptions}
+                        placeholder={t("regularInvest.placeholder.transferTo")} />
+                    </div>
                   </div>
                 </div>
               ) : isInsuranceTask ? (
@@ -1354,12 +1406,13 @@ export function RegularInvestForm({
                       <SmartSelect mode="single" value={formData.insuranceProductId}
                         onChange={(id) => {
                           const product = (insuranceProductOptions ?? []).find((item) => item.id === id);
+                          const nextFundName = product?.label ?? t("regularInvest.taskType.insurancePremium");
                           setFormData(d => ({
                             ...d,
+                            ...derivedNamePatch(d, nextFundName),
                             insuranceProductId: id,
                             policyholderGroupId: product?.ownerGroupId ?? d.policyholderGroupId,
                             accountId: product?.accountId ?? "",
-                            fundName: product?.label ?? "保险缴费",
                             amount: !d.amount && product?.premiumAmount != null ? String(product.premiumAmount) : d.amount,
                             intervalUnit: product?.premiumFrequencyMonths === 12
                               ? "year"
@@ -1420,11 +1473,12 @@ export function RegularInvestForm({
                         onChange={(id) => {
                           const category = ordinaryCategoryOptions.find((option) => option.id === id);
                           const categoryName = category?.sourceName ?? cleanOptionLabel(category?.label);
+                          const nextFundName = categoryName || (formData.taskType === "income" ? t("transaction.type.income") : t("transaction.type.expense"));
                           setFormData(d => ({
                             ...d,
+                            ...derivedNamePatch(d, nextFundName),
                             categoryId: id,
                             categoryName,
-                            fundName: categoryName || (d.taskType === "income" ? t("transaction.type.income") : t("transaction.type.expense")),
                           }));
                         }}
                         options={ordinaryCategoryOptions}
@@ -1432,6 +1486,23 @@ export function RegularInvestForm({
                         behavior={REGULAR_INVEST_CATEGORY_SMART_SELECT_BEHAVIOR} />
                     </div>
                   </div>
+                </div>
+              ) : isLoanTask ? (
+                <div className="space-y-3">
+                  {cashAccountList.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-slate-600">{t("txForm.cashAccount")}</div>
+                      <div className={REQUIRED_FIELD_CLASS}>
+                        <SmartSelect mode="single" value={formData.cashAccountId}
+                          onChange={(id) => setFormData(d => ({ ...d, cashAccountId: id }))}
+                          options={cashOptions}
+                          placeholder={t("regularInvest.placeholder.account")}
+                          onCreateClick={() => setNestedEntityType("cash-account")}
+                          createLabel={t("settings.accounts.add")}
+                          onCycleOwnerFilter={cfCycle} ownerFilterLabel={cfLabel} />
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="grid grid-cols-2 gap-3">
@@ -1456,10 +1527,20 @@ export function RegularInvestForm({
                         </div>
                       )
                     ) : isLoanTask ? (
-                      <SmartSelect mode="single" value={formData.accountId}
-                        onChange={(id) => setFormData(d => ({ ...d, accountId: id, fundName: loanOptions.find((item) => item.id === id)?.label ?? "还贷款" }))}
-                        options={loanOptions}
-                        placeholder={t("regularInvest.placeholder.loanAccount")} />
+                      mode === "edit" ? (
+                        <div className="h-9 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm text-slate-600 flex items-center">
+                          {displayAccountLabel}
+                        </div>
+                      ) : (
+                        <SmartSelect mode="single" value={formData.accountId}
+                          onChange={(id) => setFormData(d => ({
+                            ...d,
+                            ...derivedNamePatch(d, loanOptions.find((item) => item.id === id)?.label ?? scheduledTaskTypeLabel("loan_repayment")),
+                            accountId: id,
+                          }))}
+                          options={loanOptions}
+                          placeholder={t("regularInvest.placeholder.loanAccount")} />
+                      )
                     ) : mode === "edit" && isInsuranceTask ? (
                       <div className="h-9 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 flex items-center">
                         {selectedInsuranceProduct?.label || formData.fundName || t("regularInvest.taskType.insurancePremium")}
@@ -1468,11 +1549,12 @@ export function RegularInvestForm({
                       <SmartSelect mode="single" value={formData.insuranceProductId}
                         onChange={(id) => {
                           const product = (insuranceProductOptions ?? []).find((item) => item.id === id);
+                          const nextFundName = product?.label ?? t("regularInvest.taskType.insurancePremium");
                           setFormData(d => ({
                             ...d,
+                            ...derivedNamePatch(d, nextFundName),
                             insuranceProductId: id,
                             accountId: product?.accountId ?? "",
-                            fundName: product?.label ?? "保险缴费",
                           }));
                         }}
                         options={insuranceOptions}
@@ -1530,7 +1612,7 @@ export function RegularInvestForm({
                     </div>
                     <input
                       value={formData.fundName}
-                      onChange={(e) => setFormData(d => ({ ...d, fundName: e.target.value }))}
+                      onChange={(e) => setFormData(d => ({ ...d, ...derivedNamePatch(d, e.target.value) }))}
                       placeholder={formData.fundCode?.length === 6 && !formData.fundName && !nameLoading ? t("regularInvest.fetchFailed") : ""}
                       className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none"
                     />
@@ -1641,7 +1723,7 @@ export function RegularInvestForm({
                 <div className={
                     isOneTimeInterval
                       ? "grid grid-cols-1 gap-3"
-                    : displayedIntervalUnit === "week" || displayedIntervalUnit === "month" || displayedIntervalUnit === "year"
+                    : showSecondaryExecutionDay
                       ? "grid grid-cols-4 gap-3"
                       : "grid grid-cols-3 gap-3"
                 }>
@@ -1794,10 +1876,7 @@ export function RegularInvestForm({
                     )}
                   </div>
                   )}
-                  {!isOneTimeInterval &&
-                    mode !== "edit" &&
-                    positiveIntervalValue(formData.intervalValue) === 1 &&
-                    (displayedIntervalUnit === "week" || displayedIntervalUnit === "month" || displayedIntervalUnit === "year") && (
+                  {showSecondaryExecutionDay && (
                     <div className="space-y-1">
                       <div className="text-xs font-medium text-slate-600">{t("regularInvest.secondaryExecutionDayOptional")}</div>
                       <DateStepper
@@ -1843,49 +1922,56 @@ export function RegularInvestForm({
               )}
 
               {isLoanTask && (
-                <div className="grid grid-cols-3 gap-3 rounded-lg border border-slate-100 bg-slate-50/60 p-3">
-                  <div className="space-y-1">
-                    <div className="text-xs font-medium text-slate-600">{t("regularInvest.repaymentMethod")}</div>
-                    <select
-                      value={formData.repaymentMethod}
-                      onChange={(e) => setFormData(d => {
-                        const method = normalizeLoanRepaymentMethod(e.target.value);
-                        return {
-                          ...d,
-                          repaymentMethod: method,
-                          annualRate: isInstallmentRepaymentMethod(method) && parseLoanAnnualRateInput(d.annualRate, true) == null ? "0" : d.annualRate,
-                        };
-                      })}
-                      className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none"
-                    >
-                      {LOAN_REPAYMENT_METHOD_OPTIONS.map((method) => (
-                        <option key={method} value={method}>{t(LOAN_REPAYMENT_METHOD_LABEL_KEYS.get(method) ?? method)}</option>
-                      ))}
-                    </select>
+                <div className="space-y-1">
+                  <div className="grid grid-cols-3 gap-3 rounded-lg border border-slate-100 bg-slate-50/60 p-3">
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-slate-600">{t("regularInvest.repaymentMethod")}</div>
+                      <select
+                        value={formData.repaymentMethod}
+                        onChange={(e) => setFormData(d => {
+                          const method = normalizeLoanRepaymentMethod(e.target.value);
+                          return {
+                            ...d,
+                            repaymentMethod: method,
+                            annualRate: allowsZeroAnnualRateRepaymentMethod(method) && parseLoanAnnualRateInput(d.annualRate, true) == null ? "0" : d.annualRate,
+                          };
+                        })}
+                        disabled={loanDerivedFieldsLocked}
+                        className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500"
+                      >
+                        {LOAN_REPAYMENT_METHOD_OPTIONS.map((method) => (
+                          <option key={method} value={method}>{t(LOAN_REPAYMENT_METHOD_LABEL_KEYS.get(method) ?? method)}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-slate-600">{t("txForm.annualRatePercent")}</div>
+                      <input
+                        inputMode="decimal"
+                        step="0.001"
+                        value={formData.annualRate}
+                        onChange={(e) => setFormData(d => ({ ...d, annualRate: e.target.value }))}
+                        disabled={loanDerivedFieldsLocked}
+                        placeholder={allowsZeroAnnualRateRepaymentMethod(formData.repaymentMethod) ? "0" : FIXED_LOAN_REPAYMENT_METHODS.has(formData.repaymentMethod) ? t("batchImport.required") : t("stockFee.optional")}
+                        className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-slate-600">{t("regularInvest.repaymentIntervalMonths")}</div>
+                      <input
+                        inputMode="numeric"
+                        min="1"
+                        value={formData.repaymentIntervalMonths}
+                        onChange={(e) => setFormData(d => ({ ...d, repaymentIntervalMonths: e.target.value }))}
+                        disabled={mode === "edit"}
+                        placeholder="1"
+                        className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500"
+                      />
+                    </div>
                   </div>
-                  <div className="space-y-1">
-                    <div className="text-xs font-medium text-slate-600">{t("txForm.annualRatePercent")}</div>
-                    <input
-                      inputMode="decimal"
-                      step="0.001"
-                      value={formData.annualRate}
-                      onChange={(e) => setFormData(d => ({ ...d, annualRate: e.target.value }))}
-                      placeholder={isInstallmentRepaymentMethod(formData.repaymentMethod) ? "0" : FIXED_LOAN_REPAYMENT_METHODS.has(formData.repaymentMethod) ? t("batchImport.required") : t("stockFee.optional")}
-                      className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-xs font-medium text-slate-600">{t("regularInvest.repaymentIntervalMonths")}</div>
-                    <input
-                      inputMode="numeric"
-                      min="1"
-                      value={formData.repaymentIntervalMonths}
-                      onChange={(e) => setFormData(d => ({ ...d, repaymentIntervalMonths: e.target.value }))}
-                      disabled={mode === "edit"}
-                      placeholder="1"
-                      className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500"
-                    />
-                  </div>
+                  {loanDerivedFieldsLocked ? (
+                    <div className="text-[11px] text-slate-400">{t("regularInvest.loanFieldsLockedHint")}</div>
+                  ) : null}
                 </div>
               )}
 
@@ -1919,13 +2005,14 @@ export function RegularInvestForm({
                 <div className="space-y-1">
                   <div className="text-xs font-medium text-slate-600">{t("regularInvest.planAmount")}</div>
                   <div className={REQUIRED_FIELD_CLASS}>
-                    <CalcInput
-                      value={formData.amount}
-                      onChange={(value) => setFormData(d => ({ ...d, amount: value }))}
-                      placeholder="0.00"
-                      label={t("regularInvest.planAmount")}
-                      precision={2}
-                    />
+                      <CalcInput
+                        value={formData.amount}
+                        onChange={(value) => setFormData(d => ({ ...d, amount: value }))}
+                        placeholder="0.00"
+                        label={t("regularInvest.planAmount")}
+                        precision={2}
+                        disabled={loanDerivedFieldsLocked}
+                      />
                   </div>
                 </div>
               )}

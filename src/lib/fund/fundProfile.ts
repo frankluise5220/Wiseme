@@ -1,8 +1,8 @@
 import { Prisma } from "@prisma/client";
 
-import { countTradingDaysUtc } from "@/lib/date-utils";
-
+import { formatDateUtc, subtractTradingDaysUtc } from "@/lib/date-utils";
 import { queryFundProfile, queryFundIdentity } from "@/lib/fund/queryApi";
+import { normalizeTradingCalendar, type TradingCalendarValue } from "@/lib/fund/trading-calendar";
 
 /**
  * Fund profile (fund company / custodian / manager) persistence.
@@ -19,6 +19,7 @@ export type FundProfileRecord = {
   custodian: string | null;
   manager: string | null;
   navDateOffset: number;
+  tradingCalendar: TradingCalendarValue | null;
 };
 
 export type FundNavDateOffset = 0 | 1;
@@ -29,6 +30,7 @@ export type FundProfileUpdate = {
   custodian?: string | null;
   manager?: string | null;
   navDateOffset?: FundNavDateOffset;
+  tradingCalendar?: TradingCalendarValue | null;
 };
 
 export type FundProfileContext = {
@@ -42,6 +44,7 @@ type FundProfileSqlRow = {
   custodian: string | null;
   manager: string | null;
   navDateOffset: number | bigint | null;
+  tradingCalendar: string | null;
 };
 
 function normalizeNavDateOffset(value: unknown) {
@@ -49,42 +52,77 @@ function normalizeNavDateOffset(value: unknown) {
   return n === 1 ? 1 : 0;
 }
 
-function utcDateKey(value: Date | string) {
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  const match = value.trim().match(/^\d{4}-\d{2}-\d{2}/);
-  if (!match) throw new Error("lastNavDate must be an ISO date.");
-  return match[0];
+function appLocalDateHour(now: Date) {
+  const appLocal = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  return {
+    date: formatDateUtc(appLocal),
+    hour: appLocal.getUTCHours(),
+  };
 }
 
 /** Return the trading calendar used by the fund's latest NAV publication. */
 export function fundTradingCalendarForName(name: string | null | undefined) {
-  return /QDII|\u6807\u666e|\u7EB3\u65AF\u8FBE\u514B|\u7EB3\u6307|\u9053\u743C\u65AF|\u7F8E\u56FD|\u5168\u7403|\u6052\u751F|\u65E5\u672C/i.test(String(name ?? ""))
+  const value = String(name ?? "");
+  if (/\u6052\u751F|\u9999\u6E2F|\u6E2F\u80A1|H\u80A1|Hang\s*Seng|Hong\s*Kong/i.test(value)) return "hk_fund";
+  if (/\u65E5\u672C|Nikkei|TOPIX|Japan/i.test(value)) return "jp_fund";
+  return /QDII|\u6807\u666E|\u7EB3\u65AF\u8FBE\u514B|\u7EB3\u6307|\u9053\u743C\u65AF|\u7F8E\u56FD|\u5168\u7403|S&P|NASDAQ|Dow\s*Jones|United\s*States|USA|US/i.test(value)
     ? "us_fund"
     : "cn_fund";
 }
 
-/**
- * Derive the binary NAV date offset from the latest fetched NAV and the current
- * date. The comparison is made in trading days, not calendar days, so a Friday
- * NAV is current on a Sunday for a domestic fund while a Thursday NAV remains
- * one trading day behind for a QDII fund whose Friday NAV is not published yet.
- * The stored value is intentionally binary: 0 for current and 1 for lagging.
- */
-export function deriveFundNavDateOffset(
-  lastNavDate: Date | string,
-  now: Date = new Date(),
-  tradingCalendar = "cn_fund",
-): FundNavDateOffset {
-  const lastKey = utcDateKey(lastNavDate);
-  const nowKey = utcDateKey(now);
-  if (lastKey >= nowKey) return 0;
-  const tradingDays = countTradingDaysUtc(lastKey, nowKey, tradingCalendar);
-  return tradingDays != null && tradingDays <= 0 ? 0 : 1;
+export function normalizeFundTradingCalendar(raw: unknown, fallback?: TradingCalendarValue | null) {
+  const value = String(raw ?? "").trim();
+  if (!value) return fallback ?? null;
+  return normalizeTradingCalendar(value, fallback ?? "cn_fund");
 }
 
+export function fundTradingCalendarForProfile(
+  profile: Pick<FundProfileRecord, "fundName" | "tradingCalendar"> | null | undefined,
+  fallback: TradingCalendarValue = "cn_fund",
+) {
+  return profile?.tradingCalendar ?? fundTradingCalendarForName(profile?.fundName) ?? fallback;
+}
+
+export function fundNavTargetDateForOffset(params: {
+  referenceDate: Date | string;
+  navDateOffset?: number | null;
+  tradingCalendar?: string | null;
+  now?: Date;
+}) {
+  const referenceDate = params.referenceDate instanceof Date
+    ? formatDateUtc(params.referenceDate)
+    : String(params.referenceDate ?? "").trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(referenceDate)) {
+    throw new Error("referenceDate must be a YYYY-MM-DD date.");
+  }
+  const nowLocal = appLocalDateHour(params.now ?? new Date());
+  const beforePublicationCutoff = referenceDate === nowLocal.date && nowLocal.hour < 19 ? 1 : 0;
+  return subtractTradingDaysUtc(
+    referenceDate,
+    normalizeNavDateOffset(params.navDateOffset) + beforePublicationCutoff,
+    params.tradingCalendar ?? "cn_fund",
+  );
+}
+
+export function latestFundNavTargetDateForOffset(params: {
+  navDateOffset?: number | null;
+  tradingCalendar?: string | null;
+  now?: Date;
+}) {
+  const now = params.now ?? new Date();
+  return fundNavTargetDateForOffset({
+    referenceDate: appLocalDateHour(now).date,
+    navDateOffset: params.navDateOffset,
+    tradingCalendar: params.tradingCalendar,
+    now,
+  });
+}
+
+
 function hasFetchedFundProfileData(profile: FundProfileRecord | null) {
+  const displayName = profile ? normalizeFundDisplayName(profile.fundCode, profile.fundName) : null;
   return Boolean(
-    profile?.fundName?.trim() ||
+    displayName ||
     profile?.fundCompany?.trim() ||
     profile?.custodian?.trim() ||
     profile?.manager?.trim(),
@@ -99,6 +137,7 @@ function toFundProfileRecord(row: FundProfileSqlRow): FundProfileRecord {
     custodian: row.custodian,
     manager: row.manager,
     navDateOffset: normalizeNavDateOffset(row.navDateOffset),
+    tradingCalendar: normalizeFundTradingCalendar(row.tradingCalendar),
   };
 }
 
@@ -159,29 +198,59 @@ export async function syncFundCompanyInstitution(
   }
 }
 
-const FUND_PROFILE_SELECT = Prisma.sql`
-  SELECT
-    "fundCode",
-    "fundName",
-    "fundCompany",
-    "custodian",
-    "manager",
-    "navDateOffset"
-  FROM "FundProfile"
-`;
+let fundProfileTradingCalendarColumn: Promise<boolean> | null = null;
+
+function isSqliteRuntime() {
+  const url = String(process.env.DATABASE_URL ?? "");
+  return url === ":memory:" || url.startsWith("file:");
+}
+
+async function hasFundProfileTradingCalendarColumn() {
+  fundProfileTradingCalendarColumn ??= getPrismaClient().then(async (prisma) => {
+    if (isSqliteRuntime()) {
+      const rows = await prisma.$queryRaw<Array<{ name: string }>>(Prisma.sql`
+        PRAGMA table_info("FundProfile")
+      `);
+      return rows.some((row) => row.name === "tradingCalendar");
+    }
+
+    const rows = await prisma.$queryRaw<Array<{ exists: boolean }>>(Prisma.sql`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'FundProfile'
+          AND column_name = 'tradingCalendar'
+      ) AS "exists"
+    `);
+    return Boolean(rows[0]?.exists);
+  });
+  return fundProfileTradingCalendarColumn;
+}
+
+function fundProfileSelectSql(hasTradingCalendar: boolean) {
+  return Prisma.sql`
+    SELECT
+      "fundCode",
+      "fundName",
+      "fundCompany",
+      "custodian",
+      "manager",
+      "navDateOffset",
+      ${hasTradingCalendar ? Prisma.sql`"tradingCalendar"` : Prisma.sql`NULL AS "tradingCalendar"`}
+    FROM "FundProfile"
+  `;
+}
 
 async function readFundProfileRow(fundCode: string) {
   const prisma = await getPrismaClient();
+  const selectSql = fundProfileSelectSql(await hasFundProfileTradingCalendarColumn());
   const rows = await prisma.$queryRaw<FundProfileSqlRow[]>(Prisma.sql`
-    ${FUND_PROFILE_SELECT}
+    ${selectSql}
     WHERE "fundCode" = ${fundCode}
     LIMIT 1
   `);
   return rows[0] ?? null;
-}
-
-async function upsertFundProfileOffset(fundCode: string, navDateOffset: number) {
-  return updateFundProfile(fundCode, { navDateOffset: normalizeNavDateOffset(navDateOffset) });
 }
 
 async function writeFundProfile(params: {
@@ -191,8 +260,50 @@ async function writeFundProfile(params: {
   custodian: string | null;
   manager: string | null;
   navDateOffset: number;
+  tradingCalendar: TradingCalendarValue | null;
 }) {
   const prisma = await getPrismaClient();
+  if (!(await hasFundProfileTradingCalendarColumn())) {
+    const rows = await prisma.$queryRaw<FundProfileSqlRow[]>(Prisma.sql`
+      INSERT INTO "FundProfile" (
+        "fundCode",
+        "fundName",
+        "fundCompany",
+        "custodian",
+        "manager",
+        "navDateOffset",
+        "createdAt",
+        "updatedAt"
+      )
+      VALUES (
+        ${params.fundCode},
+        ${params.fundName},
+        ${params.fundCompany},
+        ${params.custodian},
+        ${params.manager},
+        ${params.navDateOffset},
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+      )
+      ON CONFLICT ("fundCode") DO UPDATE SET
+        "fundName" = EXCLUDED."fundName",
+        "fundCompany" = EXCLUDED."fundCompany",
+        "custodian" = EXCLUDED."custodian",
+        "manager" = EXCLUDED."manager",
+        "navDateOffset" = EXCLUDED."navDateOffset",
+        "updatedAt" = CURRENT_TIMESTAMP
+      RETURNING
+        "fundCode",
+        "fundName",
+        "fundCompany",
+        "custodian",
+        "manager",
+        "navDateOffset",
+        NULL AS "tradingCalendar"
+    `);
+    return toFundProfileRecord(rows[0]!);
+  }
+
   const rows = await prisma.$queryRaw<FundProfileSqlRow[]>(Prisma.sql`
     INSERT INTO "FundProfile" (
       "fundCode",
@@ -201,6 +312,7 @@ async function writeFundProfile(params: {
       "custodian",
       "manager",
       "navDateOffset",
+      "tradingCalendar",
       "createdAt",
       "updatedAt"
     )
@@ -211,6 +323,7 @@ async function writeFundProfile(params: {
       ${params.custodian},
       ${params.manager},
       ${params.navDateOffset},
+      ${params.tradingCalendar},
       CURRENT_TIMESTAMP,
       CURRENT_TIMESTAMP
     )
@@ -220,6 +333,7 @@ async function writeFundProfile(params: {
       "custodian" = EXCLUDED."custodian",
       "manager" = EXCLUDED."manager",
       "navDateOffset" = EXCLUDED."navDateOffset",
+      "tradingCalendar" = EXCLUDED."tradingCalendar",
       "updatedAt" = CURRENT_TIMESTAMP
     RETURNING
       "fundCode",
@@ -227,7 +341,8 @@ async function writeFundProfile(params: {
       "fundCompany",
       "custodian",
       "manager",
-      "navDateOffset"
+      "navDateOffset",
+      "tradingCalendar"
   `);
   return toFundProfileRecord(rows[0]!);
 }
@@ -240,6 +355,9 @@ export async function updateFundProfile(fundCode: string, update: FundProfileUpd
     throw new Error("navDateOffset must be 0 or 1.");
   }
   const current = await getFundProfile(code);
+  const tradingCalendar = update.tradingCalendar !== undefined
+    ? normalizeFundTradingCalendar(update.tradingCalendar)
+    : current?.tradingCalendar ?? null;
   return writeFundProfile({
     fundCode: code,
     fundName: update.fundName !== undefined ? update.fundName : current?.fundName ?? null,
@@ -247,51 +365,8 @@ export async function updateFundProfile(fundCode: string, update: FundProfileUpd
     custodian: update.custodian !== undefined ? update.custodian : current?.custodian ?? null,
     manager: update.manager !== undefined ? update.manager : current?.manager ?? null,
     navDateOffset: update.navDateOffset ?? current?.navDateOffset ?? 0,
+    tradingCalendar,
   });
-}
-
-/**
- * Persist the binary offset derived from the latest fetched NAV date.
- */
-export async function syncFundNavDateOffsetFromLatestNav(params: {
-  fundCode: string;
-  lastNavDate: Date | string;
-  now?: Date;
-  tradingCalendar?: string | null;
-}) {
-  const code = params.fundCode.trim();
-  if (!/^\d{6}$/.test(code)) throw new Error("fundCode must be a six-digit fund code.");
-  const offset = deriveFundNavDateOffset(
-    params.lastNavDate,
-    params.now,
-    params.tradingCalendar ?? "cn_fund",
-  );
-  return upsertFundProfileOffset(code, offset);
-}
-
-/**
- * Persist offsets for a batch of latest NAV records without coupling this
- * profile module to the NAV cache implementation.
- */
-export async function syncFundNavDateOffsetsFromLatestNavs(
-  latestNavs: Iterable<{ fundCode: string; navDate: Date | string; name?: string | null }>,
-  now: Date = new Date(),
-) {
-  const uniqueNavs = new Map<string, { navDate: Date | string; name?: string | null }>();
-  for (const latestNav of latestNavs) {
-    const code = latestNav.fundCode.trim();
-    if (/^\d{6}$/.test(code)) uniqueNavs.set(code, { navDate: latestNav.navDate, name: latestNav.name });
-  }
-  await Promise.all(
-    Array.from(uniqueNavs, ([fundCode, latestNav]) =>
-      syncFundNavDateOffsetFromLatestNav({
-        fundCode,
-        lastNavDate: latestNav.navDate,
-        now,
-        tradingCalendar: fundTradingCalendarForName(latestNav.name),
-      }),
-    ),
-  );
 }
 
 async function upsertFetchedFundProfile(params: {
@@ -302,6 +377,47 @@ async function upsertFetchedFundProfile(params: {
   manager: string | null;
 }) {
   const prisma = await getPrismaClient();
+  const tradingCalendar = fundTradingCalendarForName(params.fundName);
+  if (!(await hasFundProfileTradingCalendarColumn())) {
+    const rows = await prisma.$queryRaw<FundProfileSqlRow[]>(Prisma.sql`
+      INSERT INTO "FundProfile" (
+        "fundCode",
+        "fundName",
+        "fundCompany",
+        "custodian",
+        "manager",
+        "navDateOffset",
+        "createdAt",
+        "updatedAt"
+      )
+      VALUES (
+        ${params.fundCode},
+        ${params.fundName},
+        ${params.fundCompany},
+        ${params.custodian},
+        ${params.manager},
+        0,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+      )
+      ON CONFLICT ("fundCode") DO UPDATE SET
+        "fundName" = COALESCE(EXCLUDED."fundName", "FundProfile"."fundName"),
+        "fundCompany" = COALESCE(EXCLUDED."fundCompany", "FundProfile"."fundCompany"),
+        "custodian" = COALESCE(EXCLUDED."custodian", "FundProfile"."custodian"),
+        "manager" = COALESCE(EXCLUDED."manager", "FundProfile"."manager"),
+        "updatedAt" = CURRENT_TIMESTAMP
+      RETURNING
+        "fundCode",
+        "fundName",
+        "fundCompany",
+        "custodian",
+        "manager",
+        "navDateOffset",
+        NULL AS "tradingCalendar"
+    `);
+    return toFundProfileRecord(rows[0]!);
+  }
+
   const rows = await prisma.$queryRaw<FundProfileSqlRow[]>(Prisma.sql`
     INSERT INTO "FundProfile" (
       "fundCode",
@@ -310,6 +426,7 @@ async function upsertFetchedFundProfile(params: {
       "custodian",
       "manager",
       "navDateOffset",
+      "tradingCalendar",
       "createdAt",
       "updatedAt"
     )
@@ -320,6 +437,7 @@ async function upsertFetchedFundProfile(params: {
       ${params.custodian},
       ${params.manager},
       0,
+      ${tradingCalendar},
       CURRENT_TIMESTAMP,
       CURRENT_TIMESTAMP
     )
@@ -328,6 +446,7 @@ async function upsertFetchedFundProfile(params: {
       "fundCompany" = COALESCE(EXCLUDED."fundCompany", "FundProfile"."fundCompany"),
       "custodian" = COALESCE(EXCLUDED."custodian", "FundProfile"."custodian"),
       "manager" = COALESCE(EXCLUDED."manager", "FundProfile"."manager"),
+      "tradingCalendar" = COALESCE("FundProfile"."tradingCalendar", EXCLUDED."tradingCalendar"),
       "updatedAt" = CURRENT_TIMESTAMP
     RETURNING
       "fundCode",
@@ -335,7 +454,8 @@ async function upsertFetchedFundProfile(params: {
       "fundCompany",
       "custodian",
       "manager",
-      "navDateOffset"
+      "navDateOffset",
+      "tradingCalendar"
   `);
   return toFundProfileRecord(rows[0]!);
 }
@@ -355,8 +475,9 @@ export async function getFundProfiles(fundCodes: Iterable<string>): Promise<Fund
   const codes = Array.from(new Set(Array.from(fundCodes).map((code) => code.trim()).filter((code) => /^\d{6}$/.test(code))));
   if (codes.length === 0) return [];
   const prisma = await getPrismaClient();
+  const selectSql = fundProfileSelectSql(await hasFundProfileTradingCalendarColumn());
   const rows = await prisma.$queryRaw<FundProfileSqlRow[]>(Prisma.sql`
-    ${FUND_PROFILE_SELECT}
+    ${selectSql}
     WHERE "fundCode" IN (${Prisma.join(codes)})
   `);
   return rows.map(toFundProfileRecord);
@@ -388,6 +509,24 @@ export async function ensureFundProfileRecord(fundCode: string): Promise<FundPro
   if (existing) return existing;
 
   const prisma = await getPrismaClient();
+  if (!(await hasFundProfileTradingCalendarColumn())) {
+    await prisma.$executeRaw(Prisma.sql`
+      INSERT INTO "FundProfile" (
+        "fundCode",
+        "fundName",
+        "fundCompany",
+        "custodian",
+        "manager",
+        "navDateOffset",
+        "createdAt",
+        "updatedAt"
+      )
+      VALUES (${code}, NULL, NULL, NULL, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT ("fundCode") DO NOTHING
+    `);
+    return getFundProfile(code);
+  }
+
   await prisma.$executeRaw(Prisma.sql`
     INSERT INTO "FundProfile" (
       "fundCode",
@@ -396,10 +535,11 @@ export async function ensureFundProfileRecord(fundCode: string): Promise<FundPro
       "custodian",
       "manager",
       "navDateOffset",
+      "tradingCalendar",
       "createdAt",
       "updatedAt"
     )
-    VALUES (${code}, NULL, NULL, NULL, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    VALUES (${code}, NULL, NULL, NULL, NULL, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     ON CONFLICT ("fundCode") DO NOTHING
   `);
   return getFundProfile(code);
@@ -429,7 +569,7 @@ export async function setFundNavDateOffset(fundCode: string, offset: number) {
   if (offset !== 0 && offset !== 1) {
     throw new Error("navDateOffset must be 0 or 1.");
   }
-  return upsertFundProfileOffset(code, offset);
+  return updateFundProfile(code, { navDateOffset: normalizeNavDateOffset(offset) });
 }
 
 /**
@@ -455,7 +595,8 @@ export async function resolveFundName(
   const cached = await ensureFundProfileRecord(code);
   if (cached) {
     await syncFundCompanyInstitution(cached, context);
-    if (cached.fundName) return cached.fundName;
+    const cachedName = normalizeFundDisplayName(code, cached.fundName);
+    if (cachedName) return cachedName;
   }
 
   const profile = await ensureFundProfile(code, context);

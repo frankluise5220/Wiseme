@@ -84,7 +84,7 @@ function formatAccountIdentity(account: {
   Institution?: { name: string | null; shortName: string | null } | null;
   AccountGroup?: { name: string | null } | null;
 }) {
-  const owner = account.kind === "loan" ? "" : account.AccountGroup?.name?.trim() || "";
+  const owner = account.kind === "loan" || account.kind === "settlement" ? "" : account.AccountGroup?.name?.trim() || "";
   const institution = account.Institution?.shortName?.trim() || account.Institution?.name?.trim() || "";
   const tailOrName = identityTail(account.name, account.numberMasked) || account.name.trim();
   return [owner, institution, tailOrName, kindLabel(account.kind)].filter(Boolean).join("·");

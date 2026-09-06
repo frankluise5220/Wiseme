@@ -174,8 +174,18 @@ export function LoginPageClient({ householdName }: { householdName: string | nul
     const timeoutId = window.setTimeout(() => controller.abort(), 15000);
     let mounted = true;
 
-    void fetch("/api/v1/auth/password-status", { signal: controller.signal })
-      .then((res) => res.json() as Promise<PasswordStatusResponse>)
+    void fetch("/api/v1/auth/password-status", {
+      signal: controller.signal,
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache" },
+    })
+      .then(async (res) => {
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!res.ok || !contentType.includes("application/json")) {
+          throw new Error(`password-status returned ${res.status}`);
+        }
+        return res.json() as Promise<PasswordStatusResponse>;
+      })
       .then((data) => {
         if (!mounted) return;
         if (data.ok) {

@@ -22,8 +22,11 @@ export type LoanRepaymentSchedulePreviewRow = {
   annualRate: number | null;
 };
 
-const FREE_REPAYMENT_METHOD = "\u81ea\u7531\u8fd8\u6b3e";
+export const FREE_REPAYMENT_METHOD = "\u81ea\u7531\u8fd8\u6b3e";
+export const EQUAL_PAYMENT_REPAYMENT_METHOD = "\u7b49\u989d\u672c\u606f";
+export const EQUAL_PRINCIPAL_REPAYMENT_METHOD = "\u7b49\u989d\u672c\u91d1";
 export const INSTALLMENT_REPAYMENT_METHOD = "\u5206\u671f\u8fd8\u6b3e";
+export const INTEREST_FIRST_REPAYMENT_METHOD = "\u5148\u8fd8\u5229\u606f\u4e00\u6b21\u6027\u8fd8\u672c";
 export const LEGACY_INTEREST_FREE_INSTALLMENT_REPAYMENT_METHOD = "\u514d\u606f\u5206\u671f\u8fd8\u672c";
 
 export function normalizeLoanRepaymentMethod(method?: string | null) {
@@ -36,13 +39,22 @@ export function isInstallmentRepaymentMethod(method?: string | null) {
   return normalizeLoanRepaymentMethod(method) === INSTALLMENT_REPAYMENT_METHOD;
 }
 
+export function allowsZeroAnnualRateRepaymentMethod(method?: string | null) {
+  const normalized = normalizeLoanRepaymentMethod(method);
+  return (
+    normalized === INSTALLMENT_REPAYMENT_METHOD ||
+    normalized === EQUAL_PAYMENT_REPAYMENT_METHOD ||
+    normalized === EQUAL_PRINCIPAL_REPAYMENT_METHOD
+  );
+}
+
 export function normalizeLoanRateAdjustments(adjustments?: LoanRateAdjustment[] | null) {
   return [...(adjustments ?? [])]
     .map((item) => ({
       effectiveDate: String(item.effectiveDate ?? "").slice(0, 10),
       annualRate: Number(item.annualRate),
     }))
-    .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) && Number.isFinite(item.annualRate) && item.annualRate > 0)
+    .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) && Number.isFinite(item.annualRate) && item.annualRate >= 0)
     .sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate));
 }
 
@@ -177,33 +189,36 @@ export function calcLoanScheduledAmount(params: {
   const method = normalizeLoanRepaymentMethod(params.repaymentMethod);
   const principal = Math.max(0, params.principal);
   const totalRuns = Math.max(0, params.totalRuns);
-  if (isInstallmentRepaymentMethod(method) && principal > 0 && totalRuns > 0) {
-    const periodRate =
-      params.annualRate != null && Number.isFinite(params.annualRate) && params.annualRate > 0
-        ? (params.annualRate / 100 / 12) * Math.max(1, params.intervalMonths || 1)
-        : 0;
-    return roundLoanMoney((principal / totalRuns) + (principal * periodRate));
-  }
   if (
     principal <= 0 ||
     totalRuns <= 0 ||
     params.annualRate == null ||
     !Number.isFinite(params.annualRate) ||
-    params.annualRate <= 0
+    params.annualRate < 0
   ) {
     return null;
   }
 
-  const periodRate = (params.annualRate / 100 / 12) * Math.max(1, params.intervalMonths || 1);
-  if (!Number.isFinite(periodRate) || periodRate <= 0) return null;
+  const periodRate =
+    params.annualRate > 0
+      ? (params.annualRate / 100 / 12) * Math.max(1, params.intervalMonths || 1)
+      : 0;
+  if (periodRate <= 0) {
+    return allowsZeroAnnualRateRepaymentMethod(method) ? roundLoanMoney(principal / totalRuns) : null;
+  }
 
-  if (method === "等额本金") {
+  if (!Number.isFinite(periodRate)) return null;
+
+  if (isInstallmentRepaymentMethod(method)) {
     return roundLoanMoney((principal / totalRuns) + (principal * periodRate));
   }
-  if (method === "先还利息一次性还本") {
+  if (method === EQUAL_PRINCIPAL_REPAYMENT_METHOD) {
+    return roundLoanMoney((principal / totalRuns) + (principal * periodRate));
+  }
+  if (method === INTEREST_FIRST_REPAYMENT_METHOD) {
     return roundLoanMoney(principal * periodRate);
   }
-  if (method !== "等额本息") return null;
+  if (method !== EQUAL_PAYMENT_REPAYMENT_METHOD) return null;
 
   const factor = Math.pow(1 + periodRate, totalRuns);
   if (!Number.isFinite(factor) || factor <= 1) return null;
@@ -220,27 +235,30 @@ export function calcLoanScheduledAmountExact(params: {
   const method = normalizeLoanRepaymentMethod(params.repaymentMethod);
   const principal = Math.max(0, params.principal);
   const totalRuns = Math.max(0, params.totalRuns);
-  if (isInstallmentRepaymentMethod(method) && principal > 0 && totalRuns > 0) {
-    const periodRate =
-      params.annualRate != null && Number.isFinite(params.annualRate) && params.annualRate > 0
-        ? (params.annualRate / 100 / 12) * Math.max(1, params.intervalMonths || 1)
-        : 0;
-    return (principal / totalRuns) + (principal * periodRate);
-  }
   if (
-    method !== "等额本息" ||
     principal <= 0 ||
     totalRuns <= 0 ||
     params.annualRate == null ||
     !Number.isFinite(params.annualRate) ||
-    params.annualRate <= 0
+    params.annualRate < 0
   ) {
     return null;
   }
 
-  const periodRate = (params.annualRate / 100 / 12) * Math.max(1, params.intervalMonths || 1);
+  const periodRate =
+    params.annualRate > 0
+      ? (params.annualRate / 100 / 12) * Math.max(1, params.intervalMonths || 1)
+      : 0;
+  if (periodRate <= 0) {
+    return allowsZeroAnnualRateRepaymentMethod(method) ? principal / totalRuns : null;
+  }
+  if (method !== EQUAL_PAYMENT_REPAYMENT_METHOD) {
+    return isInstallmentRepaymentMethod(method) || method === EQUAL_PRINCIPAL_REPAYMENT_METHOD
+      ? (principal / totalRuns) + (principal * periodRate)
+      : null;
+  }
   const factor = Math.pow(1 + periodRate, totalRuns);
-  if (!Number.isFinite(periodRate) || periodRate <= 0 || !Number.isFinite(factor) || factor <= 1) return null;
+  if (!Number.isFinite(periodRate) || !Number.isFinite(factor) || factor <= 1) return null;
   return (principal * periodRate * factor) / (factor - 1);
 }
 
@@ -249,22 +267,24 @@ export function estimateLoanEqualPaymentRemainingRuns(params: {
   intervalMonths?: number | null;
   scheduledAmount: number;
   remainingPrincipal: number;
-  maxRemainingRuns?: number | null;
 }) {
+  // Dependency chain for reduce-term prepayment:
+  // remaining principal + effective rate + carried scheduled amount -> natural payoff runs -> plan.totalRuns.
   const principal = Math.max(0, params.remainingPrincipal);
   const scheduledAmount = Math.max(0, params.scheduledAmount);
-  const maxRemainingRuns = Math.min(Math.max(1, params.maxRemainingRuns ?? 600), 600);
   if (principal <= 0.005) return 0;
+  if (scheduledAmount <= 0.005) return null;
   const periodRate =
     params.annualRate != null && Number.isFinite(params.annualRate) && params.annualRate > 0
       ? (params.annualRate / 100 / 12) * Math.max(1, params.intervalMonths || 1)
       : 0;
-  if (periodRate <= 0) return maxRemainingRuns;
+  if (periodRate <= 0) return Math.max(1, Math.ceil(principal / scheduledAmount));
   const denominator = scheduledAmount - principal * periodRate;
-  if (scheduledAmount <= 0 || denominator <= 0) return maxRemainingRuns;
+  if (denominator <= 0.005) return null;
   const runs = Math.log(scheduledAmount / denominator) / Math.log(1 + periodRate);
-  if (!Number.isFinite(runs) || runs <= 0) return maxRemainingRuns;
-  return Math.min(maxRemainingRuns, Math.max(1, Math.ceil(runs)));
+  if (!Number.isFinite(runs) || runs <= 0) return null;
+  const naturalRuns = Math.max(1, Math.ceil(runs - 1e-10));
+  return naturalRuns <= 1200 ? naturalRuns : null;
 }
 
 export function calcLoanRunParts(params: {
@@ -285,14 +305,14 @@ export function calcLoanRunParts(params: {
       : 0;
   const interest = periodRate > 0 ? roundLoanMoney(remainingPrincipal * periodRate) : 0;
 
-  if (method === "先还利息一次性还本") {
+  if (method === INTEREST_FIRST_REPAYMENT_METHOD) {
     return {
       principal: remainingRuns <= 1 ? roundLoanMoney(remainingPrincipal) : 0,
       interest,
     };
   }
 
-  if (method === "等额本金") {
+  if (method === EQUAL_PRINCIPAL_REPAYMENT_METHOD) {
     return {
       principal: roundLoanMoney(Math.min(remainingPrincipal, remainingPrincipal / remainingRuns)),
       interest,
@@ -554,6 +574,7 @@ export function buildLoanRepaymentSchedulePreview(params: {
       intervalMonths,
       scheduledAmount,
       scheduledAmountExact,
+      preserveScheduledAmount: true,
       remainingPrincipal: exactRemainingPrincipal,
       remainingRuns: remainingRunsForThisRun,
       previousRunDate: formatDateUtc(previousRunDate),

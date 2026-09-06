@@ -294,6 +294,13 @@ export function BasicDetailPanel({
   const lastFocusEntryIdRef = useRef(focusEntryId ?? "");
   const paginationFetchSeqRef = useRef(0);
   const lastClientPaginationKeyRef = useRef("");
+  // Track latest values without bloating the FINANCE_DATA_CHANGED_EVENT effect dependency array
+  const localEntriesRef = useRef(localEntries);
+  const localTotalCountRef = useRef(localTotalCount);
+
+  useEffect(() => { localEntriesRef.current = localEntries; }, [localEntries]);
+  useEffect(() => { localTotalCountRef.current = localTotalCount; }, [localTotalCount]);
+
   const clientPaginationEnabled = !hasDetailFilters && !focusEntryId;
 
   const reloadDetailPage = useCallback((signal?: AbortSignal) => {
@@ -437,6 +444,9 @@ export function BasicDetailPanel({
     }
   }, [accountId, accountScopeKey, entries, focusEntryId, initialDetailAll, initialPage, normalizedInitialPageSize, originalCount, totalCount]);
 
+  // 当整页被删空时，标记需要从远程补页，详情见 FINANCE_DATA_CHANGED_EVENT handler
+  const deletedPageEmptiedRef = useRef(false);
+
   useEffect(() => {
     const handleFinanceChange = (event: Event) => {
       const detail = (event as CustomEvent<FinanceDataChangedDetail>).detail ?? {};
@@ -454,21 +464,48 @@ export function BasicDetailPanel({
       const deletedEntryIds = detail.deletedEntryIds ?? [];
       if (deletedEntryIds.length === 0) return;
       const deletedSet = new Set(deletedEntryIds);
-      setLocalEntries((current) => {
-        const next = current.filter((entry) => !deletedSet.has(entry.id));
-        const removedCount = current.length - next.length;
-        if (removedCount > 0) {
-          setLocalTotalCount((count) => Math.max(0, count - removedCount));
-          setLocalOriginalCount((count) => Math.max(0, count - removedCount));
+      const currentEntries = localEntriesRef.current;
+      const currentTotal = localTotalCountRef.current;
+      // 同步计算过滤结果，用于决定是否需要触发补页
+      let nextTotalCount = currentTotal;
+      for (let i = 0; i < currentEntries.length; i++) {
+        if (deletedSet.has(currentEntries[i].id)) {
+          nextTotalCount = Math.max(0, nextTotalCount - 1);
         }
-        return next;
-      });
+      }
+      const currentPageEntriesCount = currentEntries.reduce(
+        (sum, entry) => (deletedSet.has(entry.id) ? sum : sum + 1),
+        0,
+      );
+      const emptiedCurrentPage = currentPageEntriesCount === 0 && currentEntries.length > 0;
+
+      setLocalEntries((current) => current.filter((entry) => !deletedSet.has(entry.id)));
+      setLocalTotalCount(nextTotalCount);
+      setLocalOriginalCount(nextTotalCount);
+
+      // 整页被清空时，后续记录应顶上来：退回上一页并由补页 effect 拉取数据
+      if (emptiedCurrentPage && !detailAll) {
+        const nextTotalPages = Math.max(1, Math.ceil(nextTotalCount / pageSize));
+        // 如果当前页已超出新范围，退回一页；保持当前页时 safePage 不变也要触发 reload
+        if (safePage > nextTotalPages && safePage > 1) {
+          setPage((p) => p - 1);
+        }
+        deletedPageEmptiedRef.current = true;
+      }
     };
     window.addEventListener(FINANCE_DATA_CHANGED_EVENT, handleFinanceChange);
     return () => {
       window.removeEventListener(FINANCE_DATA_CHANGED_EVENT, handleFinanceChange);
     };
-  }, [accountId, reloadDetailPage]);
+  }, [accountId, detailAll, pageSize, reloadDetailPage, safePage]);
+
+  // 配合 deletedPageEmptiedRef：ref 为 true 时触发一次远程补页，然后重置 ref
+  useEffect(() => {
+    if (!deletedPageEmptiedRef.current) return;
+    if (!clientPaginationEnabled) return;
+    deletedPageEmptiedRef.current = false;
+    reloadDetailPage();
+  }, [clientPaginationEnabled, reloadDetailPage, safePage]);
 
   useEffect(() => {
     if (detailAll || page === safePage) return;

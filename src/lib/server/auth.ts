@@ -6,6 +6,7 @@ import {
   USER_ID_COOKIE,
   USERNAME_COOKIE,
   VERIFIED_COOKIE,
+  verifyVerifiedSessionValue,
 } from "@/lib/server/session-cookies";
 
 export type CurrentUser = {
@@ -58,12 +59,13 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise
  */
 export const getCurrentUser = cache(async function getCurrentUser(): Promise<CurrentUser | null> {
   const cookieStore = await cookies();
-  const verified = cookieStore.get(VERIFIED_COOKIE)?.value === "ok";
-  const userId = cookieStore.get(USER_ID_COOKIE)?.value?.trim();
+  const cookieUserId = cookieStore.get(USER_ID_COOKIE)?.value?.trim();
+  const verified = verifyVerifiedSessionValue(cookieStore.get(VERIFIED_COOKIE)?.value, cookieUserId);
+  const userId = verified.ok ? verified.userId : cookieUserId;
   const username = cookieStore.get(USERNAME_COOKIE)?.value?.trim();
   const householdId = cookieStore.get(HOUSEHOLD_COOKIE)?.value?.trim();
 
-  if (!verified) return null;
+  if (!verified.ok) return null;
 
   const deadline = Date.now() + USER_LOOKUP_TIMEOUT_MS;
   const lookup = async <T>(operation: Promise<T>): Promise<T | null> => {

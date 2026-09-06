@@ -99,8 +99,8 @@ export async function resolveOrCreateDepositAccount(
   return tx.account.create({
     data: {
       name: depositName,
-      kind: "deposit",
-      investProductType: null,
+      kind: "investment",
+      investProductType: "deposit",
       currency,
       householdId: input.householdId,
       groupId,

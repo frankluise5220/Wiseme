@@ -573,6 +573,13 @@ export default function SystemUpdatePage() {
     <div className="space-y-4">
       <h2 className="text-sm font-semibold text-slate-800">{packageManaged ? t("settings.systemUpdate.versionInfo") : t("settings.systemUpdate.title")}</h2>
 
+      {packageManaged ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <div className="text-sm font-medium text-amber-800">{t("settings.systemUpdate.uninstallNoticeTitle")}</div>
+          <div className="mt-1 text-xs leading-5 text-amber-700">{t("settings.systemUpdate.uninstallNotice")}</div>
+        </div>
+      ) : null}
+
       <section className="rounded-lg border border-slate-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="text-sm font-medium text-slate-800">

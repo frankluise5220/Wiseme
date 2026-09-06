@@ -51,6 +51,7 @@ const RECONCILABLE_ACCOUNT_KINDS: AccountKind[] = [
   AccountKind.bank_debit,
   AccountKind.ewallet,
   AccountKind.loan,
+  AccountKind.settlement,
 ];
 
 export async function POST(req: Request) {

@@ -1,13 +1,6 @@
-export const TRADING_CALENDARS = ["cn_fund", "hk_fund", "us_fund", "generic_weekday"] as const;
+export const TRADING_CALENDARS = ["cn_fund", "hk_fund", "jp_fund", "us_fund", "generic_weekday"] as const;
 
 export type TradingCalendarValue = (typeof TRADING_CALENDARS)[number];
-
-export const TRADING_CALENDAR_LABELS: Record<TradingCalendarValue, string> = {
-  cn_fund: "中国基金",
-  hk_fund: "香港基金",
-  us_fund: "美国基金",
-  generic_weekday: "仅跳周末",
-};
 
 export function normalizeTradingCalendar(raw: unknown, fallback: TradingCalendarValue = "cn_fund"): TradingCalendarValue {
   const value = String(raw ?? "").trim();

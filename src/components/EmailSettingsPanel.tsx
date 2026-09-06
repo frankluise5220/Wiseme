@@ -31,6 +31,7 @@ import {
   uniqueStatementInfoTexts,
 } from "@/lib/statement/preview-meta";
 import { useI18n } from "@/lib/i18n";
+import { getAccountLabelFieldsPreference } from "@/lib/client/appPreferences";
 
 type I18nT = (key: string, params?: Record<string, string | number>) => string;
 
@@ -93,6 +94,8 @@ type BookAccount = {
   name: string;
   kind: string;
   label?: string | null;
+  /** Table/list label that follows the configured display fields. */
+  listLabel?: string | null;
   selectorLabel?: string | null;
   selectorCoreLabel?: string | null;
   fullLabel?: string | null;
@@ -223,7 +226,7 @@ function buildBookAccountDisplayOption(account: BookAccount) {
           name: account.AccountGroup.name ?? null,
         }
       : null,
-  });
+  }, undefined, { fields: getAccountLabelFieldsPreference() });
 }
 
 function isPlaceholderText(value?: string | null) {
@@ -822,7 +825,10 @@ export function EmailSettingsPanel({ embedded = false, onStatementPreviewOpened,
     finally { setParsing(false); }
   }
 
-  async function importItems(confirmedItems?: StatementImportPreviewItem[]) {
+  async function importItems(
+    confirmedItems?: StatementImportPreviewItem[],
+    options?: { createDebtAccounts?: boolean; forceCreateOwnedMoneyAccounts?: boolean },
+  ) {
     if (importComplete) return;
     const sourceItems = confirmedItems?.length
       ? confirmedItems
@@ -883,7 +889,14 @@ export function EmailSettingsPanel({ embedded = false, onStatementPreviewOpened,
       for (;;) {
         res = await fetch("/api/v1/statement/import", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: sourceItems, autoCreateAccounts: false, mailSource, manualRecordConflictPolicy: conflictPolicy }),
+          body: JSON.stringify({
+            items: sourceItems,
+            autoCreateAccounts: false,
+            createDebtAccounts: options?.createDebtAccounts === true,
+            forceCreateOwnedMoneyAccounts: options?.forceCreateOwnedMoneyAccounts === true,
+            mailSource,
+            manualRecordConflictPolicy: conflictPolicy,
+          }),
         });
         data = await res.json();
         if (data.ok || data.code !== "MANUAL_RECORD_CONFLICT") break;
@@ -1356,12 +1369,12 @@ export function EmailSettingsPanel({ embedded = false, onStatementPreviewOpened,
   const previewAccountDisplayLabelById = useCallback((accountId?: string | null) => {
     if (!accountId) return null;
     const account = previewAccountDisplayById.get(accountId);
-    return account ? formatAccountTableLabel(account) || null : null;
+    return account ? formatAccountTableLabel(account, "", getAccountLabelFieldsPreference()) || null : null;
   }, [previewAccountDisplayById]);
   const previewAccountDisplayTitleById = useCallback((accountId?: string | null) => {
     if (!accountId) return null;
     const account = previewAccountDisplayById.get(accountId);
-    return account ? formatAccountTableTitle(account) || null : null;
+    return account ? formatAccountTableTitle(account, "", getAccountLabelFieldsPreference()) || null : null;
   }, [previewAccountDisplayById]);
   const selectedPreviewAccountDisplayLabel = useCallback((row: ImportPreviewItem) => {
     const accountId = row.selectedAccountId ?? row.matchedAccountId ?? importPreview?.statementAccountId;
@@ -1378,7 +1391,7 @@ export function EmailSettingsPanel({ embedded = false, onStatementPreviewOpened,
     return [
       { value: "", label: t("batchImport.unselected") },
       ...previewAccountDisplayOptions
-        .map((account) => ({ value: account.id, label: formatAccountTableLabel(account), title: formatAccountTableTitle(account) })),
+        .map((account) => ({ value: account.id, label: formatAccountTableLabel(account, "", getAccountLabelFieldsPreference()), title: formatAccountTableTitle(account, "", getAccountLabelFieldsPreference()) })),
     ];
   }, [hasImportPreview, previewAccountDisplayOptions, t]);
   const previewDebitAccountReplaceOptions = useMemo<BatchReplaceOption[]>(() => {
@@ -1386,7 +1399,7 @@ export function EmailSettingsPanel({ embedded = false, onStatementPreviewOpened,
     return [
       { value: "", label: t("batchImport.unselected") },
       ...previewAccountDisplayOptions
-        .map((account) => ({ value: account.id, label: formatAccountTableLabel(account), title: formatAccountTableTitle(account) })),
+        .map((account) => ({ value: account.id, label: formatAccountTableLabel(account, "", getAccountLabelFieldsPreference()), title: formatAccountTableTitle(account, "", getAccountLabelFieldsPreference()) })),
     ];
   }, [hasImportPreview, previewAccountDisplayOptions, t]);
   const previewDebitAccountDisplayOptions = useMemo(
@@ -1406,7 +1419,7 @@ export function EmailSettingsPanel({ embedded = false, onStatementPreviewOpened,
         return {
           ...option,
           subLabel: undefined,
-          title: account ? formatAccountTableTitle(account) : option.title,
+          title: account ? formatAccountTableTitle(account, "", getAccountLabelFieldsPreference()) : option.title,
         };
       });
     },

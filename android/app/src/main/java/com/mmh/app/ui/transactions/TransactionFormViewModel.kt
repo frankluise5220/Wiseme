@@ -326,7 +326,7 @@ class TransactionFormViewModel @Inject constructor(
     }
 
     private fun ExternalAccountSummaryDto.isFundPaymentAccount(): Boolean {
-        return kind != "investment" && kind != "cash" && kind != "bank_credit" && kind != "loan"
+        return kind != "investment" && kind != "cash" && kind != "bank_credit" && kind != "loan" && kind != "settlement"
     }
 
     fun updateType(type: String) {

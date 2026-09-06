@@ -20,7 +20,7 @@ import { useI18n } from "@/lib/i18n";
 type AccessKey = {
   id: string;
   name: string;
-  key: string;
+  keyPreview: string;
   createdAt?: string;
 };
 
@@ -30,7 +30,6 @@ export default function ApiKeysPage() {
   const [showModal, setShowModal] = useState(false);
   const [name, setName] = useState("");
   const [newKey, setNewKey] = useState("");
-  const [showKeyIds, setShowKeyIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const controller = new AbortController();
@@ -58,7 +57,7 @@ export default function ApiKeysPage() {
       });
       const data = await res.json();
       if (data.ok && data.key) {
-        setKeys(prev => [...prev, data.key]);
+        setKeys(prev => [data.key, ...prev]);
         setShowModal(false);
         setName("");
         setNewKey("");
@@ -72,15 +71,6 @@ export default function ApiKeysPage() {
       const data = await res.json();
       if (data.ok) setKeys(prev => prev.filter(k => k.id !== id));
     } catch { /* ignore */ }
-  }
-
-  function toggleShow(id: string) {
-    setShowKeyIds(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
   }
 
   return (
@@ -104,35 +94,21 @@ export default function ApiKeysPage() {
         <thead className="sticky top-0 z-10">
           <tr>
             <SettingsTh>{t("settings.externalApiKeys.name")}</SettingsTh>
-            <SettingsTh>Key</SettingsTh>
+            <SettingsTh>{t("settings.externalApiKeys.key")}</SettingsTh>
             <SettingsTh>{t("settings.externalApiKeys.createdAt")}</SettingsTh>
             <SettingsTh align="right">{t("settings.externalApiKeys.actions")}</SettingsTh>
           </tr>
         </thead>
         <tbody>
-          {keys.length > 0 ? keys.map((k) => {
-            const visible = showKeyIds.has(k.id);
-            return (
+          {keys.length > 0 ? keys.map((k) => (
               <tr key={k.id} className="hover:bg-slate-50">
                 <SettingsTd className="text-sm font-medium text-slate-800">{k.name}</SettingsTd>
                 <SettingsTd className="max-w-[24rem] truncate font-mono text-[11px] text-slate-500">
-                  {visible ? k.key : "••••••••"}
+                  {k.keyPreview}
                 </SettingsTd>
                 <SettingsTd>{k.createdAt ? new Date(k.createdAt).toLocaleString() : "-"}</SettingsTd>
                 <SettingsTd align="right">
                   <SettingsRowActions>
-                    <SettingsActionButton
-                      label={visible ? t("settings.externalApiKeys.hideKey") : t("settings.externalApiKeys.showKey")}
-                      variant={visible ? "hide" : "view"}
-                      onClick={() => toggleShow(k.id)}
-                    />
-                    {visible ? (
-                      <SettingsActionButton
-                        label={t("settings.externalApiKeys.copyKey")}
-                        variant="copy"
-                        onClick={() => copyToClipboard(k.key)}
-                      />
-                    ) : null}
                     <SettingsActionButton
                       label={t("settings.externalApiKeys.deleteKey")}
                       variant="delete"
@@ -141,8 +117,7 @@ export default function ApiKeysPage() {
                   </SettingsRowActions>
                 </SettingsTd>
               </tr>
-            );
-          }) : (
+          )) : (
             <SettingsEmptyRow colSpan={4}>{t("settings.externalApiKeys.empty")}</SettingsEmptyRow>
           )}
         </tbody>
@@ -165,7 +140,7 @@ export default function ApiKeysPage() {
                   value={name} onChange={(e) => setName(e.target.value)} placeholder={t("settings.externalApiKeys.namePlaceholder")} autoFocus />
               </div>
               <div>
-                <label className="form-label mb-1.5 block">Key</label>
+                <label className="form-label mb-1.5 block">{t("settings.externalApiKeys.key")}</label>
                 <div className="flex items-center gap-2">
                   <div className="h-9 flex-1 rounded-md border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 overflow-hidden font-mono">{newKey}</div>
                   <button className="secondary-button h-9 px-3"

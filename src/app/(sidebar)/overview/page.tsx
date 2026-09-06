@@ -4,6 +4,7 @@ import { OverviewDashboard } from "@/components/OverviewDashboard";
 import { MobileTransactionForm } from "@/components/mobile/MobileTransactionForm";
 import { normalizeCreditCardLabelTemplate } from "@/lib/account-display";
 import { getHouseholdScope } from "@/lib/server/household-scope";
+import { ACCOUNT_LABEL_FIELDS_COOKIE, accountLabelFieldsFromCookieValue } from "@/lib/server/account-label-fields";
 import { getServerDisplayLanguage } from "@/lib/server/i18n";
 import { computeInsuranceOverviewSummary } from "@/lib/server/insurance-overview-summary";
 import { computeOverviewSummary } from "@/lib/server/overview-summary";
@@ -15,6 +16,7 @@ export const dynamic = "force-dynamic";
 export default async function OverviewPage() {
   const ctx = await getHouseholdScope();
   const cookieStore = await cookies();
+  const accountLabelFields = accountLabelFieldsFromCookieValue(cookieStore.get(ACCOUNT_LABEL_FIELDS_COOKIE)?.value);
   const language = await getServerDisplayLanguage();
   const isRedUp = (cookieStore.get("colorScheme")?.value ?? "red_up_green_down") === "red_up_green_down";
   const creditCardLabelMode = cookieStore.get("mmh_credit_card_label_mode")?.value === "full_name" ? "full_name" : "short_last4";
@@ -23,7 +25,7 @@ export default async function OverviewPage() {
     creditCardLabelMode,
   );
   const [summary, insuranceOverview, accounts, categories] = await Promise.all([
-    computeOverviewSummary(ctx, creditCardLabelTemplate, language),
+    computeOverviewSummary(ctx, creditCardLabelTemplate, language, { accountLabelFields }),
     computeInsuranceOverviewSummary(ctx),
     prisma.account.findMany({
       where: { ...ctx.hidFilter, isActive: true, isPlaceholder: { not: true } },

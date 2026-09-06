@@ -15,6 +15,11 @@ import { loadInvestmentProfitReport } from "@/lib/server/investment-profit-repor
  * - month: required month for month mode.
  * - mode: "month" for daily rows, "year" for monthly rows.
  *
+ * PnL uses the same investment-profit result as the report, including fund
+ * NAV movement, stock close-price movement plus sell/dividend/fee cash-flow
+ * corrections, fixed asset sale realized profit, wealth product results, and
+ * deposit interest/fees.
+ *
  * Success:
  * - month mode: { ok: true, days: [{ date, mv, pnl }] }
  * - year mode: { ok: true, months: [{ month, mv, pnl }] }

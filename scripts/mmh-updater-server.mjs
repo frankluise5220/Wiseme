@@ -566,6 +566,7 @@ async function scheduleUpdaterRecreate(updaterImage) {
       `docker compose -p ${composeProject}`,
       `-f ${JSON.stringify(hostComposeFile)}`,
       "up -d --no-deps --force-recreate updater",
+      "docker image prune -af >/dev/null 2>&1 || true",
     ].join(" ");
     const child = spawn("docker", [
       "run",

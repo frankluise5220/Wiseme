@@ -6,7 +6,11 @@ export const DEBT_DIRECTION_LABELS: Record<DebtDirectionValue, string> = {
 };
 
 export function isDebtAccountKind(kind: string | null | undefined) {
-  return kind === "bank_credit" || kind === "loan";
+  return kind === "bank_credit" || isLoanOrSettlementAccountKind(kind);
+}
+
+export function isLoanOrSettlementAccountKind(kind: string | null | undefined) {
+  return kind === "loan" || kind === "settlement";
 }
 
 export function normalizeDebtDirection(

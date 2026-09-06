@@ -1,6 +1,7 @@
-import { type TxRecord } from "@prisma/client";
+import { Prisma, type TxRecord } from "@prisma/client";
 
 import { prisma } from "@/lib/db/prisma";
+import { chunk, IN_CHUNK_SIZE } from "@/lib/server/prisma-in-chunks";
 import { recalcFundPositions } from "@/lib/fund/recalcPosition";
 import { syncFundTransactionsFromTxRecords } from "@/lib/fund/transactions";
 import { logger } from "@/lib/logger";
@@ -109,19 +110,25 @@ async function collectFundTransactionRecalcTargetsByEntryIds(
 ) {
   const ids = Array.from(new Set(entryIds.filter(Boolean)));
   if (ids.length === 0) return;
-  const rows = await prisma.fundTransaction.findMany({
-    where: {
-      householdId,
-      OR: [
-        { id: { in: ids } },
-        { cashEntryId: { in: ids } },
-        { cashFlows: { some: { txRecordId: { in: ids } } } },
-        { EntryBusinessLink: { some: { cashEntryId: { in: ids } } } },
-      ],
-    },
-    select: { fundAccountId: true, fundCode: true },
-  });
-  for (const row of rows) {
+  // The OR contains 4 `{ in: ids }` clauses (including nested `some` relations),
+  // so large batches exceed SQLite's parameter limit. Query in chunks.
+  const fundTargets: { fundAccountId: string; fundCode: string }[] = [];
+  for (const part of chunk(ids, IN_CHUNK_SIZE)) {
+    const rows = await prisma.fundTransaction.findMany({
+      where: {
+        householdId,
+        OR: [
+          { id: { in: part } },
+          { cashEntryId: { in: part } },
+          { cashFlows: { some: { txRecordId: { in: part } } } },
+          { EntryBusinessLink: { some: { cashEntryId: { in: part } } } },
+        ],
+      },
+      select: { fundAccountId: true, fundCode: true },
+    });
+    fundTargets.push(...rows);
+  }
+  for (const row of fundTargets) {
     addFundRecalcTarget(targets, row.fundAccountId, row.fundCode);
   }
 }
@@ -301,23 +308,31 @@ async function softDeleteIndependentBusinessRecordsByIds(
 
   const independentBusinessIds = result.deletedEntryIds;
   const removedCashEntryIds = result.removedEntryIds.filter((id) => !independentBusinessIds.includes(id));
-  if (independentBusinessIds.length > 0 || removedCashEntryIds.length > 0) {
+
+  // One updateMany used to combine 8 business-side `in` clauses with 1 cash-side
+  // `in` clause, exceeding SQLite's parameter limit for large batches. Split
+  // them into separate chunked passes. Setting the same deletedAt is idempotent,
+  // so any cross-chunk overlap costs nothing.
+  const businessLinkWhere = (ids: string[]): Prisma.EntryBusinessLinkWhereInput => ({
+    householdId: ctx.householdId,
+    deletedAt: null,
+    OR: [
+      { businessEntryId: { in: ids } },
+      { fundTransactionId: { in: ids } },
+      { insuranceTransactionId: { in: ids } },
+      { wealthTransactionId: { in: ids } },
+      { depositTransactionId: { in: ids } },
+      { preciousMetalTransactionId: { in: ids } },
+      { stockTransactionId: { in: ids } },
+      { propertyTransactionId: { in: ids } },
+    ],
+  });
+  for (const part of chunk(independentBusinessIds, IN_CHUNK_SIZE)) {
+    await prisma.entryBusinessLink.updateMany({ where: businessLinkWhere(part), data: { deletedAt } });
+  }
+  for (const part of chunk(removedCashEntryIds, IN_CHUNK_SIZE)) {
     await prisma.entryBusinessLink.updateMany({
-      where: {
-        householdId: ctx.householdId,
-        deletedAt: null,
-        OR: [
-          { cashEntryId: { in: removedCashEntryIds } },
-          { businessEntryId: { in: independentBusinessIds } },
-          { fundTransactionId: { in: independentBusinessIds } },
-          { insuranceTransactionId: { in: independentBusinessIds } },
-          { wealthTransactionId: { in: independentBusinessIds } },
-          { depositTransactionId: { in: independentBusinessIds } },
-          { preciousMetalTransactionId: { in: independentBusinessIds } },
-          { stockTransactionId: { in: independentBusinessIds } },
-          { propertyTransactionId: { in: independentBusinessIds } },
-        ],
-      },
+      where: { householdId: ctx.householdId, deletedAt: null, cashEntryId: { in: part } },
       data: { deletedAt },
     });
   }

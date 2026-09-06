@@ -1,17 +1,33 @@
 "use client";
 
 import {
+  DEFAULT_ACCOUNT_LABEL_FIELDS,
   DEFAULT_CREDIT_CARD_LABEL_TEMPLATE,
   FULL_NAME_CREDIT_CARD_LABEL_TEMPLATE,
   SIDEBAR_CREDIT_CARD_LABEL_TEMPLATE,
+  normalizeAccountLabelFields,
   normalizeCreditCardLabelTemplate,
+  parseAccountLabelFields,
+  serializeAccountLabelFields,
+  type AccountLabelField,
 } from "@/lib/account-display";
 import {
   normalizeDateDisplayFormat,
   type DateDisplayFormat,
 } from "@/lib/date-utils";
+import {
+  normalizeRowHeightMode,
+  type RowHeightMode,
+} from "@/lib/row-height";
 
 export type { DateDisplayFormat } from "@/lib/date-utils";
+export {
+  DEFAULT_ROW_HEIGHT_MODE,
+  ROW_HEIGHT_OPTIONS,
+  ROW_HEIGHT_PRESETS,
+  normalizeRowHeightMode,
+} from "@/lib/row-height";
+export type { RowHeightMode } from "@/lib/row-height";
 
 export const SESSION_DAYS_COOKIE = "mmh_session_days";
 export const FUND_UNITS_DECIMALS_COOKIE = "mmh_fund_units_decimals";
@@ -31,7 +47,9 @@ export const SIDEBAR_HIDE_ZERO_KEY = "sidebar_hide_zero";
 export const SIDEBAR_HIDE_INITIAL_DATA_KEY = "sidebar_hide_initial_data";
 export const SIDEBAR_SHOW_FIXED_ASSETS_KEY = "sidebar_show_fixed_assets";
 export const DETAIL_DATE_BACKGROUND_KEY = "detail_date_background";
-export const COMPACT_ROW_HEIGHT_KEY = "advanced_data_table_compact_row_height";
+export const ROW_HEIGHT_MODE_KEY = "advanced_data_table_row_height_mode";
+export const ACCOUNT_LABEL_FIELDS_COOKIE = "mmh_account_label_fields";
+export const ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE = "mmh_account_dropdown_restrict_type";
 export const SIDEBAR_COLLAPSED_KEY = "sidebar_collapsed";
 export const SIDEBAR_OWNER_FILTER_KEY = "sidebar_owner_filter";
 export const AI_PANEL_COLLAPSED_KEY = "mmh_ai_panel_collapsed";
@@ -62,8 +80,10 @@ export type AppPreferencesSnapshot = {
   sidebarHideInitialData: boolean;
   sidebarShowFixedAssets: boolean;
   detailDateBackground: boolean;
-  compactRowHeight: number;
+  rowHeightMode: RowHeightMode;
   sidebarCollapsed: boolean;
+  accountLabelFields: AccountLabelField[];
+  accountDropdownRestrictType: boolean;
 };
 
 const DEFAULT_SESSION_DAYS = 30;
@@ -71,7 +91,6 @@ const DEFAULT_FUND_UNITS_DECIMALS = 2;
 const DEFAULT_TIME_ZONE = "Asia/Shanghai";
 const DEFAULT_CREDIT_CARD_LABEL_MODE: CreditCardLabelMode = "short_last4";
 const DEFAULT_DISPLAY_LANGUAGE: DisplayLanguage = "zh-CN";
-export const DEFAULT_COMPACT_ROW_HEIGHT = 30;
 
 function parseCookieValue(name: string): string | null {
   if (typeof document === "undefined") return null;
@@ -349,25 +368,22 @@ export function setDetailDateBackgroundPreference(value: boolean) {
   emitPreferencesChanged();
 }
 
-export function getCompactRowHeightPreference(): number {
+export function getRowHeightModePreference(): RowHeightMode {
   try {
-    const value = localStorage.getItem(COMPACT_ROW_HEIGHT_KEY) ?? parseCookieValue(COMPACT_ROW_HEIGHT_KEY);
-    const n = Number(value);
-    if (!Number.isFinite(n)) return DEFAULT_COMPACT_ROW_HEIGHT;
-    return Math.min(Math.max(Math.round(n), 25), 35);
+    return normalizeRowHeightMode(
+      localStorage.getItem(ROW_HEIGHT_MODE_KEY) ?? parseCookieValue(ROW_HEIGHT_MODE_KEY),
+    );
   } catch {
-    const value = parseCookieValue(COMPACT_ROW_HEIGHT_KEY);
-    const n = Number(value);
-    if (!Number.isFinite(n)) return DEFAULT_COMPACT_ROW_HEIGHT;
-    return Math.min(Math.max(Math.round(n), 25), 35);
+    return normalizeRowHeightMode(parseCookieValue(ROW_HEIGHT_MODE_KEY));
   }
 }
 
-export function setCompactRowHeightPreference(value: number) {
+export function setRowHeightModePreference(value: RowHeightMode) {
+  const normalized = normalizeRowHeightMode(value);
   try {
-    localStorage.setItem(COMPACT_ROW_HEIGHT_KEY, String(Math.min(Math.max(Math.round(value), 25), 35)));
+    localStorage.setItem(ROW_HEIGHT_MODE_KEY, String(normalized));
   } catch {}
-  setCookieValue(COMPACT_ROW_HEIGHT_KEY, String(Math.min(Math.max(Math.round(value), 25), 35)));
+  setCookieValue(ROW_HEIGHT_MODE_KEY, String(normalized));
   emitPreferencesChanged();
 }
 
@@ -405,6 +421,18 @@ export function setAiPanelCollapsedPreference(value: boolean) {
   setCookieValue(AI_PANEL_COLLAPSED_KEY, value ? "1" : "0");
 }
 
+export function getAccountLabelFieldsPreference(): AccountLabelField[] {
+  const raw = parseCookieValue(ACCOUNT_LABEL_FIELDS_COOKIE);
+  if (raw == null) return [...DEFAULT_ACCOUNT_LABEL_FIELDS];
+  return parseAccountLabelFields(raw);
+}
+
+export function setAccountLabelFieldsPreference(fields: AccountLabelField[]) {
+  const normalized = normalizeAccountLabelFields(fields);
+  setCookieValue(ACCOUNT_LABEL_FIELDS_COOKIE, serializeAccountLabelFields(normalized));
+  emitPreferencesChanged();
+}
+
 export function getAppPreferences(): AppPreferencesSnapshot {
   return {
     sessionDays: getSessionDaysPreference(),
@@ -426,7 +454,28 @@ export function getAppPreferences(): AppPreferencesSnapshot {
     sidebarHideInitialData: getSidebarHideInitialDataPreference(),
     sidebarShowFixedAssets: getSidebarShowFixedAssetsPreference(),
     detailDateBackground: getDetailDateBackgroundPreference(),
-    compactRowHeight: getCompactRowHeightPreference(),
+    rowHeightMode: getRowHeightModePreference(),
     sidebarCollapsed: getSidebarCollapsedPreference(),
+    accountLabelFields: getAccountLabelFieldsPreference(),
+    accountDropdownRestrictType: getAccountDropdownRestrictTypePreference(),
   };
+}
+
+const DEFAULT_ACCOUNT_DROPDOWN_RESTRICT_TYPE = true;
+
+export function getAccountDropdownRestrictTypePreference(): boolean {
+  try {
+    const value = localStorage.getItem(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE) ?? parseCookieValue(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE);
+    return value === "false" ? false : DEFAULT_ACCOUNT_DROPDOWN_RESTRICT_TYPE;
+  } catch {
+    return parseCookieValue(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE) === "false" ? false : DEFAULT_ACCOUNT_DROPDOWN_RESTRICT_TYPE;
+  }
+}
+
+export function setAccountDropdownRestrictTypePreference(value: boolean) {
+  try {
+    localStorage.setItem(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE, String(value));
+  } catch {}
+  setCookieValue(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE, String(value));
+  emitPreferencesChanged();
 }

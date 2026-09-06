@@ -22,13 +22,21 @@ https://gitee.com/hhxs2025/fn-appstores/releases
 
 打开 FN 软仓客户端，搜索 `MMH` 或 `MMH 家庭财务工作台`，点击安装。当前软仓已经内置 MMH 源，不需要手动添加应用源。软仓源提供 x86_64 和 arm64 两个架构的正式 `.fpk`，客户端会按设备架构下载对应安装包。
 
-以后更新时，在 FN 软仓客户端里查看 MMH，看到新版本后直接点击更新。更新应当是同一个应用 `mmh` 的覆盖升级，不需要先卸载旧版；覆盖升级会优先沿用已安装 MMH 写入 `.port` / `mmh.env` 的在用端口，不会用新包向导里的默认 `7777` 覆盖已有端口。
+以后更新时，在 FN 软仓客户端里查看 MMH，看到新版本后直接点击更新。更新不会弹出任何向导：MMH 包内不包含 `wizard/install`、`wizard/upgrade`、`wizard/uninstall`，`0.1.47` 起 FN 软仓客户端的更新是完全静默的。更新会沿用已安装 MMH 写入 `.port` / `mmh.env` 的在用端口，不会用包内默认的 `7777` 覆盖已有端口。
+
+> 说明：`0.1.46` 及更早版本的包内带 `wizard/install`，FN 软仓客户端只解析这个文件，解析到后会在每次更新时把它当安装向导渲染，弹出“服务端口”输入页。这是旧包的行为，升级到 `0.1.47` 之后不会再出现。
+
+### 修改服务端口
+
+安装后如果需要换端口，在飞牛应用中心里打开 MMH 的设置页修改“服务端口”并保存。这个设置页来自包内的 `wizard/config`，FN 软仓客户端不会解析它，所以不会让更新重新弹向导。保存后 MMH 会自动停服、写入新端口并重启，新端口会持久化到 `.port` / `mmh.env`，后续更新继续沿用。
+
+首次安装不提供端口输入，端口从 `7777` 开始自动探测，若已被占用则顺延到下一个空闲端口。
 
 ### 备用：手动安装 `.fpk`
 
 1. 下载 Release 资产中适合当前飞牛设备架构的 `.fpk`。x86_64 设备使用 `mmh-fnos-v0.1.x-x86_64.fpk`，ARM64 设备使用 `mmh-fnos-v0.1.x-arm64.fpk`。
 2. 在飞牛应用中心或支持手动安装 `.fpk` 的入口上传安装包。
-3. 安装向导中只需确认服务端口；默认使用 `7777`，如果端口已被占用，可以改为其他未占用端口。系统初始化、删除账簿等敏感操作验证当前登录用户的密码（操作仅管理员可见）。
+3. 安装过程没有向导，直接安装完成。首次安装的服务端口从 `7777` 开始自动探测，若已被占用则顺延到下一个空闲端口；覆盖安装或更新会沿用已有的持久端口。装好后可在应用中心的 MMH 设置页里改端口。系统初始化、删除账簿等敏感操作验证当前登录用户的密码（操作仅管理员可见）。
 4. 启动后访问：
 
 ```text
@@ -41,7 +49,7 @@ http://飞牛IP:7777/
 mmh.db
 ```
 
-手动更新时，下载更高版本、同架构的 `.fpk`，然后在已安装的 MMH 上直接执行更新/覆盖升级。不要把“卸载旧版再安装新版”当作日常更新方式；覆盖升级即使收到安装向导传入的端口字段，也必须优先复用已安装 MMH 的在用端口。卸载只属于用户主动删除应用或异常恢复流程。
+手动更新时，下载更高版本、同架构的 `.fpk`，然后在已安装的 MMH 上直接执行更新/覆盖升级。更新不会弹向导，端口沿用已安装 MMH 保留在应用数据目录里的 `.port` / `mmh.env`。卸载只属于用户主动删除应用或异常恢复流程；卸载会保留应用数据目录，重新安装后仍会沿用原来的端口与数据。
 
 ## 打包
 
@@ -90,15 +98,15 @@ mmh-fnos-v0.1.x-arm64.fpk
 - 飞牛包版本直接使用 `package.json` 的 `0.1.x`，与 GitHub Release tag `v0.1.x` 和 GHCR 镜像 tag 一致；不要再发布 `v0.1.x-fnos` 或包内 `-fnos` 版本。
 - 上传前必须运行 `FNOS_VERIFY_BUILT_FPK=1 npm run check:fnos`，确认包内 `cmd/main`、manifest 和数据目录逻辑来自当前源码。
 - Release workflow 会按 x86 / arm64 安装对应架构的官方 `fnpack`；如果安装或验证失败，workflow 必须失败，不能上传 `*-fpk-source.tgz` 作为替代。
-- `repository/apps.example.json` 的 `download_url` / `download_urls.x86_64` 指向 VPS 托管的 `http://fnapp.floatingice.win/apps/mmh-0.1.x.fpk`，`download_urls.arm64` 指向 GitHub Release 中的 `mmh-fnos-v0.1.x-arm64.fpk`。
+- `repository/apps.example.json` 的 `download_url` / `download_urls.x86_64` 指向 GitHub Release 中的 `mmh-fnos-v0.1.x-x86_64.fpk`，`download_urls.arm64` 指向 GitHub Release 中的 `mmh-fnos-v0.1.x-arm64.fpk`。
 
 ## 软仓源维护说明
 
-- 当前验证过的公开源地址是：
-  `http://fnapp.floatingice.win:5660`
+- 当前公开源地址是 GitHub raw 目录：
+  `https://raw.githubusercontent.com/frankluise5220/MMH/main/deploy/fnos/repository`
 - FN 软仓当前已经内置 MMH 源，普通用户不需要手动添加源。
-- VPS 软仓服务同步 GitHub `frankluise5220/MMH` 仓库的 `main/deploy/fnos/repository` 目录并对外提供 `/api/apps`；`fnpack.json` 作为源数据文件保留在同一目录。
-- `download_url` 和 `download_urls.x86_64` 指向 VPS 托管的 x86_64 包 `http://fnapp.floatingice.win/apps/mmh-0.1.x.fpk`，`download_urls.arm64` 仍指向 GitHub Release 中的 arm64 FPK，直到 VPS 也托管 arm64 本地包。
+- 软仓源数据即仓库的 `main/deploy/fnos/repository` 目录；`api/apps` 是可直接访问的静态源文件，`fnpack.json` 作为源数据文件保留在同一目录。
+- `download_url` 和 `download_urls.x86_64` 指向 GitHub Release 中的 x86_64 包 `mmh-fnos-v0.1.x-x86_64.fpk`，`download_urls.arm64` 指向 GitHub Release 中的 arm64 FPK。
 
 ## 升级边界
 
@@ -106,7 +114,10 @@ mmh-fnos-v0.1.x-arm64.fpk
 - 正常更新必须是同一 `appname=mmh` 的覆盖升级：安装更高版本、同架构的 `.fpk` 时，飞牛应走 `cmd/upgrade_init` / `cmd/upgrade_callback`，不得把常规更新实现为先卸载再安装。
 - 手动安装的 `.fpk` 在飞牛应用中心里可能标记为 `manualInstall`。这会影响官方应用中心是否主动提示更新，但不应改变包自身的覆盖升级目标。
 - 覆盖升级后必须验证 `/var/apps/mmh/manifest`、`/vol1/@appcenter/mmh/server/package.json` 和关键 API，确认实际运行代码与 manifest 版本都已更新。
-- 包内可以保留首次安装使用的 `wizard/install`，但不得包含 `wizard/upgrade`、`wizard/config` 或 `wizard/uninstall`。FN 软仓更新必须静默执行直到成功；更新回调必须先读取 `.port` / `mmh.env` 中已安装 MMH 的在用端口，只有首次安装没有持久化端口时才使用 `wizard_port`。
+- 包内不得包含安装类向导，`wizard/install`、`wizard/upgrade`、`wizard/uninstall` 都不允许。FN 软仓客户端（`fn-appstores-client`）只解析 `wizard/install`：只要该文件存在，更新时就会渲染向导、等待用户输入，并把输入写入 `wizard.env` 后传给 `appcenter-cli install-fpk --env`；没有该文件时客户端直接安装，更新才是静默的。端口必须先读取已安装 MMH 的 `.port` / `mmh.env`，只有两者都不存在时才从 `TRIM_SERVICE_PORT` / 默认 `7777` 开始用 `/dev/tcp` 探测空闲端口。
+- 改端口只能走 `wizard/config`（应用中心 MMH 设置页），不能改回安装向导。软仓客户端不解析 `wizard/config`，只有用户主动打开设置页时才显示；`cmd/config_callback` 校验端口后停服、把新端口写入 `.port` 与 `mmh.env` 再启动。因为 `resolve_port()` 优先读已持久化的 `.port`，`config_callback` 必须把向导值显式传给 `write_env_file`，否则新端口会被旧值覆盖。
+- `cmd/main` 启动服务时读的是 `mmh.env` 里的 `PORT`（`export PORT="${PORT:-${env_port:-7777}}"`），不读 `.port`。所以改端口必须同时更新这两个文件，只改 `.port` 不会生效。
+- 实测记录：FN 软仓客户端的“更新”实际执行的是**先卸载再重装**（客户端日志依次为 `卸载: mmh`、`向导安装命令: ... install-fpk ... --env .../wizard.env`、`安装完成: mmh 带向导安装`），并不调用 `cmd/upgrade_init` / `cmd/upgrade_callback`。因此端口与数据的沿用完全依赖卸载时保留的应用数据目录，`uninstall_init` 的备份兜底不能移除。
 - 数据库结构变化必须通过包内 SQLite 运行时迁移处理。新增字段应使用幂等 `ALTER TABLE ADD COLUMN`；字段重命名、拆分或表结构重组必须写显式迁移和数据回填，不能靠重建数据库或清空表来“适配”新版。
 - `uninstall_init` 只作为用户主动卸载或异常恢复时的数据兜底；正常升级验收不能依赖卸载重装。生命周期在检测到 `data/mmh.db` 时，会先把应用数据目录复制到同级的 `mmh-upgrade-backups` 目录。用户仍应优先在 MMH 里导出 `.mmh-backup` 后再做高风险操作。
 - 生命周期脚本不能默认以 `mmh` 包用户运行。`install_init` / `upgrade_init` / `uninstall_init` 需要由应用中心/root 完成安装前权限准备和同级备份；`cmd/main start` 再把数据目录归属修正为 `mmh:mmh`，并降权到 `mmh` 用户运行 Node 服务。

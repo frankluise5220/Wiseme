@@ -1,6 +1,7 @@
 import { Prisma, type LoanRateAdjustment as LoanRateAdjustmentRow } from "@prisma/client";
 
 import { prisma } from "@/lib/db/prisma";
+import { inferMortgageLprDiscountFromRateAdjustments, normalizeMortgageLprAdjustmentHistory } from "@/lib/loan-lpr";
 import { normalizeLoanRateAdjustments, type LoanRateAdjustment } from "@/lib/loan-repayment";
 
 type LoanRateAdjustmentStore = Pick<Prisma.TransactionClient, "loanRateAdjustment">;
@@ -38,9 +39,19 @@ export function loanRateAdjustmentRowsToPayload(rows: Pick<LoanRateAdjustmentRow
 export function resolveLoanRateAdjustments(params: {
   tableAdjustments?: LoanRateAdjustment[] | null;
   memoAdjustments?: LoanRateAdjustment[] | null;
+  mortgageLprDiscount?: number | null;
+  loanStartDate?: string | null;
+  throughDate?: string | null;
 }) {
   const tableAdjustments = normalizeLoanRateAdjustments(params.tableAdjustments);
-  return tableAdjustments.length > 0 ? tableAdjustments : normalizeLoanRateAdjustments(params.memoAdjustments);
+  const adjustments = tableAdjustments.length > 0 ? tableAdjustments : normalizeLoanRateAdjustments(params.memoAdjustments);
+  const mortgageLprDiscount = params.mortgageLprDiscount ?? inferMortgageLprDiscountFromRateAdjustments(adjustments);
+  return normalizeMortgageLprAdjustmentHistory({
+    adjustments,
+    discount: mortgageLprDiscount,
+    throughDate: params.throughDate ?? formatDateOnly(new Date()),
+    fromDate: params.loanStartDate,
+  });
 }
 
 export async function listLoanRateAdjustmentsByAccountIds(params: {

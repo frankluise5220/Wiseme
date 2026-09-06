@@ -284,6 +284,7 @@ class MobileSyncRepository @Inject constructor(
         cashAccountInstitutionName = cashAccountInstitutionName,
         fundCode = fundCode,
         fundName = fundName,
+        planName = planName,
         fundProductType = fundProductType,
         amount = amount,
         intervalUnit = intervalUnit,

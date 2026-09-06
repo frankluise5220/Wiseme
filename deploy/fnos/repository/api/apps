@@ -4,7 +4,7 @@
     {
       "id": "mmh",
       "name": "MMH",
-      "version": "0.1.46",
+      "version": "0.1.53",
       "platform": "x86",
       "platforms": [
         "x86",
@@ -12,21 +12,21 @@
       ],
       "author": "frankluise5220",
       "desc": "本地部署的家庭记账与资产管理工具，支持账户流水、信用卡账单、基金持仓、统计报表和数据导入，数据保存在自己的飞牛 NAS 上。",
-      "download_url": "http://fnapp.floatingice.win/apps/mmh-0.1.46.fpk",
+      "download_url": "https://github.com/frankluise5220/MMH/releases/download/v0.1.53/mmh-fnos-v0.1.53-x86_64.fpk",
       "download_urls": {
-        "x86_64": "http://fnapp.floatingice.win/apps/mmh-0.1.46.fpk",
-        "arm64": "https://github.com/frankluise5220/MMH/releases/download/v0.1.46/mmh-fnos-v0.1.46-arm64.fpk"
+        "x86_64": "https://github.com/frankluise5220/MMH/releases/download/v0.1.53/mmh-fnos-v0.1.53-x86_64.fpk",
+        "arm64": "https://github.com/frankluise5220/MMH/releases/download/v0.1.53/mmh-fnos-v0.1.53-arm64.fpk"
       },
-      "icon": "https://raw.githubusercontent.com/frankluise5220/MMH/main/public/branding/mmh-logo-pageflip-192.png?v=0.1.46",
+      "icon": "https://raw.githubusercontent.com/frankluise5220/MMH/main/public/branding/mmh-logo-pageflip-192.png?v=0.1.53",
       "repo": "https://github.com/frankluise5220/MMH",
       "tags": "财务,记账",
-      "changelog": "## 本次更新\n\n### 需求响应\n\n- 响应 issue #4 中关于房产/固定资产、投资报表和股票使用体验的反馈：本次完善固定资产的独立记录、筛选和汇总展示，并继续优化股票交易与收益报表相关入口；账户所有人维护等尚未完成的方向不在本次发布范围内。\n- 响应 issue #15 的支付宝、微信及多张信用卡账单核对场景：新增账单汇总接口，支持按账期读取明细、汇总和局部刷新，减少导入后需要整页重载的问题。\n- 响应 issue #17 中关于基金净值和定期任务的反馈：改进基金净值刷新与历史数据读取，优化定期任务的周期/执行日选择、定期投资名称补全和编辑后的列表刷新。\n\n### 功能改进\n\n- 总览、统计和报表支持按本位币汇总多币种资产；缺少汇率时不再使用 1:1 参与合计，并明确提示缺少汇率的币种。\n- 固定资产从投资资产中拆分，单独展示现值、成本、增值和资产数量；Web 与 Android 总览接口和页面同步增加固定资产数据。\n- 新增基金档案维护，可记录基金公司、托管人、基金经理等信息；基金公司支持机构筛选、账户新增和基金持仓报告分组。\n- 增加基金持仓/已清仓报告，并支持按基金公司查看；基金净值刷新减少不必要的历史请求并优化并发处理。\n- 股票交易增加缓存和批量删除能力，股票导入的账户匹配复用统一匹配逻辑，降低重复账户或错误归属的概率。\n- 优化定期任务、贷款还款和分期利息计算，改进周/月/年执行日期的边界处理；保存后优先刷新受影响的列表和汇总。\n- 信用卡账单新增汇总与局部刷新链路，账期、明细、导入覆盖和账单日规则之间的缓存刷新保持一致。\n- Web、移动 API 和 Android 总览字段保持一致，Android 总览新增固定资产卡片及本位币/缺少汇率信息。\n\n### Bug 修复\n\n- 修复多币种总览在缺少汇率时把不同币种按 1:1 相加，避免资产合计和分布被错误放大或缩小。\n- 修复固定资产被混入投资资产统计的问题，统一固定资产账户在总览、报表、交易和账户选择中的识别。\n- 修复基金净值刷新过程中重复请求历史数据、日期回退和并发过高导致的报错或等待过久问题。\n- 修复定期任务编辑后列表仍显示旧数据、执行日期在周期边界上偏移，以及定期投资名称为空时无法正确补全的问题。\n- 修复贷款还款方式和分期利息计算在不同入口口径不一致的问题。\n- 修复账单汇总、账单明细和账期切换的局部刷新不完整问题，避免导入或修改账单规则后继续显示旧缓存。\n- 修复股票交易导入、批量删除和交易明细在账户切换后出现的匹配或刷新不一致问题。\n\n### 打包与部署\n\n- 本次发布包含 Docker 镜像、NAS ZIP、fnOS x86_64 / arm64 FPK、群晖 DSM x86_64 / arm64 SPK，以及 Android APK。\n- 群晖 SPK 已随本次重新打包；由于缺少可用的群晖真实环境，请安装后继续测试并反馈安装、启动和升级结果。\n- Android 本次确有总览代码改动，因此按实际变动发布同版本 APK，不创建独立的 Android 版本。\n- fnOS 软仓客户端地址：[FN 软仓客户端](https://gitee.com/hhxs2025/fn-appstores/releases/download/2.4.1/fn-appstores-client-2.4.1-x86.fpk)。\n\n## 手机端使用建议\n\n- 手机用户无需安装客户端，直接用浏览器访问 MMH 服务地址即可；Web 版已针对手机浏览器做响应式优化，日常查看、快速记账、概览、基金和股票持仓都可以在手机上完成。\n- 如果主要进行日常查看和快速记账，可以把 Web 版添加到手机桌面，后续服务端更新后直接刷新使用。\n\n## 安装 / 更新说明\n\n- Docker 版：查看 [NAS Docker 安装说明](https://github.com/frankluise5220/MMH/blob/main/docs/nas-install-manual.md) 后按文档安装或更新。\n- fnOS（官方 FPK）：可通过应用中心或 FN 软仓源覆盖升级，本次提供 x86_64 / arm64 两个 FPK。\n- fnOS（FN 软仓客户端安装）：先下载 [FN 软仓客户端](https://gitee.com/hhxs2025/fn-appstores/releases/download/2.4.1/fn-appstores-client-2.4.1-x86.fpk)，即可查询安装/覆盖升级 MMH。\n- 专属软件源：如果 FN 软仓更新较慢，可以在软仓“源管理”里添加 MMH 专用源 http://fnapp.floatingice.win:5660，名称自定义。\n- 群晖 DSM（官方 SPK）：本次提供 x86_64 / arm64 两个 SPK；由于缺少群晖真实环境，请大家继续测试安装、启动和升级。\n- Android：本次包含 Android 总览改动，随本版本发布 APK。",
+      "changelog": "## 本次更新\n\n> 0.1.53 是这两天贷款、往来款、导入、统计和升级可靠性调整后的正式发布版。x86_64 FPK 已完成实机安装和启动验证；本次包含账户分类相关的数据库迁移，更新前建议先备份账簿。\n\n### 需求响应\n\n- issue #4（房产与基础资料）：补齐房产资产与抵押贷款账户的关联能力，房产编辑中可切换抵押状态，并在债务/侧边栏视图中展示对应关系。\n- issue #4（报表与统计）：继续完善投资收益报告、统计筛选和基础资料维护入口，报表页面对多账户、多币种和投资类数据的展示更完整。\n- issue #4（基金/股票导入反馈）：优化基金、股票导入时名称补全、单位对账和费用/金额计算链，减少导入后手工修正。\n- issue #15（账单导入）：保留支付宝、微信 Excel 导入，并继续增强账单识别、标准模板预览和财智8明细转换能力。\n- 账户维护：新增账户合并接口和基础数据导入/导出入口，账户、机构、家庭成员、往来对象和标签维护更集中。\n- 桌面端准备：加入 Windows 桌面端基础配置和设置入口，本次不发布 Windows 安装包，仅随主代码进入后续验证。\n\n### 贷款与往来款\n\n- 贷款类型：新增房贷、抵押贷、消费贷、其他贷款分类，贷款账户可保存明确的贷款类型。\n- 往来款独立：将往来款从贷款账户中拆出为独立账户类型，不再混入贷款列表，侧边栏和债务页面分别展示贷款与往来款。\n- 历史数据迁移：已有往来款会迁移为 settlement 类型；已有消费贷标注为 consumer；其余贷款按兼容规则保留为贷款类型，避免真实贷款被误拆。\n- 利率调整：保存利率表只更新利率、折扣和备注，不再顺带重算月供，避免用户调整利率后月供意外跳变。\n- 还款重算：新增贷款还款重建/重算路径，重算时尽量修正既有账单行，不随意删除用户已有还款记录。\n- 提前还款：缩短期数模式按剩余本金、有效利率和承袭月供推导剩余期数，减少旧期数干扰。\n\n### 导入、统计与显示\n\n- 账单导入：增强 Excel 导入菜单、账单解析、预览编辑和字段说明，财智8余额调整行不再误导入为收入。\n- 基金导入：优化基金动作识别、单位对账和净值/名称补全，降低单位精度差异带来的持仓偏差。\n- 股票导入：完善股票导入路由、证券名称补全、费用小计和金额合计处理，导入后更容易直接落账。\n- 投资收益：固定资产、基金、股票相关统计继续收敛到统一的收益展示逻辑，房产估值和处置后的收益展示更稳定。\n- 账户选择：新增账户下拉限制设置，可按业务场景减少无关账户干扰，也可在显示设置中关闭。\n- 侧边栏性能：账户余额刷新改为共享合并请求，减少重复请求导致的等待和闪烁。\n\n### Bug 修复\n\n- 修复贷款利率调整后月供被意外重算的问题。\n- 修复 LPR 报价日记录和生成记录重复时的归一化问题。\n- 修复贷款/往来款拆分后定时任务、债务页面和侧边栏路由分类不一致的问题。\n- 修复原生包 SQLite 迁移脚本与 Prisma schema 不一致可能导致升级失败的问题。\n- 修复 Docker 升级后旧镜像长期堆积、可能挤满 NAS 存储的问题；更新服务会在升级后清理未使用镜像。\n- 修复部分公开认证状态接口在冷启动或访问控制读取失败时误报“无法获取账簿登录信息”的问题。\n- 修复签名 session Cookie 安全加固后，生产包未持久化 `MMH_SESSION_SECRET` 时可能导致登录 500 的问题。\n- 修复账户导入、标签、基础资料维护和删除后分页刷新中的若干细节问题。\n\n### 打包与部署\n\n- fnOS：发布 x86_64 / arm64 两个 FPK；x86_64 FPK 已在实机完成安装和启动验证。\n- 群晖 DSM：发布 x86_64 / arm64 两个 SPK；本人没有完整群晖验证环境，请大家继续测试 SPK 的安装、启动和页面访问。\n- Docker / GHCR：同步发布 `0.1.53` 镜像标签和 `latest`，并保留 NAS Docker 安装说明中的清理旧镜像提示。\n- Android：本次未更新 Android，不发布 APK。\n\n## 手机端使用建议\n\n- 手机用户可以直接用浏览器访问 MMH 服务地址；Web 版适合日常查看、快速记账、概览、基金和股票持仓。\n- Android 本次未更新，不需要更新 APK；如只使用手机浏览器访问 Web 版，也无需安装 APK。\n\n## 安装 / 更新说明\n\n- Docker 版：查看 [NAS Docker 安装说明](https://github.com/frankluise5220/MMH/blob/main/docs/nas-install-manual.md) 后按文档安装或更新。\n- fnOS（官方 FPK）：从本次 GitHub Release 下载对应架构的 x86_64 / arm64 FPK 后手动安装或覆盖升级。\n- fnOS（FN 软仓客户端安装）：先下载 [FN 软仓客户端](https://gitee.com/hhxs2025/fn-appstores-client/releases/download/2.5.2/fn-appstores-client-2.5.2-x86.fpk)，在客户端里添加 [MMH 个人专用源](http://fnapp.floatingice.win:5660)，即可查询安装/覆盖升级 MMH。\n- fnOS（手动 FPK）：如果个人专用源还未同步，可以从 [GitHub Releases](https://github.com/frankluise5220/MMH/releases) 手动下载对应架构 FPK 安装。\n- 群晖 DSM（官方 SPK）：从本次 GitHub Release 下载对应架构的 x86_64 / arm64 SPK 后在套件中心手动安装或覆盖升级；请继续反馈不同 DSM 环境的安装、启动和页面访问结果。\n- Android：本次未更新，不发布 APK。",
       "type": "原生",
-      "updated_at": "2026-08-31",
+      "updated_at": "2026-09-07",
       "downloads": 0,
       "screenshots": [
-        "http://fnapp.floatingice.win/previews/mmh/1.PNG",
-        "http://fnapp.floatingice.win/previews/mmh/2.PNG"
+        "https://raw.githubusercontent.com/frankluise5220/MMH/main/public/branding/mmh-logo-pageflip-192.png",
+        "https://raw.githubusercontent.com/frankluise5220/MMH/main/public/branding/mmh-logo-pageflip-512.png"
       ]
     }
   ]

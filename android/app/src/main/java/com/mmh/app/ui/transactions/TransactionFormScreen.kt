@@ -751,7 +751,7 @@ private fun CashAccountField(
     var cashExpanded by remember { mutableStateOf(false) }
     val cashAccounts = uiState.accounts.filter {
         if (fundPaymentOnly) {
-            it.kind != "investment" && it.kind != "cash" && it.kind != "bank_credit" && it.kind != "loan"
+            it.kind != "investment" && it.kind != "cash" && it.kind != "bank_credit" && it.kind != "loan" && it.kind != "settlement"
         } else {
             it.kind != "investment"
         }

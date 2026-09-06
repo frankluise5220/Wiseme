@@ -316,6 +316,10 @@ export function IncomeExpenseReportClient({
   return (
     <ReportResizableSplit hasDetails={hasDetails}>
       <div className="panel-surface flex h-full min-h-0 flex-col overflow-hidden">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-4 py-2 text-xs text-slate-500">
+          <span>{t("settings.display.baseCurrency")}: {report.baseCurrency}</span>
+          {report.missingFxCurrencies.length > 0 && <span className="text-amber-700" role="status">{t("overview.missingFxRateDetail", { currencies: report.missingFxCurrencies.join(", ") })}</span>}
+        </div>
         <div className="min-h-0 flex-1 overflow-auto">
           <table
             className="w-full table-fixed border-separate border-spacing-0"

@@ -13,9 +13,9 @@ export const runtime = "nodejs";
  * PUT    /api/v1/db/data { model, id, data }
  * DELETE /api/v1/db/data?model=TxRecord&id=...
  *
- * Auth: browser session cookie, Authorization: Bearer <admin password>, or X-Api-Key.
- * This route intentionally blocks secret-bearing models and scopes household models
- * to the authenticated household.
+ * Auth: browser administrator session cookie only.
+ * This route intentionally blocks secret-bearing models and scopes household
+ * models to the authenticated household.
  */
 
 type ModelField = {
@@ -86,7 +86,6 @@ const WRITE_ALLOWED_MODELS = new Set([
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key",
   } as const;
@@ -142,7 +141,7 @@ function parseJsonParam(raw: string | null) {
   if (!raw) return {};
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("where 必须是 JSON object");
+    throw new Error("where must be a JSON object.");
   }
   return parsed;
 }
@@ -202,13 +201,13 @@ function hasRelation(modelInfo: ModelInfo, relationName: string) {
 
 function assertModelAllowed(modelInfo: ModelInfo, write = false) {
   if (BLOCKED_MODELS.has(modelInfo.name)) {
-    throw new Error(`模型 ${modelInfo.name} 不允许通过 Agent DB API 访问`);
+    throw new Error(`Model ${modelInfo.name} cannot be accessed through the database API.`);
   }
   if (!READ_ALLOWED_MODELS.has(modelInfo.name)) {
-    throw new Error(`模型 ${modelInfo.name} 未列入 Agent DB API 访问白名单`);
+    throw new Error(`Model ${modelInfo.name} is not allowed through the database API.`);
   }
   if (write && !WRITE_ALLOWED_MODELS.has(modelInfo.name)) {
-    throw new Error(`模型 ${modelInfo.name} 不允许通过 Agent DB API 写入`);
+    throw new Error(`Model ${modelInfo.name} cannot be written through the database API.`);
   }
 }
 
@@ -231,7 +230,7 @@ async function validateReferencedOwnership(data: Record<string, unknown>, househ
     const count = await prisma.account.count({
       where: { id: { in: [...accountIds] }, householdId },
     });
-    if (count !== accountIds.size) throw new Error("引用账户不存在或不属于当前账簿");
+    if (count !== accountIds.size) throw new Error("A referenced account was not found in the current household.");
   }
 
   const entryId = data.entryId;
@@ -240,25 +239,29 @@ async function validateReferencedOwnership(data: Record<string, unknown>, househ
       where: { id: entryId.trim(), householdId },
       select: { id: true },
     });
-    if (!existing) throw new Error("引用交易不存在或不属于当前账簿");
+    if (!existing) throw new Error("A referenced transaction was not found in the current household.");
   }
 }
 
 async function requireScope(req: Request) {
   try {
     const scope = await getApiHouseholdScope(req);
-    // The Agent DB API is an admin capability: cookie-session logins must be an admin
-    // (the API Key path already performs admin-password verification, satisfying this by nature)
+    if (scope.authMethod !== "session") {
+      return NextResponse.json(
+        { ok: false, code: "API_KEY_SCOPE_DENIED", error: "API keys cannot access the database API." },
+        { status: 403, headers: corsHeaders() },
+      );
+    }
     if (scope.user && !(scope.user.role === "admin" || scope.user.isSystem === true)) {
       return NextResponse.json(
-        { ok: false, code: "FORBIDDEN", error: "仅管理员可访问数据库 API" },
+        { ok: false, code: "FORBIDDEN", error: "Administrator access is required for the database API." },
         { status: 403, headers: corsHeaders() },
       );
     }
     return scope;
   } catch (e) {
     return NextResponse.json(
-      { ok: false, code: "UNAUTHORIZED", error: e instanceof Error ? e.message : "未授权" },
+      { ok: false, code: e instanceof Error ? e.name || "UNAUTHORIZED" : "UNAUTHORIZED", error: e instanceof Error ? e.message : "Unauthorized." },
       { status: 401, headers: corsHeaders() },
     );
   }
@@ -270,7 +273,7 @@ function isResponse(value: unknown): value is NextResponse {
 
 async function ensureOwnedRecord(model: any, modelInfo: ModelInfo, id: string, householdId: string) {
   const existing = await model.findFirst({ where: scopedWhere(modelInfo, householdId, { id }) });
-  if (!existing) return { ok: false as const, code: "RECORD_NOT_FOUND", status: 404, error: "记录不存在" };
+  if (!existing) return { ok: false as const, code: "RECORD_NOT_FOUND", status: 404, error: "Record not found." };
   return { ok: true as const, existing };
 }
 
@@ -281,18 +284,18 @@ export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const modelInfo = getModelInfo(searchParams.get("model") ?? "");
-    if (!modelInfo) return NextResponse.json({ ok: false, code: "INVALID_MODEL", error: "缺少或无效的 model 参数" }, { status: 400, headers: corsHeaders() });
+    if (!modelInfo) return NextResponse.json({ ok: false, code: "INVALID_MODEL", error: "Missing or invalid model parameter." }, { status: 400, headers: corsHeaders() });
     assertModelAllowed(modelInfo);
 
     const model = getPrismaModel(modelInfo);
-    if (!model) return NextResponse.json({ ok: false, code: "MODEL_NOT_FOUND", error: `模型 ${modelInfo.name} 不存在` }, { status: 400, headers: corsHeaders() });
+    if (!model) return NextResponse.json({ ok: false, code: "MODEL_NOT_FOUND", error: `Model ${modelInfo.name} was not found.` }, { status: 400, headers: corsHeaders() });
 
     const take = Math.min(Math.max(jsonNumber(searchParams.get("take"), 100), 1), 500);
     const skip = Math.max(jsonNumber(searchParams.get("skip"), 0), 0);
     const orderByField = searchParams.get("orderBy") || (hasField(modelInfo, "createdAt") ? "createdAt" : "id");
     const orderByDir = searchParams.get("orderDir") === "asc" ? "asc" : "desc";
     if (!hasField(modelInfo, orderByField)) {
-      return NextResponse.json({ ok: false, code: "INVALID_ORDER_FIELD", error: `排序字段 ${orderByField} 不存在` }, { status: 400, headers: corsHeaders() });
+      return NextResponse.json({ ok: false, code: "INVALID_ORDER_FIELD", error: `Order field ${orderByField} does not exist.` }, { status: 400, headers: corsHeaders() });
     }
 
     const where = {
@@ -306,7 +309,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ ok: true, data: data.map(serializeRow), page: { take, skip, total } }, { headers: corsHeaders() });
   } catch (e) {
-    return NextResponse.json({ ok: false, code: "FETCH_FAILED", error: e instanceof Error ? e.message : "查询失败" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ ok: false, code: "FETCH_FAILED", error: e instanceof Error ? e.message : "Query failed." }, { status: 500, headers: corsHeaders() });
   }
 }
 
@@ -318,7 +321,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const modelInfo = getModelInfo(String(body?.model ?? ""));
     if (!modelInfo || !body?.data) {
-      return NextResponse.json({ ok: false, code: "MISSING_PARAMS", error: "缺少 model 或 data 参数" }, { status: 400, headers: corsHeaders() });
+      return NextResponse.json({ ok: false, code: "MISSING_PARAMS", error: "Missing model or data parameter." }, { status: 400, headers: corsHeaders() });
     }
     assertModelAllowed(modelInfo, true);
 
@@ -330,7 +333,7 @@ export async function POST(req: NextRequest) {
     const created = await model.create({ data });
     return NextResponse.json({ ok: true, data: serializeRow(created) }, { headers: corsHeaders() });
   } catch (e) {
-    return NextResponse.json({ ok: false, code: "CREATE_FAILED", error: e instanceof Error ? e.message : "创建失败" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ ok: false, code: "CREATE_FAILED", error: e instanceof Error ? e.message : "Create failed." }, { status: 500, headers: corsHeaders() });
   }
 }
 
@@ -343,7 +346,7 @@ export async function PUT(req: NextRequest) {
     const modelInfo = getModelInfo(String(body?.model ?? ""));
     const id = String(body?.id ?? "").trim();
     if (!modelInfo || !id || !body?.data) {
-      return NextResponse.json({ ok: false, code: "MISSING_PARAMS", error: "缺少 model、id 或 data 参数" }, { status: 400, headers: corsHeaders() });
+      return NextResponse.json({ ok: false, code: "MISSING_PARAMS", error: "Missing model, id, or data parameter." }, { status: 400, headers: corsHeaders() });
     }
     assertModelAllowed(modelInfo, true);
 
@@ -356,7 +359,7 @@ export async function PUT(req: NextRequest) {
     const updated = await model.update({ where: { id }, data });
     return NextResponse.json({ ok: true, data: serializeRow(updated) }, { headers: corsHeaders() });
   } catch (e) {
-    return NextResponse.json({ ok: false, code: "UPDATE_FAILED", error: e instanceof Error ? e.message : "更新失败" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ ok: false, code: "UPDATE_FAILED", error: e instanceof Error ? e.message : "Update failed." }, { status: 500, headers: corsHeaders() });
   }
 }
 
@@ -369,7 +372,7 @@ export async function DELETE(req: NextRequest) {
     const modelInfo = getModelInfo(searchParams.get("model") ?? "");
     const id = String(searchParams.get("id") ?? "").trim();
     if (!modelInfo || !id) {
-      return NextResponse.json({ ok: false, code: "MISSING_PARAMS", error: "缺少 model 或 id 参数" }, { status: 400, headers: corsHeaders() });
+      return NextResponse.json({ ok: false, code: "MISSING_PARAMS", error: "Missing model or id parameter." }, { status: 400, headers: corsHeaders() });
     }
     assertModelAllowed(modelInfo, true);
 
@@ -380,6 +383,6 @@ export async function DELETE(req: NextRequest) {
     await model.delete({ where: { id } });
     return NextResponse.json({ ok: true }, { headers: corsHeaders() });
   } catch (e) {
-    return NextResponse.json({ ok: false, code: "DELETE_FAILED", error: e instanceof Error ? e.message : "删除失败" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ ok: false, code: "DELETE_FAILED", error: e instanceof Error ? e.message : "Delete failed." }, { status: 500, headers: corsHeaders() });
   }
 }

@@ -1,8 +1,11 @@
+import { resolveLoanTypeValue, type LoanTypeValue } from "@/lib/loan-type";
+
 export type AccountKindLike = {
   kind?: string | null;
   investProductType?: string | null;
   debtDirection?: string | null;
   isConsumerLoan?: boolean | null;
+  loanType?: string | null;
 };
 
 export type CashTargetOperation = "transfer" | "investment" | "wealth" | "deposit" | "debt";
@@ -22,6 +25,10 @@ export function isPureInvestmentAccount(account: AccountKindLike) {
   return account.kind === "investment" && account.investProductType !== "deposit";
 }
 
+export function isFundLikeInvestmentAccount(account: AccountKindLike) {
+  return isPureInvestmentAccount(account) && (account.investProductType === "fund" || account.investProductType === "money");
+}
+
 export function getInvestmentAccountView(account: Pick<AccountKindLike, "investProductType"> | null | undefined): InvestmentAccountView {
   if (account?.investProductType === "money") return "investmoney";
   if (account?.investProductType === "wealth") return "investwealth";
@@ -36,6 +43,15 @@ export function isInsuranceAccount(account: AccountKindLike) {
 
 export function isConsumerLoanAccount(account: AccountKindLike | null | undefined) {
   return account?.kind === "loan" && account.isConsumerLoan === true;
+}
+
+/**
+ * Resolve the effective loan type for a loan account. Falls back to a derived
+ * value from isConsumerLoan when loanType is not stored yet (legacy data).
+ */
+export function resolveLoanType(account: { kind?: string | null; isConsumerLoan?: boolean | null; loanType?: string | null } | null | undefined): LoanTypeValue | null {
+  if (!account || account.kind !== "loan") return null;
+  return resolveLoanTypeValue(account.loanType, account.isConsumerLoan);
 }
 
 export function isSpendableAccount(account: AccountKindLike | null | undefined) {
@@ -58,7 +74,7 @@ export function getCashTargetOperation(account: AccountKindLike | null | undefin
     if (account.investProductType === "wealth") return "wealth";
     return "investment";
   }
-  if (account.kind === "loan") return "debt";
+  if (account.kind === "loan" || account.kind === "settlement") return "debt";
   return "transfer";
 }
 

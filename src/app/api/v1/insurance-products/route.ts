@@ -1111,13 +1111,7 @@ export async function DELETE(req: NextRequest) {
           return NextResponse.json({ ok: false, code: "INVALID_PASSWORD", error: "密码错误" }, { status: 401 });
         }
       } else {
-        const legacy = await prisma.systemSetting.findUnique({ where: { key: "access_password" } });
-        if (!legacy?.value) {
-          return NextResponse.json({ ok: false, code: "PASSWORD_NOT_SET", error: "请先设置密码" }, { status: 400 });
-        }
-        if (password !== legacy.value) {
-          return NextResponse.json({ ok: false, code: "INVALID_PASSWORD", error: "密码错误" }, { status: 401 });
-        }
+        return NextResponse.json({ ok: false, code: "PASSWORD_NOT_SET", error: "请先设置密码" }, { status: 400 });
       }
 
       const linkedPolicies = await prisma.insuranceProduct.findMany({
@@ -1278,13 +1272,7 @@ export async function DELETE(req: NextRequest) {
         return NextResponse.json({ ok: false, code: "INVALID_PASSWORD", error: "密码错误" }, { status: 401 });
       }
     } else {
-      const legacy = await prisma.systemSetting.findUnique({ where: { key: "access_password" } });
-      if (!legacy?.value) {
-        return NextResponse.json({ ok: false, code: "PASSWORD_NOT_SET", error: "请先设置密码" }, { status: 400 });
-      }
-      if (password !== legacy.value) {
-        return NextResponse.json({ ok: false, code: "INVALID_PASSWORD", error: "密码错误" }, { status: 401 });
-      }
+      return NextResponse.json({ ok: false, code: "PASSWORD_NOT_SET", error: "请先设置密码" }, { status: 400 });
     }
 
     await prisma.$transaction(async (tx) => {

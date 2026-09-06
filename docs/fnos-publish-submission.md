@@ -29,7 +29,8 @@
 - 包内 `manifest` 版本、仓库源 `version`、GitHub Release tag `v0.1.x`、GHCR 镜像 tag 和文件名必须一致；不再使用 `v0.1.x-fnos`。
 - 包内 `cmd/main` 必须使用飞牛应用数据目录保存 SQLite，不能回退到应用安装目录。
 - 包内 `better-sqlite3.node` 必须在 fnOS 目标 GLIBC 版本可加载。
-- 包内可以保留首次安装使用的 `wizard/install`，但不能包含 `wizard/uninstall`、`wizard/upgrade` 或 `wizard/config`；FN 软仓更新必须静默执行，并优先沿用已安装 MMH 的 `.port` / `mmh.env` 端口，不能把向导默认 `7777` 写回覆盖已有端口。
+- 包内不得包含安装类向导：`wizard/install`、`wizard/upgrade`、`wizard/uninstall` 都不允许。FN 软仓客户端只解析 `wizard/install`，只要该文件存在，更新时就会弹向导要求填写服务端口；去掉它之后更新才能真正静默。端口优先沿用已安装 MMH 的 `.port` / `mmh.env`，不能把包默认 `7777` 写回覆盖已有端口。
+- 包内必须保留 `wizard/config`：改端口只能通过应用设置，软仓客户端不解析该文件，只有用户在应用中心主动打开 MMH 设置时才显示。保存后由 `cmd/config_callback` 校验端口、停服、把新端口写入 `.port` 与 `mmh.env`（`cmd/main` 只认 `mmh.env` 的 `PORT`）再启动。首次安装没有向导，端口改为从 `7777` 起自动探测空闲端口。
 - 两个架构包必须保持同一个 `appname=mmh` 和同一个版本号；x86 manifest 使用 `arch=x86_64`、`platform=x86`，ARM64 manifest 使用 `arch=aarch64`、`platform=arm`。
 
 ## Manifest 摘要

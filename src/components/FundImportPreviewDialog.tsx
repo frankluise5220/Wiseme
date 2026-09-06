@@ -25,10 +25,18 @@ import {
 } from "@/lib/account-display";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { fetchSettingsBootstrap } from "@/lib/client/settingsCache";
-import { addTradingDaysUtc } from "@/lib/date-utils";
+import { addTradingDaysUtc, parseFlexibleDateToYmd } from "@/lib/date-utils";
 import { calculateConfirmedBuyUnits } from "@/lib/fund/refund-link";
 import { normalizeFundUnitsDecimals, roundFundUnits } from "@/lib/fund/unit-precision-core";
+import {
+  dropTemplateSampleRows,
+  findTemplateGuideTitleRowIndex,
+  findTemplateSampleColumnIndex,
+  rowsBeforeTemplateGuide,
+} from "@/lib/import-template-sample";
 import { useI18n } from "@/lib/i18n";
+import { getAccountLabelFieldsPreference } from "@/lib/client/appPreferences";
+import { restrictAccountsByType } from "@/lib/client/account-dropdown-filter";
 
 export type FundImportDialogContext = {
   fundAccountId?: string;
@@ -54,6 +62,7 @@ type FundImportUploadItem = {
   confirmDate: string | null;
   arrivalDate: string | null;
   remark: string;
+  tags?: string | null;
   source?: string;
 };
 
@@ -105,7 +114,8 @@ type FundPreviewEditField =
   | "units"
   | "confirmDate"
   | "arrivalDate"
-  | "remark";
+  | "remark"
+  | "tags";
 type TranslateFn = (key: string, params?: Record<string, string | number>) => string;
 
 type FundPreviewAccount = {
@@ -148,6 +158,7 @@ const FUND_PREVIEW_FIELD_LABEL_KEYS: Record<FundPreviewEditField, string> = {
   confirmDate: "batchImport.template.fund.label.confirmDate",
   arrivalDate: "batchImport.template.fund.label.arrivalDate",
   remark: "batchImport.template.fund.label.remark",
+  tags: "detail.column.tags",
 };
 
 type Props = {
@@ -204,6 +215,7 @@ const FUND_FIELD_ALIASES: Record<FundImportHeaderField, string[]> = {
   confirmDate: ["confirmDate", "\u786e\u8ba4\u65e5\u671f", "\u51c0\u503c\u65e5\u671f", "NAV Date", "\u57fa\u6e96\u4fa1\u984d\u65e5"],
   arrivalDate: ["arrivalDate", "\u5165\u8d26\u65e5\u671f", "\u5230\u8d26\u65e5\u671f", "Posting Date", "\u5165\u5e33\u65e5"],
   remark: ["remark", "\u5907\u6ce8", "\u8bf4\u660e", "Remark", "Note", "\u5099\u8003", "\u30e1\u30e2"],
+  tags: ["tags", "\u6807\u7b7e", "\u6a19\u7c64", "Tags", "Tag", "\u30bf\u30b0"],
 };
 
 function formatText(t: TranslateFn, key: string, values?: Record<string, string | number>) {
@@ -367,24 +379,27 @@ function normalizeDateCell(value: string) {
 
   match = normalized.match(/^(\d{1,2})-(\d{1,2})-(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (match) {
-    return appendNormalizedTime(formatDateParts(Number(match[3]), Number(match[1]), Number(match[2])), match[4], match[5], match[6]);
+    const datePart = formatDateParts(Number(match[3]), Number(match[1]), Number(match[2]));
+    if (datePart) {
+      return appendNormalizedTime(datePart, match[4], match[5], match[6]);
+    }
   }
 
   match = normalized.match(/^(\d{1,2})-(\d{1,2})-(\d{2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (match) {
     const year = Number(match[3]);
-    return appendNormalizedTime(
-      formatDateParts(year >= 70 ? 1900 + year : 2000 + year, Number(match[1]), Number(match[2])),
-      match[4],
-      match[5],
-      match[6],
-    );
+    const datePart = formatDateParts(year >= 70 ? 1900 + year : 2000 + year, Number(match[1]), Number(match[2]));
+    if (datePart) {
+      return appendNormalizedTime(datePart, match[4], match[5], match[6]);
+    }
   }
 
   match = normalized.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (match) return formatDateParts(Number(match[1]), Number(match[2]), Number(match[3]));
 
-  return raw;
+  // Lenient fallback (e.g. "26-02-2026" day-first, "Jan 26, 2026"); the date
+  // part only, since the shapes above already handled explicit time parts.
+  return parseFlexibleDateToYmd(raw) ?? raw;
 }
 
 function buildFundHeaderIndex(headers: string[]) {
@@ -525,7 +540,11 @@ async function parseFundImportFile(file: File): Promise<FundImportFileParseResul
   return { rows, sourceDataRowCount: Math.max(0, rows.length - 1) };
 }
 
-function fundRowsToItems(rows: string[][]): FundImportUploadItem[] {
+function fundRowsToItems(
+  rows: string[][],
+  /** 模板说明区标题行文案；传入后会截断标题行以下的所有说明行 */
+  guideTitle = "",
+): FundImportUploadItem[] {
   const firstRow = rows[0] ?? [];
   const secondRow = rows[1] ?? [];
   const firstHeaderIndex = buildFundHeaderIndex(firstRow);
@@ -558,7 +577,12 @@ function fundRowsToItems(rows: string[][]): FundImportUploadItem[] {
   const businessTypeIndex = normalizedHeaderRow.findIndex((header) => header === "\u4e1a\u52a1\u7c7b\u578b" || header === "businesstype" || header === "transactiontype");
   const readBusinessType = (row: string[]) => businessTypeIndex < 0 ? "" : String(row[businessTypeIndex] ?? "").trim();
 
-  return dataRows
+  // 模板自带的样板行与底部字段说明区都不是真实数据。
+  const sampleColumnIndex = findTemplateSampleColumnIndex(headerRow);
+  const guideTitleRowIndex = findTemplateGuideTitleRowIndex(dataRows, guideTitle);
+  const importRows = dropTemplateSampleRows(rowsBeforeTemplateGuide(dataRows, guideTitleRowIndex), sampleColumnIndex);
+
+  return importRows
     .filter((row) => row.some((cell) => String(cell ?? "").trim()))
     .filter((row) => {
       const bodyCells = row.map((cell) => String(cell ?? "").trim());
@@ -593,6 +617,7 @@ function fundRowsToItems(rows: string[][]): FundImportUploadItem[] {
         confirmDate: normalizeDateCell(readField(row, "confirmDate")) || null,
         arrivalDate: normalizeDateCell(readField(row, "arrivalDate")) || null,
         remark: readField(row, "remark"),
+        tags: readField(row, "tags") || null,
       };
     });
 }
@@ -714,7 +739,7 @@ function buildPreviewAccountDisplayOption(account: FundPreviewAccount): AccountD
           name: account.AccountGroup.name ?? null,
         }
       : null,
-  });
+  }, undefined, { fields: getAccountLabelFieldsPreference() });
 }
 
 export function FundImportPreviewDialog({ open, file, context, onClose, onImported }: Props) {
@@ -728,6 +753,7 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [uploading, setUploading] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState<{ imported: number; total: number } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [debugMessage, setDebugMessage] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<{ idx: number; field: FundPreviewEditField } | null>(null);
@@ -748,15 +774,13 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
     [bookAccounts],
   );
   const cashAccountDisplayOptions = useMemo<AccountDisplayOption[]>(
-    () => bookAccounts
-      .filter(isFundCashLikeAccount)
+    () => restrictAccountsByType(bookAccounts, isFundCashLikeAccount)
       .map(buildPreviewAccountDisplayOption)
       .sort((a, b) => a.selectorLabel.localeCompare(b.selectorLabel, "zh-Hans-CN")),
     [bookAccounts],
   );
   const fundAccountDisplayOptions = useMemo<AccountDisplayOption[]>(
-    () => bookAccounts
-      .filter(isFundImportAccount)
+    () => restrictAccountsByType(bookAccounts, isFundImportAccount)
       .map(buildPreviewAccountDisplayOption)
       .sort((a, b) => a.selectorLabel.localeCompare(b.selectorLabel, "zh-Hans-CN")),
     [bookAccounts],
@@ -811,12 +835,12 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
 
   const previewAccountLabel = useCallback((accountId: string | null | undefined, fallback: string) => {
     const display = accountId ? accountDisplayById.get(accountId) : undefined;
-    return display ? formatAccountTableLabel(display, fallback) : fallback.trim() || "-";
+    return display ? formatAccountTableLabel(display, fallback, getAccountLabelFieldsPreference()) : fallback.trim() || "-";
   }, [accountDisplayById]);
 
   const previewAccountTitle = useCallback((accountId: string | null | undefined, fallback: string) => {
     const display = accountId ? accountDisplayById.get(accountId) : undefined;
-    return display ? formatAccountTableTitle(display, fallback) : fallback.trim();
+    return display ? formatAccountTableTitle(display, fallback, getAccountLabelFieldsPreference()) : fallback.trim();
   }, [accountDisplayById]);
 
   const previewReplaceFields = useMemo<BatchReplaceFieldConfig<FundPreviewBatchEditField>[]>(
@@ -989,7 +1013,7 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
       try {
         const parseResult = await parseFundImportFile(file!);
         if (cancelled) return;
-        const parsed = fundRowsToItems(parseResult.rows);
+        const parsed = fundRowsToItems(parseResult.rows, t("settings.accounts.import.sheetGuideTitle"));
         if (parsed.length === 0) {
           const headers = parseResult.rows[0]?.join("、") || t("batchImport.headersNotRead");
           setDebugMessage(formatText(t, "batchImport.noRecordsRecognizedDebug", { headers, fileInfo }));
@@ -1069,6 +1093,7 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
       case "confirmDate": return row.confirmDate || "";
       case "arrivalDate": return row.arrivalDate || "";
       case "remark": return row.remark || "";
+      case "tags": return row.tags || "";
       default: return "";
     }
   }
@@ -1138,6 +1163,9 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
       case "remark":
         patch = { remark: value };
         break;
+      case "tags":
+        patch = { tags: value || null };
+        break;
       default:
         patch = null;
     }
@@ -1189,7 +1217,7 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
       },
       className: [
         "h-7 rounded-md border border-blue-200 bg-white px-2 text-xs outline-none",
-        field === "remark" || field === "fundCode" ? "w-full" : "w-24",
+        field === "remark" || field === "fundCode" || field === "tags" ? "w-full" : "w-24",
         FUND_PREVIEW_COMPONENT_NUMBER_FIELDS.includes(field as typeof FUND_PREVIEW_COMPONENT_NUMBER_FIELDS[number])
           ? "text-right tabular-nums"
           : "",
@@ -1359,6 +1387,9 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
     setImporting(true);
     setMessage(formatText(t, "batchImport.fundImportingSelected", { count: selectedItems.length }));
     setDebugMessage(null);
+    setImportProgress({ imported: 0, total: selectedItems.length });
+    let created = 0;
+    let importedRows = 0;
 
     try {
       const { overrides, invalidLabels } = serializeFundRuleOverrides(ruleRows, t);
@@ -1368,31 +1399,55 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
           more: invalidLabels.length > 3 ? t("batchImport.importValidationMore") : "",
         }));
       }
-      const res = await fetch("/api/v1/fund/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: "import",
-          items: selectedItems,
-          overrides,
-          ...(requestContext ? { context: requestContext } : {}),
-        }),
-      });
-      const data = await res.json().catch(() => null) as { ok?: boolean; error?: string; createdCount?: number } | null;
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || res.statusText || `HTTP ${res.status}`);
+      const allAccountIds = new Set<string>();
+      // Submit in sequential batches so each request finishes well before
+      // reverse-proxy timeouts on slow NAS deployments; batching also keeps the
+      // server-side write transaction small so it stays under the timeout.
+      const IMPORT_BATCH_SIZE = Math.max(1, Math.ceil(selectedItems.length / 10));
+      for (let start = 0; start < selectedItems.length; start += IMPORT_BATCH_SIZE) {
+        const batchItems = selectedItems.slice(start, start + IMPORT_BATCH_SIZE);
+        setImportProgress({ imported: importedRows, total: selectedItems.length });
+        const res = await fetch("/api/v1/fund/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "import",
+            items: batchItems,
+            overrides,
+            ...(requestContext ? { context: requestContext } : {}),
+          }),
+        });
+        const data = await res.json().catch(() => null) as { ok?: boolean; error?: string; createdCount?: number; accountIds?: string[] } | null;
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || res.statusText || `HTTP ${res.status}`);
+        }
+        created += data.createdCount ?? batchItems.length;
+        for (const id of Array.isArray(data.accountIds) ? data.accountIds : []) allAccountIds.add(id);
+        importedRows += batchItems.length;
+        setImportProgress({ imported: importedRows, total: selectedItems.length });
       }
-      const count = data.createdCount ?? selectedItems.length;
-      const accountIds = Array.from(new Set(selectedItems.map((item) => item.fundAccountId).filter((id): id is string => Boolean(id))));
+      const accountIds = allAccountIds.size > 0
+        ? Array.from(allAccountIds)
+        : Array.from(new Set(selectedItems.map((item) => item.fundAccountId).filter((id): id is string => Boolean(id))));
       dispatchFinanceDataChanged({ reason: "fund-excel-import", accountIds });
-      onImported?.({ count, accountIds });
+      onImported?.({ count: created, accountIds });
       onClose();
     } catch (error) {
-      setMessage(formatText(t, "batchImport.importFailedRollback", { reason: error instanceof Error ? error.message : String(error) }));
+      const reason = error instanceof Error ? error.message : String(error);
+      if (created > 0 && importedRows < selectedItems.length) {
+        setMessage(formatText(t, "batchImport.fundImportPartialFailed", {
+          imported: created,
+          remaining: selectedItems.length - importedRows,
+          reason,
+        }));
+      } else {
+        setMessage(formatText(t, "batchImport.importFailedRollback", { reason }));
+      }
     } finally {
       setImporting(false);
+      setImportProgress(null);
     }
-  }, [errorIssues, importIssues, importing, onClose, onImported, previewItems, requestContext, ruleRows, selected, t]);
+  }, [errorIssues, importIssues, importing, onClose, onImported, previewItems, requestContext, ruleRows, setImportProgress, selected, t]);
 
   const columns = useMemo<AdvancedDataTableColumn<FundPreviewTableRow>[]>(() => [
     {
@@ -1444,6 +1499,7 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
     { key: "confirmDate", label: t("batchImport.template.fund.label.confirmDate"), width: 112, minWidth: 92, filterKind: "dateRange", filterText: (row) => row.confirmDate || "-", sortValue: (row) => row.confirmDate || "", render: (row) => renderTextEditCell(row, "confirmDate", row.confirmDate, "tabular-nums text-slate-700") },
     { key: "arrivalDate", label: t("batchImport.template.fund.label.arrivalDate"), width: 112, minWidth: 92, filterKind: "dateRange", filterText: (row) => row.arrivalDate || "-", sortValue: (row) => row.arrivalDate || "", render: (row) => renderTextEditCell(row, "arrivalDate", row.arrivalDate, "tabular-nums text-slate-700") },
     { key: "remark", label: t("batchImport.template.fund.label.remark"), width: 220, minWidth: 150, filterText: (row) => row.remark || "-", render: (row) => renderTextEditCell(row, "remark", row.remark) },
+    { key: "tags", label: t("detail.column.tags"), width: 150, minWidth: 110, filterText: (row) => row.tags || "-", render: (row) => renderTextEditCell(row, "tags", row.tags) },
   ], [cashAccountDisplayById, cashAccountOptions, draftValue, editingCell, fundAccountDisplayById, fundAccountOptions, importing, patchUploadItem, previewAccountLabel, previewAccountTitle, t, uploading]);
 
   if (!open || !file) return null;
@@ -1473,6 +1529,19 @@ export function FundImportPreviewDialog({ open, file, context, onClose, onImport
         {message ? (
           <div className="shrink-0 border-b border-blue-100 bg-blue-50 px-4 py-2 text-sm text-blue-700">
             {message}
+          </div>
+        ) : null}
+        {importProgress && importProgress.total > 0 ? (
+          <div className="shrink-0 border-b border-blue-100 bg-blue-50 px-4 py-2">
+            <div className="flex h-2 overflow-hidden rounded-full bg-blue-100">
+              <div
+                className="h-full bg-blue-600 transition-all duration-200"
+                style={{ width: `${Math.max(2, Math.round((importProgress.imported / importProgress.total) * 100))}%` }}
+              />
+            </div>
+            <div className="mt-1 text-xs text-blue-700">
+              {formatText(t, "batchImport.fundImportingProgress", { imported: importProgress.imported, total: importProgress.total })}
+            </div>
           </div>
         ) : null}
         {debugMessage ? (

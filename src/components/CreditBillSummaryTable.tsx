@@ -527,7 +527,7 @@ export function CreditBillSummaryTable({
       render: (row) => {
         return (
           <button type="button" onClick={(event) => { event.stopPropagation(); selectBillMonth(row.month); }} className="block text-left">
-            <span className={`whitespace-nowrap text-xs font-semibold ${row.isCurrentCycle ? "text-amber-600" : "text-blue-700"}`}>
+            <span className={`whitespace-nowrap font-semibold ${row.isCurrentCycle ? "text-amber-600" : "text-blue-700"}`}>
               {row.month}{row.isCurrentCycle ? `（${t("creditBill.currentCycle")}）` : row.month === settledBillMonth ? `（${t("creditBill.currentBill")}）` : ""}
             </span>
           </button>
@@ -549,7 +549,7 @@ export function CreditBillSummaryTable({
                 event.stopPropagation();
                 openCycleEditor(row);
               }}
-              className="inline-flex cursor-text whitespace-nowrap rounded px-1 text-xs tabular-nums text-slate-700 hover:bg-amber-50 hover:text-amber-700"
+              className="inline-flex cursor-text whitespace-nowrap rounded px-1 tabular-nums text-slate-700 hover:bg-amber-50 hover:text-amber-700"
               title={t("creditBill.editCycleHint")}
             >
               {row.periodLabel}
@@ -565,7 +565,7 @@ export function CreditBillSummaryTable({
       minWidth: 88,
       align: "right",
       hideable: true,
-      render: (row) => <span className="text-xs tabular-nums text-emerald-700">{formatMoney(row.expenseAbs)}</span>,
+      render: (row) => <span className="tabular-nums text-emerald-700">{formatMoney(row.expenseAbs)}</span>,
     },
     {
       key: "income",
@@ -574,7 +574,7 @@ export function CreditBillSummaryTable({
       minWidth: 88,
       align: "right",
       hideable: true,
-      render: (row) => <span className="text-xs tabular-nums text-red-600">{formatMoney(row.income)}</span>,
+      render: (row) => <span className="tabular-nums text-red-600">{formatMoney(row.income)}</span>,
     },
     {
       key: "netAmount",
@@ -586,7 +586,7 @@ export function CreditBillSummaryTable({
       render: (row) => {
         const net = row.expenseAbs - row.income;
         const tone = net > 0 ? "text-emerald-700" : net < 0 ? "text-red-600" : "text-slate-500";
-        return <span className={`text-xs tabular-nums ${tone}`}>{formatMoney(net)}</span>;
+        return <span className={`tabular-nums ${tone}`}>{formatMoney(net)}</span>;
       },
     },
     {
@@ -597,7 +597,7 @@ export function CreditBillSummaryTable({
       align: "right",
       hideable: true,
       render: (row) => row.isCurrentCycle ? (
-        <span className="text-xs tabular-nums text-slate-400">-</span>
+        <span className="tabular-nums text-slate-400">-</span>
       ) : (
         <span onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
           <EditBillAmount
@@ -617,7 +617,7 @@ export function CreditBillSummaryTable({
       width: 112,
       minWidth: 96,
       hideable: true,
-      render: (row) => <span className="whitespace-nowrap text-xs tabular-nums text-slate-700">{row.dueLabel}</span>,
+      render: (row) => <span className="whitespace-nowrap tabular-nums text-slate-700">{row.dueLabel}</span>,
     },
     {
       key: "status",
@@ -631,15 +631,15 @@ export function CreditBillSummaryTable({
           return <span className="whitespace-nowrap rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">{t("creditBill.settled")}</span>;
         }
         if (row.isCurrentCycle) {
-          return <span className="whitespace-nowrap text-xs text-amber-600">{t("creditBill.currentCycle")}</span>;
+          return <span className="whitespace-nowrap text-amber-600">{t("creditBill.currentCycle")}</span>;
         }
         if (row.effectiveBill < 0) {
           return <span className="whitespace-nowrap rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">{t("creditBillSummary.status.overpaid")}</span>;
         }
         if (row.effectiveBill > 0) {
-          return <span className="whitespace-nowrap text-xs text-slate-500">{t("creditBillSummary.status.pending")}</span>;
+          return <span className="whitespace-nowrap text-slate-500">{t("creditBillSummary.status.pending")}</span>;
         }
-        return <span className="text-xs text-slate-300">-</span>;
+        return <span className="text-slate-300">-</span>;
       },
     },
   ];
@@ -652,7 +652,6 @@ export function CreditBillSummaryTable({
           columns={billColumns}
           rows={pagedRows}
           rowKey={(row) => row.month}
-          compactRows
           showFilters={false}
           fillHeight={fillHeight}
           minTableWidth={760}

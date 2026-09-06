@@ -3,14 +3,22 @@
  *
  * Mixed authentication strategy:
  * 1. Try cookie-based session auth first (browser users)
- * 2. Fall back to X-Api-Key header auth (Android / external clients)
- *
- * X-Api-Key verification: the API Key is treated as the user password and verified with bcrypt.
- * On success, returns the HouseholdContext of the matching user.
+ * 2. Fall back to independent AccessKey auth (Android / external clients)
  */
 import { prisma } from "@/lib/db/prisma";
+import { getApiKeyPolicyDecision } from "@/lib/api-key-policy";
 import { getHouseholdScope, type HouseholdContext } from "@/lib/server/household-scope";
-import { verifyPassword } from "@/lib/auth/password";
+import { verifyAccessKey } from "@/lib/server/access-key-auth";
+
+export type ApiAuthMethod = "session" | "accessKey";
+
+export type ApiHouseholdContext = HouseholdContext & {
+  authMethod: ApiAuthMethod;
+  accessKey?: {
+    id: string;
+    name: string;
+  };
+};
 
 function getProvidedApiKey(req: Request): string | null {
   const auth = req.headers.get("authorization");
@@ -23,17 +31,19 @@ function getProvidedApiKey(req: Request): string | null {
  * Get the HouseholdContext for an API request.
  *
  * First tries cookie session auth (getHouseholdScope); if that fails or there is no
- * cookie login state, falls back to X-Api-Key header auth.
+ * cookie login state, falls back to X-Api-Key / Bearer AccessKey auth.
  *
  * @throws Error when both authentication methods fail
  */
-export async function getApiHouseholdScope(req: Request): Promise<HouseholdContext> {
+export async function getApiHouseholdScope(req: Request): Promise<ApiHouseholdContext> {
   // Strategy 1: cookie-based session auth
   try {
     const ctx = await getHouseholdScope();
-    // If householdId was resolved and the user exists, return it directly
-    if (ctx.householdId) {
-      return ctx;
+    // A household can be auto-created/resolved for setup and server-rendered
+    // pages even when there is no authenticated user. That must not count as
+    // API authentication when middleware is bypassed or unavailable.
+    if (ctx.user && ctx.householdId) {
+      return { ...ctx, authMethod: "session" };
     }
   } catch {
     // Ignore cookie errors and fall back to the API Key
@@ -42,38 +52,30 @@ export async function getApiHouseholdScope(req: Request): Promise<HouseholdConte
   // Strategy 2: X-Api-Key header auth
   const apiKey = getProvidedApiKey(req);
   if (!apiKey) {
-    throw new Error("未授权：缺少认证信息");
+    throw new Error("Missing authentication credentials.");
   }
 
-  // Find the system admin user and verify the API Key as its password
+  const url = new URL(req.url);
+  const policy = getApiKeyPolicyDecision(url.pathname, req.method);
+  if (!policy.ok) {
+    const error = new Error(policy.error ?? "API key access is not allowed for this endpoint.");
+    error.name = policy.code ?? "API_KEY_SCOPE_DENIED";
+    throw error;
+  }
+
+  const accessKey = await verifyAccessKey(apiKey);
+  if (!accessKey) {
+    throw new Error("Invalid API key.");
+  }
+
   const adminUser = await prisma.user.findFirst({
     where: { OR: [{ role: "admin" }, { isSystem: true }] },
     orderBy: [{ isSystem: "desc" }, { createdAt: "asc" }],
-    select: { id: true, name: true, role: true, isSystem: true, householdId: true, passwordHash: true },
+    select: { id: true, name: true, role: true, isSystem: true, householdId: true },
   });
 
   if (!adminUser) {
-    throw new Error("系统未配置管理员用户");
-  }
-
-  // Verify the password
-  if (adminUser.passwordHash) {
-    const valid = await verifyPassword(apiKey, adminUser.passwordHash);
-    if (!valid) {
-      throw new Error("API Key 无效");
-    }
-  } else {
-    // No password hash → check the legacy access_password SystemSetting
-    const legacy = await prisma.systemSetting.findUnique({
-      where: { key: "access_password" },
-    });
-    if (legacy && legacy.value.length > 0) {
-      if (apiKey !== legacy.value) {
-        throw new Error("API Key 无效");
-      }
-    } else {
-      throw new Error("系统未设置密码，请先在 Web 端设置");
-    }
+    throw new Error("Administrator user is not configured.");
   }
 
   // Resolve the household
@@ -83,9 +85,7 @@ export async function getApiHouseholdScope(req: Request): Promise<HouseholdConte
   });
 
   if (!household) {
-    // No household exists → getHouseholdScope would create a default one,
-    // but it cannot be called here (it needs cookies), so return an error instead.
-    throw new Error("无可用账簿");
+    throw new Error("No ledger is available.");
   }
 
   return {
@@ -98,6 +98,8 @@ export async function getApiHouseholdScope(req: Request): Promise<HouseholdConte
       isSystem: adminUser.isSystem,
       householdId: adminUser.householdId,
     },
+    authMethod: "accessKey",
+    accessKey,
   };
 }
 

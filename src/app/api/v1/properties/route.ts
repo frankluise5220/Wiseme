@@ -3,7 +3,7 @@
  *
  * GET
  *   Query: accountId?: property investment account id
- *   Response: { ok: true, data: { assets, transactions } }
+ *   Response: { ok: true, data: { assets, transactions } } where each asset includes mortgageLoanAccountId when linked.
  *
  * POST
  *   Body: {
@@ -39,7 +39,6 @@ const PROPERTY_ACTIONS = new Set(Object.values(PropertyTransactionAction));
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key",
   } as const;
@@ -118,6 +117,7 @@ async function findCashAccount(accountId: string | null, householdId: string) {
 function serializeAsset(row: {
   id: string;
   accountId: string;
+  mortgageLoanAccountId?: string | null;
   name: string;
   assetType?: string | null;
   propertyType?: string | null;
@@ -135,6 +135,7 @@ function serializeAsset(row: {
   return {
     id: row.id,
     accountId: row.accountId,
+    mortgageLoanAccountId: row.mortgageLoanAccountId ?? null,
     name: row.name,
     assetType: normalizeFixedAssetType(row.assetType),
     propertyType: row.propertyType ?? null,
@@ -252,7 +253,8 @@ export async function POST(req: NextRequest) {
     const fee = parseOptionalNonNegativeNumber(body.fee);
     const tax = parseOptionalNonNegativeNumber(body.tax);
     const marketValueInput = parseOptionalNonNegativeNumber(body.marketValue);
-    if (amount <= 0) return NextResponse.json({ ok: false, code: "INVALID_AMOUNT", error: "交易金额必须大于 0" }, { status: 400, headers: corsHeaders() });
+    const isDisposal = action === PropertyTransactionAction.disposal;
+    if (amount <= 0 && !isDisposal) return NextResponse.json({ ok: false, code: "INVALID_AMOUNT", error: "交易金额必须大于 0" }, { status: 400, headers: corsHeaders() });
 
     const touchedAccountIds = new Set<string>([accountId]);
     if (cashAccountId) touchedAccountIds.add(cashAccountId);
@@ -304,11 +306,13 @@ export async function POST(req: NextRequest) {
         });
       } else {
         if (!existingAsset) throw new Error("房产不存在或不属于当前账户");
+        const isTerminal = action === PropertyTransactionAction.sale || action === PropertyTransactionAction.disposal;
+        const recovery = isTerminal ? Math.max(0, amount - (fee ?? 0) - (tax ?? 0)) : 0;
         const nextCost = action === PropertyTransactionAction.improvement
           ? toNumber(existingAsset.cost) + totalCostDelta
           : toNumber(existingAsset.cost);
-        const nextMarketValue = action === PropertyTransactionAction.sale
-          ? Math.max(0, amount - (fee ?? 0) - (tax ?? 0))
+        const nextMarketValue = isTerminal
+          ? recovery
           : marketValueInput ?? toNumber(existingAsset.marketValue);
         await tx.propertyAsset.update({
           where: { id: existingAsset.id },
@@ -316,19 +320,19 @@ export async function POST(req: NextRequest) {
             assetType: nextAssetType,
             cost: String(nextCost),
             marketValue: String(nextMarketValue),
-            latestValuationDate: marketValueInput != null || action === PropertyTransactionAction.sale ? (settlementDate ?? tradeDate) : existingAsset.latestValuationDate,
-            status: action === PropertyTransactionAction.sale ? "sold" : existingAsset.status,
+            latestValuationDate: marketValueInput != null || isTerminal ? (settlementDate ?? tradeDate) : existingAsset.latestValuationDate,
+            status: action === PropertyTransactionAction.sale ? "sold" : isDisposal ? "disposed" : existingAsset.status,
           },
         });
-        if (marketValueInput != null || action === PropertyTransactionAction.sale) {
+        if (marketValueInput != null || isTerminal) {
           await tx.propertyValuation.create({
             data: {
               householdId,
               propertyAssetId: existingAsset.id,
               valuationDate: settlementDate ?? tradeDate,
               marketValue: String(nextMarketValue),
-              source: action === PropertyTransactionAction.sale ? "sale" : "manual",
-              note: action === PropertyTransactionAction.sale ? "出售回收金额" : "交易后手动估值",
+              source: action === PropertyTransactionAction.sale ? "sale" : isDisposal ? "disposal" : "manual",
+              note: action === PropertyTransactionAction.sale ? "出售回收金额" : isDisposal ? "废弃回收金额" : "交易后手动估值",
             },
           });
         }
@@ -339,7 +343,8 @@ export async function POST(req: NextRequest) {
         data: { fixedAssetType: nextAssetType as any },
       });
 
-      const realizedProfit = action === PropertyTransactionAction.sale && existingAsset
+      const isTerminalAction = action === PropertyTransactionAction.sale || action === PropertyTransactionAction.disposal;
+      const realizedProfit = isTerminalAction && existingAsset
         ? Math.max(0, amount - (fee ?? 0) - (tax ?? 0)) - toNumber(existingAsset.cost)
         : null;
       const row = await tx.propertyTransaction.create({
@@ -423,6 +428,7 @@ export async function PUT(req: NextRequest) {
     }
     const purchaseDate = parseDateOnly(body?.purchaseDate);
     const purchasePrice = parseOptionalNonNegativeNumber(body?.purchasePrice);
+    const nextStatus = String(body?.status ?? "").trim() || "active";
     const updated = await prisma.$transaction(async (tx) => {
       const nextAssetType = normalizeFixedAssetType(body?.assetType);
       const updatedAsset = await tx.propertyAsset.update({
@@ -436,6 +442,7 @@ export async function PUT(req: NextRequest) {
           purchaseDate,
           purchasePrice: purchasePrice == null ? null : String(purchasePrice),
           note: String(body?.note ?? "").trim() || null,
+          status: nextStatus,
         },
       });
       await tx.account.updateMany({

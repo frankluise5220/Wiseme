@@ -2,7 +2,7 @@
 
 import {
   Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-  LineChart, Line,
+  Line,
   PieChart, Pie, Cell,
   ComposedChart,
 } from "recharts";
@@ -13,7 +13,6 @@ import { useI18n } from "@/lib/i18n";
 const COLORS = {
   investPnL: "#8b5cf6",
   net: "#3b82f6",
-  cumNet: "#06b6d4",
 };
 const PIE_COLORS = ["#10b981", "#3b82f6", "#f59e0b", "#8b5cf6", "#ec4899", "#06b6d4", "#f43f5e", "#84cc16"];
 
@@ -23,7 +22,6 @@ type MonthData = {
   expense: number;
   investPnL: number;
   netTotal: number;
-  cumNet: number;
 };
 
 type CategoryData = {
@@ -121,59 +119,28 @@ export default function StatisticsCharts({ monthData, incomeCats, expenseCats, i
         ))}
       </div>
 
-      {/* ===== Chart row: monthly income/expense bar + cumulative net line ===== */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Monthly income/expense bar chart */}
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
-            <div className="text-sm font-semibold text-slate-800">{t("stats.monthlyIncomeExpense")}</div>
-          </div>
-          <div className="p-3">
-            {monthData.length === 0 ? (
-              <div className="h-64 flex items-center justify-center text-xs text-slate-400">{t("table.empty")}</div>
-            ) : (
-              <ResponsiveContainer width="100%" height={260}>
-                <ComposedChart data={monthData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                  <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} tickFormatter={compactTick} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Bar dataKey="income" name={t("stats.income")} fill={incomeChartColor} radius={[3, 3, 0, 0]} barSize={16} />
-                  <Bar dataKey="expense" name={t("stats.expense")} fill={expenseChartColor} radius={[3, 3, 0, 0]} barSize={16} />
-                  <Line type="monotone" dataKey="netTotal" name={t("stats.totalPnL")} stroke={COLORS.net} strokeWidth={2} dot={{ r: 3 }} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            )}
-          </div>
+      {/* ===== Monthly income/expense bar chart ===== */}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
+          <div className="text-sm font-semibold text-slate-800">{t("stats.monthlyIncomeExpense")}</div>
         </div>
-
-        {/* Cumulative net asset line chart */}
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
-            <div className="text-sm font-semibold text-slate-800">{t("stats.cumNetTrend")}</div>
-          </div>
-          <div className="p-3">
-            {monthData.length === 0 ? (
-              <div className="h-64 flex items-center justify-center text-xs text-slate-400">{t("table.empty")}</div>
-            ) : (
-              <ResponsiveContainer width="100%" height={260}>
-                <LineChart data={monthData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                  <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} tickFormatter={compactTick} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <defs>
-                    <linearGradient id="cumNetGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={COLORS.cumNet} stopOpacity={0.2} />
-                      <stop offset="95%" stopColor={COLORS.cumNet} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <Line type="monotone" dataKey="cumNet" name={t("stats.cumNet")} stroke={COLORS.cumNet} strokeWidth={2.5} dot={{ r: 3, fill: COLORS.cumNet }} fill="url(#cumNetGrad)" />
-                </LineChart>
-              </ResponsiveContainer>
-            )}
-          </div>
+        <div className="p-3">
+          {monthData.length === 0 ? (
+            <div className="h-64 flex items-center justify-center text-xs text-slate-400">{t("table.empty")}</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <ComposedChart data={monthData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} tickFormatter={compactTick} />
+                <Tooltip content={<CustomTooltip />} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Bar dataKey="income" name={t("stats.income")} fill={incomeChartColor} radius={[3, 3, 0, 0]} barSize={16} />
+                <Bar dataKey="expense" name={t("stats.expense")} fill={expenseChartColor} radius={[3, 3, 0, 0]} barSize={16} />
+                <Line type="monotone" dataKey="netTotal" name={t("stats.totalPnL")} stroke={COLORS.net} strokeWidth={2} dot={{ r: 3 }} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
 

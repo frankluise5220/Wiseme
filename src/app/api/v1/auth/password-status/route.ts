@@ -11,9 +11,13 @@ import { createDefaultInstitutionsForHousehold } from "@/lib/default-institution
 import { getDefaultTradingCalendarForAccount } from "@/lib/fund/trading-calendar";
 
 const LEGACY_PASSWORD_KEY = "access_password";
-const STATUS_LOOKUP_TIMEOUT_MS = 900;
+const STATUS_LOOKUP_TIMEOUT_MS = 5000;
 const PASSWORD_SET_RATE_LIMIT = 10;
 const PASSWORD_SET_WINDOW_MS = 60 * 60 * 1000;
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-store, max-age=0",
+  Pragma: "no-cache",
+};
 
 declare global {
   var __passwordStatusAttempts: Map<string, number[]> | undefined;
@@ -61,13 +65,48 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise
 }
 
 function degradedStatusResponse() {
-  return NextResponse.json({
+  const response = NextResponse.json({
     ok: true,
     degraded: true,
     hasPassword: true,
     needsInitialLedgerSetup: false,
     passwordResetEnabled: false,
     users: [],
+  });
+  for (const [key, value] of Object.entries(NO_STORE_HEADERS)) {
+    response.headers.set(key, value);
+  }
+  return response;
+}
+
+function statusJson(body: unknown) {
+  const response = NextResponse.json(body);
+  for (const [key, value] of Object.entries(NO_STORE_HEADERS)) {
+    response.headers.set(key, value);
+  }
+  return response;
+}
+
+function selectLoginUsers(householdId?: string) {
+  return prisma.user.findMany({
+    select: {
+      id: true,
+      name: true,
+      passwordHash: true,
+      role: true,
+      isSystem: true,
+      householdId: true,
+      Household: { select: { name: true } },
+    },
+    where: householdId
+      ? {
+          OR: [
+            { isSystem: true },
+            { householdId },
+          ],
+        }
+      : undefined,
+    orderBy: { name: "asc" },
   });
 }
 
@@ -130,6 +169,8 @@ async function ensureInitialHousehold(adminName: string) {
  * The returned user list is filtered by the current household:
  * - System users (isSystem=true) are not bound to a household and always shown.
  * - Regular users are shown only when they belong to the current householdId.
+ * - If the household cookie is stale and filters all users out, the endpoint
+ *   clears the stale cookie and falls back to the full login user list.
  */
 export async function GET() {
   const cookieStore = await cookies();
@@ -145,26 +186,7 @@ export async function GET() {
       where: { key: LEGACY_PASSWORD_KEY },
       select: { value: true },
     }),
-    prisma.user.findMany({
-      select: {
-        id: true,
-        name: true,
-        passwordHash: true,
-        role: true,
-        isSystem: true,
-        householdId: true,
-        Household: { select: { name: true } },
-      },
-      where: householdId
-        ? {
-            OR: [
-              { isSystem: true },
-              { householdId: householdId },
-            ],
-          }
-        : undefined,
-      orderBy: { name: "asc" },
-    }),
+    selectLoginUsers(householdId),
     hasEmailService(householdId ?? undefined),
   ]), STATUS_LOOKUP_TIMEOUT_MS);
 
@@ -175,13 +197,18 @@ export async function GET() {
   const [householdCount, userCount, userWithPassword, legacy, users, passwordResetEnabled] = status;
   const hasPassword = !!userWithPassword || (!!legacy && legacy.value.length > 0);
   const needsInitialLedgerSetup = householdCount === 0 && userCount === 0 && !hasPassword;
+  let loginUsers = users;
+  const shouldClearStaleHouseholdCookie = !!householdId && users.length === 0 && hasPassword && !needsInitialLedgerSetup;
+  if (shouldClearStaleHouseholdCookie) {
+    loginUsers = await selectLoginUsers();
+  }
 
-  return NextResponse.json({
+  const response = statusJson({
     ok: true,
     hasPassword,
     needsInitialLedgerSetup,
     passwordResetEnabled,
-    users: users.map(u => ({
+    users: loginUsers.map(u => ({
       id: u.id,
       name: u.name,
       hasPassword: !!u.passwordHash,
@@ -191,6 +218,10 @@ export async function GET() {
       householdName: u.Household?.name ?? null,
     })),
   });
+  if (shouldClearStaleHouseholdCookie) {
+    response.cookies.set("householdId", "", { path: "/", maxAge: 0 });
+  }
+  return response;
 }
 
 /**

@@ -510,6 +510,14 @@ function findStandaloneAppDir(baseDir) {
 }
 
 fs.rmSync(stageDir, { recursive: true, force: true });
+// The package must NOT ship `wizard/install`.
+// The FN soft-store client parses only `wizard/install`: when that file exists it
+// renders the wizard and waits for user input before installing, so shipping it
+// makes every update ask for the service port again. Without it the client
+// installs silently and the port is resolved from persisted state.
+// `wizard/config` is safe: the soft-store client never reads it, and the fnOS
+// App Center only shows it when the user opens the app's settings, which is how
+// the service port stays editable after a silent install.
 for (const dir of [
   "app/bin",
   "app/data",
@@ -572,7 +580,10 @@ write(path.join(stageDir, "config", "resource"), JSON.stringify({
   },
 }, null, 2));
 
-write(path.join(stageDir, "wizard", "install"), JSON.stringify([
+// Settings wizard: lets users change the service port after install.
+// Deliberately not `wizard/install`, which the FN soft-store client would show
+// on every update.
+write(path.join(stageDir, "wizard", "config"), JSON.stringify([
   {
     stepTitle: "服务端口",
     items: [
@@ -581,17 +592,14 @@ write(path.join(stageDir, "wizard", "install"), JSON.stringify([
         field: "wizard_port",
         label: "服务端口",
         initValue: "7777",
-        helpText: "默认使用 7777；如果该端口已被占用，可以改为其他未占用端口。",
-      },
-    ],
-  },
-  {
-    stepTitle: "数据目录",
-    items: [
-      {
-        type: "tips",
-        field: "wizard_data_dir_tips",
-        helpText: "SQLite 数据会保存在应用数据目录中，默认即可。",
+        rules: [
+          { required: true, message: "请输入服务端口" },
+          {
+            pattern: "^([1-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$",
+            message: "请输入 1000-65535 之间的端口",
+          },
+        ],
+        helpText: "保存后会重启 MMH 服务。端口会写入应用数据目录，后续更新会继续沿用，不会被包内默认值覆盖。默认值固定为 7777，不一定是当前在用的端口。",
       },
     ],
   },
@@ -794,8 +802,76 @@ resolve_system_password() {
     generate_system_password
 }
 
+generate_session_secret() {
+    local generated=""
+    if command -v openssl >/dev/null 2>&1; then
+        generated="$(openssl rand -base64 48 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    if [ -z "$generated" ] && [ -n "\${APP_BIN:-}" ] && [ -x "$APP_BIN" ]; then
+        generated="$("$APP_BIN" -e 'process.stdout.write(require("node:crypto").randomBytes(48).toString("base64url"))' 2>/dev/null || true)"
+    fi
+    if [ -n "$generated" ] && [ "\${#generated}" -ge 32 ]; then
+        printf '%s' "$generated"
+        return 0
+    fi
+    return 1
+}
+
+resolve_session_secret() {
+    local pkgvar secret_file env_secret
+    pkgvar="$(resolve_pkgvar)"
+    secret_file="\${pkgvar}/mmh-session-secret.txt"
+
+    env_secret="$(read_env_value MMH_SESSION_SECRET 2>/dev/null || true)"
+    case "$env_secret" in
+        CHANGE_ME*) env_secret="" ;;
+    esac
+    if [ -n "$env_secret" ] && [ "\${#env_secret}" -ge 32 ]; then
+        printf '%s' "$env_secret"
+        return 0
+    fi
+    if [ -f "$secret_file" ]; then
+        env_secret="$(tr -d '[:space:]' < "$secret_file")"
+        case "$env_secret" in
+            CHANGE_ME*) env_secret="" ;;
+        esac
+        if [ -n "$env_secret" ] && [ "\${#env_secret}" -ge 32 ]; then
+            printf '%s' "$env_secret"
+            return 0
+        fi
+    fi
+    generate_session_secret
+}
+
+port_in_use() {
+    local p="$1"
+    case "$p" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    (exec 3<>"/dev/tcp/127.0.0.1/$p") >/dev/null 2>&1
+}
+
+probe_free_port() {
+    local start="$1"
+    local p i
+    case "$start" in
+        ''|*[!0-9]*) start=7777 ;;
+    esac
+    p="$start"
+    i=0
+    while [ "$i" -lt 200 ]; do
+        if ! port_in_use "$p"; then
+            echo "$p"
+            return 0
+        fi
+        p=$((p + 1))
+        i=$((i + 1))
+    done
+    echo "$start"
+}
+
 resolve_port() {
-    local pkgvar port_file env_port
+    local pkgvar port_file env_port start_port
     pkgvar="$(resolve_pkgvar)"
     port_file="\${pkgvar}/.port"
 
@@ -808,23 +884,26 @@ resolve_port() {
         echo "$env_port"
         return 0
     fi
-    if [ -n "\${wizard_port:-}" ]; then
-        echo "\${wizard_port}"
-        return 0
-    fi
-    if [ -n "\${TRIM_SERVICE_PORT:-}" ]; then
-        echo "\${TRIM_SERVICE_PORT}"
-        return 0
-    fi
-    echo "7777"
+    # No install wizard ships with this package: fresh installs never ask for a
+    # port, so probe for a free one instead of deadlocking on a taken 7777.
+    # Reinstalls and updates reuse .port above and never reach this probe.
+    start_port="\${TRIM_SERVICE_PORT:-7777}"
+    probe_free_port "$start_port"
 }
 
 write_env_file() {
-    local port pkgvar system_password password_file port_file
-    port="$(resolve_port)"
+    local requested_port="$1"
+    local port pkgvar system_password session_secret password_file session_secret_file port_file
+    if [ -n "$requested_port" ]; then
+        port="$(printf '%s' "$requested_port" | tr -d '[:space:]')"
+    else
+        port="$(resolve_port)"
+    fi
     pkgvar="$(resolve_pkgvar)"
     system_password="$(resolve_system_password)"
+    session_secret="$(resolve_session_secret)"
     password_file="\${pkgvar}/mmh-system-password.txt"
+    session_secret_file="\${pkgvar}/mmh-session-secret.txt"
     port_file="\${pkgvar}/.port"
     [ -n "$pkgvar" ] || return 1
     mkdir -p "\${pkgvar}/data" 2>/dev/null || true
@@ -833,12 +912,15 @@ write_env_file() {
 PORT=\${port}
 TZ=Asia/Shanghai
 MMH_SYSTEM_PASSWORD=\${system_password}
+MMH_SESSION_SECRET=\${session_secret}
 EOF
     chmod 600 "\${pkgvar}/mmh.env" 2>/dev/null || true
     printf '%s\\n' "$port" > "$port_file"
     chmod 600 "$port_file" 2>/dev/null || true
     printf '%s\\n' "$system_password" > "$password_file"
     chmod 600 "$password_file" 2>/dev/null || true
+    printf '%s\\n' "$session_secret" > "$session_secret_file"
+    chmod 600 "$session_secret_file" 2>/dev/null || true
 
     if [ -n "\${APP_ROOT:-}" ] && [ -f "\${APP_ROOT}/ui/config" ]; then
         sed -i 's/"port": "[0-9]*"/"port": "'"\${port}"'"/' "\${APP_ROOT}/ui/config"
@@ -860,10 +942,29 @@ EOF
 
 write(path.join(stageDir, "cmd", "main"), `#!/bin/bash
 
-APP_DEST="\${TRIM_APPDEST:-}"
-if [ -z "$APP_DEST" ]; then
-  APP_DEST="$(cd "$(dirname "$0")/.." && pwd)"
-fi
+resolve_app_dest () {
+  if [ -n "\${TRIM_APPDEST:-}" ] && [ -d "\${TRIM_APPDEST}" ]; then
+    echo "\${TRIM_APPDEST}"
+    return 0
+  fi
+
+  local appname="\${TRIM_APPNAME:-mmh}"
+  local d
+  for d in /vol*/@appcenter/"$appname" /usr/local/apps/@appcenter/"$appname" /var/apps/"$appname"; do
+    if [ -d "$d" ] && [ -f "$d/server/server.js" ]; then
+      echo "$d"
+      return 0
+    fi
+    if [ -d "$d" ] && [ -f "$d/app/server/server.js" ]; then
+      echo "$d/app"
+      return 0
+    fi
+  done
+
+  cd "$(dirname "$0")/.." && pwd
+}
+
+APP_DEST="$(resolve_app_dest)"
 
 resolve_data_dest () {
   if [ -n "\${TRIM_DATADEST:-}" ]; then
@@ -895,6 +996,7 @@ else
 fi
 ENV_FILE="$DATA_ROOT/mmh.env"
 SYSTEM_PASSWORD_FILE="$DATA_ROOT/mmh-system-password.txt"
+SESSION_SECRET_FILE="$DATA_ROOT/mmh-session-secret.txt"
 SERVER_DIR="$APP_DEST/server"
 NODE_BIN="$APP_DEST/bin/node"
 PID_FILE="$DATA_DEST/mmh.pid"
@@ -931,8 +1033,23 @@ generate_system_password () {
   printf '%s' "$generated"
 }
 
+generate_session_secret () {
+  local generated=""
+  if command -v openssl >/dev/null 2>&1; then
+    generated="$(openssl rand -base64 48 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+  if [ -z "$generated" ] && [ -x "$NODE_BIN" ]; then
+    generated="$("$NODE_BIN" -e 'process.stdout.write(require("node:crypto").randomBytes(48).toString("base64url"))' 2>/dev/null || true)"
+  fi
+  if [ -n "$generated" ] && [ "\${#generated}" -ge 32 ]; then
+    printf '%s' "$generated"
+    return 0
+  fi
+  return 1
+}
+
 ensure_runtime_settings () {
-  local env_port env_password system_password
+  local env_port env_password system_password env_session_secret session_secret
   mkdir -p "$DATA_DEST" "$DATA_ROOT"
 
   env_port="$(read_env_value PORT 2>/dev/null || true)"
@@ -949,14 +1066,30 @@ ensure_runtime_settings () {
   fi
   export MMH_SYSTEM_PASSWORD="$system_password"
 
+  env_session_secret="$(read_env_value MMH_SESSION_SECRET 2>/dev/null || true)"
+  session_secret="\${MMH_SESSION_SECRET:-$env_session_secret}"
+  if [ -z "$session_secret" ] && [ -f "$SESSION_SECRET_FILE" ]; then
+    session_secret="$(tr -d '[:space:]' < "$SESSION_SECRET_FILE")"
+  fi
+  if [ -z "$session_secret" ] || [ "\${#session_secret}" -lt 32 ]; then
+    session_secret="$(generate_session_secret)" || {
+      echo "Unable to generate a strong MMH session secret." >&2
+      return 1
+    }
+  fi
+  export MMH_SESSION_SECRET="$session_secret"
+
   cat > "$ENV_FILE" <<EOF
 PORT=\${PORT}
 TZ=Asia/Shanghai
 MMH_SYSTEM_PASSWORD=\${MMH_SYSTEM_PASSWORD}
+MMH_SESSION_SECRET=\${MMH_SESSION_SECRET}
 EOF
   chmod 600 "$ENV_FILE" 2>/dev/null || true
   printf '%s\\n' "$MMH_SYSTEM_PASSWORD" > "$SYSTEM_PASSWORD_FILE"
   chmod 600 "$SYSTEM_PASSWORD_FILE" 2>/dev/null || true
+  printf '%s\\n' "$MMH_SESSION_SECRET" > "$SESSION_SECRET_FILE"
+  chmod 600 "$SESSION_SECRET_FILE" 2>/dev/null || true
 }
 
 ensure_runtime_owner () {
@@ -1083,6 +1216,54 @@ fi
 exit 0
 `;
 
+// Changing the port goes through the settings wizard, not an install wizard.
+// resolve_port() prefers the persisted .port, so the new value must be applied
+// explicitly here, then the service is restarted to pick it up.
+const configCallbackLifecycle = `#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -z "\${TRIM_APPNAME:-}" ]; then
+    TRIM_APPNAME=mmh
+fi
+if [ -f "$SCRIPT_DIR/app-layout" ]; then
+    . "$SCRIPT_DIR/app-layout"
+    ensure_app_ready >/dev/null 2>&1 || true
+    # cmd/main locates the bundled Node runtime through TRIM_APPDEST. App Center
+    # normally exports it, but resolve it ourselves: otherwise a config change
+    # would stop the service and then fail to start it again.
+    if [ -z "\${TRIM_APPDEST:-}" ] || [ ! -d "\${TRIM_APPDEST}" ]; then
+        TRIM_APPDEST="$(resolve_app_dest)"
+        export TRIM_APPDEST
+    fi
+fi
+if [ ! -f "$SCRIPT_DIR/apply-settings" ]; then
+    exit 0
+fi
+. "$SCRIPT_DIR/apply-settings"
+
+LOG_TARGET="\${TRIM_TEMP_LOGFILE:-/dev/null}"
+NEW_PORT="$(printf '%s' "\${wizard_port:-}" | tr -d '[:space:]')"
+[ -n "$NEW_PORT" ] || exit 0
+
+case "$NEW_PORT" in
+    *[!0-9]*)
+        echo "服务端口必须是数字：$NEW_PORT" > "$LOG_TARGET" 2>/dev/null || true
+        exit 1
+        ;;
+esac
+if [ "$NEW_PORT" -lt 1000 ] || [ "$NEW_PORT" -gt 65535 ]; then
+    echo "服务端口必须在 1000-65535 之间：$NEW_PORT" > "$LOG_TARGET" 2>/dev/null || true
+    exit 1
+fi
+
+"$SCRIPT_DIR/main" stop >/dev/null 2>&1 || true
+write_env_file "$NEW_PORT" >/dev/null
+"$SCRIPT_DIR/main" start
+
+exit 0
+`;
+
 const backupLifecycle = (reason) => `#!/bin/bash
 set -e
 
@@ -1125,6 +1306,7 @@ parent_dir="$(dirname "$data_root")"
 backup_root=""
 for candidate in "$parent_dir/$TRIM_APPNAME-upgrade-backups" "$data_root/upgrade-backups"; do
     if mkdir -p "$candidate" 2>/dev/null && [ -w "$candidate" ]; then
+        chmod 700 "$candidate" 2>/dev/null || true
         backup_root="$candidate"
         break
     fi
@@ -1134,14 +1316,17 @@ stamp="$(date +%Y%m%d-%H%M%S)"
 target="$backup_root/${reason}-$stamp"
 
 mkdir -p "$target/appdata"
+chmod 700 "$backup_root" "$target" "$target/appdata" 2>/dev/null || true
 cp -a "$data_root/data" "$target/appdata/data"
-for file in "$data_root/mmh.env" "$data_root/.port" "$data_root/mmh-system-password.txt"; do
+for file in "$data_root/mmh.env" "$data_root/.port" "$data_root/mmh-system-password.txt" "$data_root/mmh-session-secret.txt"; do
     if [ -f "$file" ]; then
         cp -a "$file" "$target/appdata/"
     fi
 done
+chmod -R go-rwx "$target/appdata" 2>/dev/null || true
 if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$data_root/data/mmh.db" > "$target/mmh.db.sha256"
+    chmod 600 "$target/mmh.db.sha256" 2>/dev/null || true
 fi
 
 echo "MMH app data backed up to $target"
@@ -1158,10 +1343,10 @@ for (const name of [
 for (const name of [
   "install_callback",
   "upgrade_callback",
-  "config_callback",
 ]) {
   write(path.join(stageDir, "cmd", name), settingsLifecycle, 0o755);
 }
+write(path.join(stageDir, "cmd", "config_callback"), configCallbackLifecycle, 0o755);
 write(path.join(stageDir, "cmd", "upgrade_init"), backupLifecycle("upgrade"), 0o755);
 write(path.join(stageDir, "cmd", "uninstall_init"), backupLifecycle("uninstall"), 0o755);
 
@@ -1208,6 +1393,32 @@ const path = require("node:path");
 const Database = require("better-sqlite3");
 
 const MIGRATIONS = [
+  {
+    version: "20260905_add_account_loan_type",
+    description: "Add Account.loanType to classify loan accounts",
+    apply(db) {
+      addColumnIfMissing(db, "Account", "loanType", "TEXT");
+      db.prepare(
+        "UPDATE \\"Account\\" SET \\"loanType\\" = CASE WHEN \\"isConsumerLoan\\" = 1 THEN 'consumer' ELSE 'home' END WHERE \\"kind\\" = 'loan'",
+      ).run();
+    },
+  },
+  {
+    version: "20260905_split_settlement_account_kind",
+    description: "Split counterparty settlement accounts from institution loans",
+    apply(db) {
+      db.prepare("UPDATE Account SET kind = 'settlement', loanType = NULL, isConsumerLoan = 0 WHERE kind = 'loan' AND counterpartyId IS NOT NULL AND institutionId IS NULL").run();
+      db.prepare("UPDATE Account SET loanType = NULL, isConsumerLoan = 0 WHERE kind = 'settlement'").run();
+    },
+  },
+  {
+    version: "20260906_restore_counterparty_settlement_kind",
+    description: "Restore counterparty-owned settlement accounts after loan split",
+    apply(db) {
+      db.prepare("UPDATE Account SET kind = 'settlement', loanType = NULL, isConsumerLoan = 0 WHERE kind = 'loan' AND counterpartyId IS NOT NULL AND institutionId IS NULL").run();
+      db.prepare("UPDATE Account SET loanType = NULL, isConsumerLoan = 0 WHERE kind = 'settlement'").run();
+    },
+  },
   {
     version: "20260812_account_note",
     description: "Add Account.note freeform remark",
@@ -1303,6 +1514,55 @@ const MIGRATIONS = [
     },
   },
   {
+    version: "20260902_add_regular_invest_plan_name",
+    description: "Add RegularInvestPlan.planName for editable scheduled task names",
+    apply(db) {
+      if (tableExists(db, "RegularInvestPlan")) {
+        addColumnIfMissing(db, "RegularInvestPlan", "planName", "TEXT");
+      }
+    },
+  },
+  {
+    version: "20260903_normalize_ewallet_institution_type",
+    description: "Normalize legacy wallet institutions to the payment-platform type",
+    apply(db) {
+      if (tableExists(db, "Institution")) {
+        db.prepare("UPDATE \\"Institution\\" SET \\"type\\" = 'payment' WHERE \\"type\\" = 'ewallet'").run();
+      }
+    },
+  },
+  {
+    version: "20260903_add_fund_profile_trading_calendar",
+    description: "Add fund-level NAV trading calendar to fund profiles",
+    apply(db) {
+      if (!tableExists(db, "FundProfile")) return;
+      addColumnIfMissing(db, "FundProfile", "tradingCalendar", "TEXT");
+      db.prepare(
+        "UPDATE \\"FundProfile\\" SET \\"tradingCalendar\\" = CASE " +
+          "WHEN \\"fundName\\" LIKE '%\\u9999\\u6E2F%' OR \\"fundName\\" LIKE '%\\u6E2F\\u80A1%' OR \\"fundName\\" LIKE '%Hang Seng%' OR \\"fundName\\" LIKE '%Hong Kong%' THEN 'hk_fund' " +
+          "WHEN \\"fundName\\" LIKE '%\\u65E5\\u672C%' OR \\"fundName\\" LIKE '%Nikkei%' OR \\"fundName\\" LIKE '%TOPIX%' OR \\"fundName\\" LIKE '%Japan%' THEN 'jp_fund' " +
+          "WHEN \\"fundName\\" LIKE '%QDII%' OR \\"fundName\\" LIKE '%\\u7F8E\\u56FD%' OR \\"fundName\\" LIKE '%\\u5168\\u7403%' OR \\"fundName\\" LIKE '%NASDAQ%' OR \\"fundName\\" LIKE '%USA%' THEN 'us_fund' " +
+          "ELSE 'cn_fund' END WHERE \\"tradingCalendar\\" IS NULL",
+      ).run();
+    },
+  },
+  {
+    version: "20260903_restore_fund_profile_company_code",
+    description: "Restore FundProfile.fundCompanyCode for schema convergence",
+    apply(db) {
+      if (tableExists(db, "FundProfile")) {
+        addColumnIfMissing(db, "FundProfile", "fundCompanyCode", "TEXT");
+      }
+    },
+  },
+  {
+    version: "20260903_z_repair_investment_business_sources",
+    description: "Repair split fund and wealth business sources",
+    apply(db) {
+      repairInvestmentBusinessSources(db);
+    },
+  },
+  {
     version: "20260826_add_stock_latest_price_date",
     description: "Add StockHolding.latestPriceDate for latest stock valuation timestamps",
     apply(db) {
@@ -1321,6 +1581,16 @@ const MIGRATIONS = [
       if (tableExists(db, "property_assets")) {
         addColumnIfMissing(db, "property_assets", "assetType", "TEXT NOT NULL DEFAULT 'property'");
         addColumnIfMissing(db, "property_assets", "attributes", "TEXT");
+      }
+    },
+  },
+  {
+    version: "20260905_add_property_mortgage_loan_account",
+    description: "Add mortgage loan linkage to property assets",
+    apply(db) {
+      if (tableExists(db, "property_assets")) {
+        addColumnIfMissing(db, "property_assets", "mortgageLoanAccountId", "TEXT");
+        db.exec("CREATE INDEX IF NOT EXISTS \\"property_assets_householdId_mortgageLoanAccountId_idx\\" ON \\"property_assets\\"(\\"householdId\\", \\"mortgageLoanAccountId\\")");
       }
     },
   },
@@ -1426,6 +1696,16 @@ function splitSqlStatements(sql) {
   const tail = current.trim();
   if (tail) statements.push(tail);
   return statements;
+}
+
+function stripLeadingSqlComments(statement) {
+  let value = statement.trim();
+  while (value.startsWith("--")) {
+    const newline = value.indexOf("\\n");
+    if (newline < 0) return "";
+    value = value.slice(newline + 1).trim();
+  }
+  return value;
 }
 
 function createTableNameFromStatement(statement) {
@@ -1610,18 +1890,21 @@ function indexColumnsExist(db, tableName, columnNames) {
 
 function applyMissingSchemaObjectsFromInitSql(db, sqlPath) {
   const statements = splitSqlStatements(fs.readFileSync(sqlPath, "utf8"));
-  for (const statement of statements) {
+  for (const rawStatement of statements) {
+    const statement = stripLeadingSqlComments(rawStatement);
     if (!/^CREATE\\s+TABLE\\s+/i.test(statement)) continue;
     const tableName = createTableNameFromStatement(statement);
     if (!tableName || tableExists(db, tableName)) continue;
     db.exec(statement);
     console.log("SQLite schema table added from native-init.sql: " + tableName);
   }
-  for (const statement of statements) {
+  for (const rawStatement of statements) {
+    const statement = stripLeadingSqlComments(rawStatement);
     if (!/^CREATE\\s+TABLE\\s+/i.test(statement)) continue;
     applyMissingColumnsFromCreateTableStatement(db, statement);
   }
-  for (const statement of statements) {
+  for (const rawStatement of statements) {
+    const statement = stripLeadingSqlComments(rawStatement);
     if (!/^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+/i.test(statement)) continue;
     const tableName = createIndexTableNameFromStatement(statement);
     if (!tableName || !tableExists(db, tableName)) continue;
@@ -1819,6 +2102,139 @@ function cleanupStatementRecognitionRuleKeywords(db) {
   }
 }
 
+function repairInvestmentBusinessSources(db) {
+  if (!tableExists(db, "transactions") || !tableExists(db, "entry_business_links")) return;
+
+  if (tableExists(db, "fund_transactions") && tableExists(db, "FundProfile")) {
+    db.exec(
+      "UPDATE fund_transactions " +
+        "SET fundName = (SELECT fp.fundName FROM FundProfile fp WHERE fp.fundCode = fund_transactions.fundCode) " +
+        "WHERE (fundName IS NULL OR TRIM(fundName) = '' OR fundName = fundCode) " +
+        "AND EXISTS (SELECT 1 FROM FundProfile fp WHERE fp.fundCode = fund_transactions.fundCode AND fp.fundName IS NOT NULL AND TRIM(fp.fundName) <> '')",
+    );
+  }
+
+  if (tableExists(db, "fund_transactions") && tableExists(db, "fund_transaction_cash_flows")) {
+    db.exec(
+      "INSERT INTO entry_business_links " +
+        "(id, householdId, cashEntryId, businessEntryId, fundTransactionId, businessType, linkType, cashFlowDirection, source, note, metadata, deletedAt, createdAt, updatedAt) " +
+        "SELECT " +
+          "'ebl_' || cf.txRecordId || '_fund_' || cf.fundTransactionId, " +
+          "ft.householdId, cf.txRecordId, NULL, cf.fundTransactionId, 'fund', 'cash_flow', " +
+          "CASE WHEN cf.kind IN ('buy_out', 'switch_in') THEN 'outflow' " +
+            "WHEN cf.kind IN ('refund_in', 'redeem_in', 'dividend_in') THEN 'inflow' ELSE 'none' END, " +
+          "COALESCE(ft.source, 'manual'), 'Repaired link to fund transaction', " +
+          "'{\\\"splitRecord\\\":true,\\\"independentBusinessTransaction\\\":true,\\\"repairedBy\\\":\\\"20260903_z_repair_investment_business_sources\\\"}', " +
+          "NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP " +
+        "FROM fund_transaction_cash_flows cf " +
+        "JOIN fund_transactions ft ON ft.id = cf.fundTransactionId " +
+        "JOIN transactions cash ON cash.id = cf.txRecordId " +
+        "WHERE ft.deletedAt IS NULL AND cash.deletedAt IS NULL " +
+        "ON CONFLICT(id) DO UPDATE SET " +
+          "cashEntryId = excluded.cashEntryId, businessEntryId = NULL, fundTransactionId = excluded.fundTransactionId, " +
+          "businessType = excluded.businessType, linkType = excluded.linkType, cashFlowDirection = excluded.cashFlowDirection, " +
+          "source = excluded.source, note = excluded.note, metadata = excluded.metadata, deletedAt = NULL, updatedAt = CURRENT_TIMESTAMP",
+    );
+  }
+
+  if (tableExists(db, "fund_transactions")) {
+    db.exec(
+      "INSERT INTO entry_business_links " +
+        "(id, householdId, cashEntryId, businessEntryId, fundTransactionId, businessType, linkType, cashFlowDirection, source, note, metadata, deletedAt, createdAt, updatedAt) " +
+        "SELECT " +
+          "'ebl_' || ft.cashEntryId || '_fund_' || ft.id, ft.householdId, ft.cashEntryId, NULL, ft.id, 'fund', 'cash_flow', " +
+          "CASE WHEN cash.amount < 0 THEN 'outflow' WHEN cash.amount > 0 THEN 'inflow' ELSE 'none' END, " +
+          "COALESCE(ft.source, 'manual'), 'Repaired link to fund transaction', " +
+          "'{\\\"splitRecord\\\":true,\\\"independentBusinessTransaction\\\":true,\\\"repairedBy\\\":\\\"20260903_z_repair_investment_business_sources\\\"}', " +
+          "NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP " +
+        "FROM fund_transactions ft " +
+        "JOIN transactions cash ON cash.id = ft.cashEntryId " +
+        "WHERE ft.deletedAt IS NULL AND ft.cashEntryId IS NOT NULL AND cash.deletedAt IS NULL " +
+          "AND NOT EXISTS (SELECT 1 FROM fund_transaction_cash_flows cf WHERE cf.fundTransactionId = ft.id) " +
+        "ON CONFLICT(id) DO UPDATE SET " +
+          "cashEntryId = excluded.cashEntryId, businessEntryId = NULL, fundTransactionId = excluded.fundTransactionId, " +
+          "businessType = excluded.businessType, linkType = excluded.linkType, cashFlowDirection = excluded.cashFlowDirection, " +
+          "source = excluded.source, note = excluded.note, metadata = excluded.metadata, deletedAt = NULL, updatedAt = CURRENT_TIMESTAMP",
+    );
+  }
+
+  if (!tableExists(db, "wealth_transactions")) return;
+  const candidates = db.prepare(
+    "SELECT t.id, t.householdId, t.accountId, t.toAccountId, t.amount, t.fundName, t.fundSubtype, " +
+      "t.source, t.entryOrigin, t.date, t.fundConfirmDate, t.fundArrivalDate, t.fundArrivalAmount, " +
+      "t.fundUnits, t.fundNav, t.fundFee, t.depositAnnualRate, t.depositInterest, t.realizedProfit, t.note, " +
+      "a.investProductType AS accountProductType, ta.investProductType AS toAccountProductType " +
+      "FROM transactions t " +
+      "LEFT JOIN Account a ON a.id = t.accountId " +
+      "LEFT JOIN Account ta ON ta.id = t.toAccountId " +
+      "WHERE t.householdId IS NOT NULL AND t.type = 'investment' AND t.deletedAt IS NULL " +
+        "AND (a.investProductType = 'wealth' OR ta.investProductType = 'wealth')",
+  ).all();
+  const existing = db.prepare(
+    "SELECT id FROM wealth_transactions WHERE id = ? OR cashEntryId = ? LIMIT 1",
+  );
+  const insertWealth = db.prepare(
+    "INSERT OR IGNORE INTO wealth_transactions " +
+      "(id, householdId, accountId, cashAccountId, cashEntryId, wealthProductId, productName, action, source, entryOrigin, " +
+      "tradeDate, confirmDate, arrivalDate, grossAmount, arrivalAmount, units, nav, interest, fee, annualRate, realizedProfit, note, deletedAt, createdAt, updatedAt) " +
+      "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, CURRENT_TIMESTAMP)",
+  );
+  const upsertWealthLink = db.prepare(
+    "INSERT INTO entry_business_links " +
+      "(id, householdId, cashEntryId, businessEntryId, wealthTransactionId, businessType, linkType, cashFlowDirection, source, note, metadata, deletedAt, createdAt, updatedAt) " +
+      "VALUES (?, ?, ?, NULL, ?, 'wealth', 'cash_flow', ?, ?, 'Repaired link to wealth transaction', ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) " +
+      "ON CONFLICT(id) DO UPDATE SET cashEntryId = excluded.cashEntryId, businessEntryId = NULL, wealthTransactionId = excluded.wealthTransactionId, " +
+        "businessType = excluded.businessType, linkType = excluded.linkType, cashFlowDirection = excluded.cashFlowDirection, source = excluded.source, " +
+        "note = excluded.note, metadata = excluded.metadata, deletedAt = NULL, updatedAt = CURRENT_TIMESTAMP",
+  );
+  for (const row of candidates) {
+    if (existing.get(row.id, row.id)) continue;
+    const action = row.fundSubtype || (Number(row.amount) < 0 ? "buy" : "redeem");
+    const businessAccountId = row.accountProductType === "wealth" ? row.accountId : row.toAccountId;
+    const cashAccountId = row.accountProductType === "wealth" ? row.toAccountId : row.accountId;
+    if (!businessAccountId) continue;
+    const rawProfit = row.realizedProfit != null
+      ? Number(row.realizedProfit)
+      : Number(row.depositInterest || 0) - Number(row.fundFee || 0);
+    const grossAmount = action === "redeem" || action === "switch_out"
+      ? Math.max(0, Math.abs(Number(row.amount)) - (Number.isFinite(rawProfit) ? rawProfit : 0))
+      : Math.abs(Number(row.amount));
+    insertWealth.run(
+      row.id,
+      row.householdId,
+      businessAccountId,
+      cashAccountId || null,
+      row.id,
+      row.fundName || null,
+      action,
+      row.source || "manual",
+      row.entryOrigin || "manual",
+      row.date,
+      row.fundConfirmDate || row.date,
+      row.fundArrivalDate || null,
+      grossAmount,
+      row.fundArrivalAmount == null ? null : Math.abs(Number(row.fundArrivalAmount)),
+      row.fundUnits == null ? null : row.fundUnits,
+      row.fundNav == null ? null : row.fundNav,
+      row.depositInterest == null ? null : row.depositInterest,
+      row.fundFee == null ? null : row.fundFee,
+      row.depositAnnualRate == null ? null : row.depositAnnualRate,
+      row.realizedProfit == null ? null : row.realizedProfit,
+      row.note || null,
+      row.createdAt || new Date().toISOString(),
+    );
+    upsertWealthLink.run(
+      "ebl_" + row.id + "_wealth_" + row.id,
+      row.householdId,
+      row.id,
+      row.id,
+      Number(row.amount) < 0 ? "outflow" : Number(row.amount) > 0 ? "inflow" : "none",
+      row.source || "manual",
+      "{\\\"splitRecord\\\":true,\\\"independentBusinessTransaction\\\":true,\\\"repairedBy\\\":\\\"20260903_z_repair_investment_business_sources\\\"}",
+    );
+  }
+}
+
 function ensureMigrationTable(db) {
   db.exec("CREATE TABLE IF NOT EXISTS _mmh_native_schema (version TEXT NOT NULL PRIMARY KEY, appliedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)");
 }
@@ -1982,10 +2398,10 @@ if (manualFpk) {
     "app.tgz",
     "cmd",
     "config",
+    "wizard",
     "ICON.PNG",
     "ICON_256.PNG",
     "manifest",
-    "wizard",
   ];
   const fpkTar = run("tar", ["-czf", fpkPath, "-C", stageDir, ...fpkEntries]);
   if (fpkTar.status !== 0) {

@@ -23,6 +23,26 @@ function expect(condition, message) {
   if (!condition) failures.push(message);
 }
 
+// Migration SQL files are executed verbatim by `prisma migrate deploy`; a
+// UTF-8 BOM is parsed as an invalid statement prefix and fails every deploy
+// with "syntax error at or near \ufeff". Shipping a BOM'd migration would
+// break every dev/test database updated after the release.
+function scanMigrationSqlForBom() {
+  const migrationsDir = path.join(root, "prisma", "migrations");
+  if (!fs.existsSync(migrationsDir)) return;
+  for (const entry of fs.readdirSync(migrationsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const sqlPath = path.join(migrationsDir, entry.name, "migration.sql");
+    if (!fs.existsSync(sqlPath)) continue;
+    const buffer = fs.readFileSync(sqlPath);
+    if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+      failures.push(`prisma/migrations/${entry.name}/migration.sql starts with a UTF-8 BOM; strip it before releasing (prisma migrate deploy would fail with "syntax error at or near \\ufeff").`);
+    }
+  }
+}
+
+scanMigrationSqlForBom();
+
 function normalizeFnosTarget(value) {
   const raw = String(value || "").trim().toLowerCase().replace(/_/g, "-");
   if (["", "x86", "x86-64", "x64", "amd64"].includes(raw)) {
@@ -236,7 +256,10 @@ const systemUpdateRoute = read(path.join(root, "src", "app", "api", "v1", "setti
 const systemUpdatePage = read(path.join(root, "src", "app", "(sidebar)", "settings", "system-update", "page.tsx"));
 const authVerifyRoute = read(path.join(root, "src", "app", "api", "v1", "auth", "verify", "route.ts"));
 const backupSource = read(path.join(root, "src", "lib", "server", "backup.ts"));
+const currencySchema = read(path.join(root, "prisma", "schema.prisma"));
+const currencyMigration = read(path.join(root, "prisma", "migrations", "20260903_add_currency_request_tables", "migration.sql"));
 const scheduledTaskLock = read(path.join(root, "src", "lib", "server", "scheduled-task-lock.ts"));
+const fundProfileSource = read(path.join(root, "src", "lib", "fund", "fundProfile.ts"));
 const repositoryExample = read(path.join(root, "deploy", "fnos", "repository", "apps.example.json"));
 const repositoryApiApps = read(path.join(root, "deploy", "fnos", "repository", "api", "apps"));
 const fnosReadme = read(path.join(root, "deploy", "fnos", "README.md"));
@@ -250,7 +273,6 @@ const standaloneEnvScrubIndex = buildScript.indexOf('for (const envFile of [".en
 const publicAssetCopyIndex = buildScript.indexOf("copyFnosPublicAssets(publicDir");
 const persistedPortFileIndex = buildScript.indexOf('if [ -f "$port_file" ]; then');
 const persistedEnvPortIndex = buildScript.indexOf('env_port="$(read_env_value PORT');
-const wizardPortIndex = buildScript.indexOf('if [ -n "\\${wizard_port:-}" ]; then');
 const fnosInitSqliteIndex = buildScript.indexOf('(cd "$SERVER_DIR" && "$NODE_BIN" "$SERVER_DIR/scripts/init-sqlite.cjs")');
 const fnosPidCheckIndex = buildScript.indexOf('if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")"');
 
@@ -269,13 +291,15 @@ expect(/function toSingleLineText\(value\)/.test(buildScript), "fnOS package bui
 expect(/const manifestChangelog = toSingleLineText\(changelog\);/.test(buildScript), "fnOS package build must derive a single-line manifest changelog.");
 expect(/changelog=\$\{manifestChangelog\}/.test(buildScript), "fnOS manifest must include a changelog for official submission.");
 expect(/mmhReleaseNotes/.test(buildScript), "fnOS package build must copy release notes into the runtime package.json.");
-expect(/path\.join\(stageDir,\s*"wizard",\s*"install"\)/.test(buildScript), "fnOS package should keep the first-install wizard for initial service-port setup.");
-expect(!/path\.join\(stageDir,\s*"wizard",\s*"uninstall"\)/.test(buildScript), "fnOS package must not include an uninstall wizard; FN soft-store updates cannot complete when uninstall requires UI input.");
-expect(!/path\.join\(stageDir,\s*"wizard",\s*"upgrade"\)/.test(buildScript), "fnOS package must not include an upgrade wizard; FN soft-store updates must run without UI input.");
-expect(!/path\.join\(stageDir,\s*"wizard",\s*"config"\)/.test(buildScript), "fnOS package must not include a config wizard; FN soft-store updates must not ask for the service port again.");
-expect(/wizard_port/.test(buildScript), "fnOS first-install wizard port must be persisted into package runtime settings.");
-expect(persistedPortFileIndex !== -1 && persistedEnvPortIndex !== -1 && wizardPortIndex !== -1, "fnOS port resolver must check persisted .port, persisted mmh.env PORT, and first-install wizard_port.");
-expect(persistedPortFileIndex < persistedEnvPortIndex && persistedEnvPortIndex < wizardPortIndex, "fnOS port resolver must reuse the installed port before considering wizard_port during overlay updates.");
+expect(!/path\.join\(stageDir,\s*"wizard",\s*"install"\)/.test(buildScript), "fnOS package must not ship wizard/install; the FN soft-store client only parses that file, and shipping it makes every update wait for the service port again.");
+expect(!/path\.join\(stageDir,\s*"wizard",\s*"upgrade"\)/.test(buildScript), "fnOS package must not ship wizard/upgrade; updates must not ask for the service port.");
+expect(!/path\.join\(stageDir,\s*"wizard",\s*"uninstall"\)/.test(buildScript), "fnOS package must not ship wizard/uninstall; uninstall must stay non-interactive.");
+expect(/path\.join\(stageDir,\s*"wizard",\s*"config"\)/.test(buildScript), "fnOS package must ship wizard/config so the service port stays editable from App Center settings without an install wizard.");
+expect(/\$\{wizard_port:-\}/.test(buildScript), "fnOS settings wizard must expose wizard_port so config_callback can apply a changed port.");
+expect(/write_env_file "\$NEW_PORT"/.test(buildScript), "fnOS config_callback must apply the wizard port explicitly, because resolve_port prefers the persisted .port.");
+expect(/probe_free_port/.test(buildScript), "fnOS first installs must probe for a free port; without an install wizard a taken 7777 would otherwise deadlock the install.");
+expect(persistedPortFileIndex !== -1 && persistedEnvPortIndex !== -1, "fnOS port resolver must reuse the persisted .port before the persisted mmh.env PORT during overlay updates.");
+expect(persistedPortFileIndex < persistedEnvPortIndex, "fnOS port resolver must reuse the installed port before falling back to package defaults.");
 expect(/backupLifecycle\("upgrade"\)/.test(buildScript), "fnOS package must create cmd/upgrade_init to back up app data before upgrades.");
 expect(/backupLifecycle\("uninstall"\)/.test(buildScript), "fnOS package must create cmd/uninstall_init to back up app data before uninstall/reinstall flows.");
 expect(/upgrade-backups/.test(buildScript) && /sha256sum/.test(buildScript), "fnOS backup lifecycle must copy appdata to an upgrade backup directory and record the SQLite checksum when available.");
@@ -285,6 +309,8 @@ expect(/cp -a "\$data_root\/data"/.test(buildScript), "fnOS backup lifecycle mus
 expect(/upgrade_callback/.test(buildScript), "fnOS package must include upgrade_callback for overlay upgrades.");
 expect(/const MIGRATIONS = \[/.test(buildScript), "fnOS SQLite init must include an explicit runtime migration list for existing databases.");
 expect(/function splitSqlStatements\(sql\)/.test(buildScript) && /function applyMissingSchemaObjectsFromInitSql\(db, sqlPath\)/.test(buildScript), "fnOS SQLite init must parse native-init.sql to backfill newly added tables for existing databases.");
+expect(/function stripLeadingSqlComments\(statement\)/.test(buildScript), "fnOS SQLite init must ignore leading Prisma SQL comments before parsing schema statements.");
+expect(/for \(const rawStatement of statements\)/.test(buildScript) && /stripLeadingSqlComments\(rawStatement\)/.test(buildScript), "fnOS SQLite schema backfill must normalize raw native-init.sql statements before checking tables, columns, and indexes.");
 expect(/createTableColumnDefinitionsFromStatement/.test(buildScript) && /SQLite schema column added from native-init.sql/.test(buildScript), "fnOS SQLite init must backfill safe newly added columns from native-init.sql for existing databases.");
 expect(/canAddColumnFromCreateTableDefinition/.test(buildScript) && /SQLite schema column skipped from native-init.sql because it cannot be safely added/.test(buildScript), "fnOS SQLite column backfill must skip unsafe column transforms instead of guessing destructive migrations.");
 expect(/CREATE INDEX IF NOT EXISTS/.test(buildScript) && /createIndexStatementIfMissing/.test(buildScript), "fnOS SQLite schema backfill must make native-init.sql indexes idempotent for existing databases.");
@@ -292,6 +318,11 @@ expect(/indexColumnsExist/.test(buildScript) && /SQLite schema index skipped fro
 expect(/busy_timeout = 10000/.test(buildScript), "fnOS SQLite init must wait briefly for database locks during package upgrades.");
 expect(fnosInitSqliteIndex !== -1 && fnosPidCheckIndex !== -1 && fnosInitSqliteIndex < fnosPidCheckIndex, "fnOS start must run SQLite init before returning for an already-running process.");
 expect(/startsWith\("file:"\)/.test(scheduledTaskLock) && /if \(isSqliteDatabaseUrl\(\)\) return;/.test(scheduledTaskLock) && /pg_advisory_xact_lock/.test(scheduledTaskLock) && /catch \(error\)/.test(scheduledTaskLock), "Scheduled-task locks must skip PostgreSQL advisory-lock SQL on fnOS SQLite with defense-in-depth try-catch.");
+expect(/PRAGMA table_info\("FundProfile"\)/.test(fundProfileSource) && /FROM information_schema\.columns/.test(fundProfileSource), "FundProfile schema probing must use SQLite PRAGMA on fnOS and reserve information_schema.columns for PostgreSQL.");
+expect(/model ApprovedCurrency \{/.test(currencySchema) && /model CustomCurrencyRequest \{/.test(currencySchema) && /enum CustomCurrencyRequestStatus \{/.test(currencySchema), "Currency request models must be present in the PostgreSQL schema.");
+expect(/CREATE TABLE IF NOT EXISTS "ApprovedCurrency"/.test(currencyMigration) && /CREATE TABLE IF NOT EXISTS "CustomCurrencyRequest"/.test(currencyMigration) && /CREATE TYPE "CustomCurrencyRequestStatus"/.test(currencyMigration), "Currency request models must have a PostgreSQL migration.");
+expect(/model ApprovedCurrency \{/.test(read(nativeSchema)) && /model CustomCurrencyRequest \{/.test(read(nativeSchema)) && /enum CustomCurrencyRequestStatus \{/.test(read(nativeSchema)), "Currency request models must be present in the native SQLite schema.");
+expect(/applyMissingSchemaObjectsFromInitSql\(db, sqlPath\)/.test(buildScript), "fnOS upgrades must backfill newly added currency tables from native-init.sql.");
 expect(/20260812_account_note/.test(buildScript) && /addColumnIfMissing\(db, "Account", "note", "TEXT"\)/.test(buildScript), "fnOS SQLite migrations must add Account.note to existing databases without rebuilding tables.");
 expect(/20260812_user_session_days/.test(buildScript) && /addColumnIfMissing\(db, "UserSettings", "sessionDays", "INTEGER NOT NULL DEFAULT 30"\)/.test(buildScript), "fnOS SQLite migrations must add UserSettings.sessionDays to existing databases before restore writes user settings.");
 expect(/20260811_stock_domain/.test(buildScript) && /createStockDomainTables\(db\)/.test(buildScript), "fnOS SQLite migrations must create stock core tables for existing databases.");
@@ -338,7 +369,15 @@ expect(/20260820_add_ai_model_api_mode/.test(buildScript) && /addColumnIfMissing
 expect(/20260823_add_entry_origin/.test(buildScript) && /entryOrigin/.test(buildScript) && /TEXT NOT NULL DEFAULT 'manual'/.test(buildScript), "fnOS SQLite migrations must add transaction entryOrigin fields for existing databases.");
 expect(/20260826_add_stock_latest_price_date/.test(buildScript) && /addColumnIfMissing\(db, "stock_holdings", "latestPriceDate", "DATETIME"\)/.test(buildScript), "fnOS SQLite migrations must add StockHolding.latestPriceDate for existing databases.");
 expect(/20260828_add_fixed_asset_type/.test(buildScript) && /addColumnIfMissing\(db, "Account", "fixedAssetType", "TEXT"\)/.test(buildScript) && /addColumnIfMissing\(db, "property_assets", "assetType", "TEXT NOT NULL DEFAULT 'property'"\)/.test(buildScript), "fnOS SQLite migrations must add fixed asset type fields for existing databases.");
+expect(/20260905_add_property_mortgage_loan_account/.test(buildScript) && /addColumnIfMissing\(db, "property_assets", "mortgageLoanAccountId", "TEXT"\)/.test(buildScript), "fnOS SQLite migrations must add mortgage loan linkage for fixed assets.");
+expect(/20260905_add_account_loan_type/.test(buildScript) && /addColumnIfMissing\(db, "Account", "loanType", "TEXT"\)/.test(buildScript) && /'consumer'/.test(buildScript), "fnOS SQLite migrations must add Account.loanType for existing databases.");
+expect(/20260906_restore_counterparty_settlement_kind/.test(buildScript) && /counterparty-owned settlement accounts/.test(buildScript) && /counterpartyId IS NOT NULL AND institutionId IS NULL/.test(buildScript), "fnOS SQLite migrations must restore counterparty settlement accounts misclassified as loans.");
 expect(/20260829_add_credit_card_billing_day/.test(buildScript) && /createCreditCardBillingDayTable\(db\)/.test(buildScript) && /CreditCardBillingDay_accountId_effectiveDate_key/.test(buildScript) && /CreditCardBillingDay/.test(buildScript) && /updatedAt/.test(buildScript), "fnOS SQLite migrations must create, index, and timestamp CreditCardBillingDay for existing databases.");
+expect(/20260902_add_regular_invest_plan_name/.test(buildScript) && /addColumnIfMissing\(db, "RegularInvestPlan", "planName", "TEXT"\)/.test(buildScript), "fnOS SQLite migrations must add RegularInvestPlan.planName for existing databases.");
+expect(/20260903_normalize_ewallet_institution_type/.test(buildScript) && /SET \\+"type\\+" = 'payment' WHERE \\+"type\\+" = 'ewallet'/.test(buildScript), "fnOS SQLite migrations must normalize legacy ewallet institutions to the payment type for existing databases.");
+expect(/20260903_add_fund_profile_trading_calendar/.test(buildScript) && /addColumnIfMissing\(db, "FundProfile", "tradingCalendar", "TEXT"\)/.test(buildScript) && /jp_fund/.test(buildScript), "fnOS SQLite migrations must add FundProfile.tradingCalendar and Japan fund calendar support for existing databases.");
+expect(/20260903_restore_fund_profile_company_code/.test(buildScript) && /addColumnIfMissing\(db, "FundProfile", "fundCompanyCode", "TEXT"\)/.test(buildScript), "fnOS SQLite migrations must restore FundProfile.fundCompanyCode for existing databases.");
+expect(/20260903_z_repair_investment_business_sources/.test(buildScript) && /repairInvestmentBusinessSources\(db\)/.test(buildScript), "fnOS SQLite migrations must repair split fund and wealth business sources for existing databases.");
 for (const tableName of [
   "transactions",
   "fund_transactions",
@@ -358,9 +397,13 @@ expect(/SQLite database already initialized and migrated/.test(buildScript), "fn
 expect(/buildRestoredCategoryBatches/.test(backupSource), "Backup restore must normalize category rows before writing them.");
 expect(/record\.parentId === record\.id/.test(backupSource) && /!recordIds\.has\(record\.parentId \?\? ""\)/.test(backupSource), "Backup restore must drop self or missing category parent links before createMany.");
 expect(/restoredCategoryNameById/.test(backupSource) && /categoryNameById/.test(backupSource), "Backup restore must keep restored category names aligned for transactions and statement rules.");
-expect(/覆盖升级/.test(fnosReadme) && /upgrade_init/.test(fnosReadme), "fnOS README must document direct same-app overlay upgrades.");
-expect(!/appcenter-cli uninstall/.test(fnosReadme), "fnOS README must not describe uninstall/install as the normal update path.");
-expect(/覆盖升级/.test(fnosPackagePlan) && /appname=mmh/.test(fnosPackagePlan), "fnOS package plan must keep same-app overlay upgrade as the normal update path.");
+if (fs.existsSync(path.join(root, "deploy", "fnos", "README.md"))) {
+  expect(/覆盖升级/.test(fnosReadme) && /upgrade_init/.test(fnosReadme), "deploy/fnos/README.md must document direct same-app overlay upgrades.");
+  expect(!/appcenter-cli uninstall/.test(fnosReadme), "deploy/fnos/README.md must not describe uninstall/install as the normal update path.");
+}
+if (fs.existsSync(path.join(root, "docs", "fnos-package-plan.md"))) {
+  expect(/覆盖升级/.test(fnosPackagePlan) && /appname=mmh/.test(fnosPackagePlan), "docs/fnos-package-plan.md must keep same-app overlay upgrade as the normal update path.");
+}
 expect(/process\.platform === "linux"/.test(buildScript), "fnOS release builds must be guarded to Linux/fnOS.");
 expect(/resolve_data_dest/.test(buildScript), "fnOS start script must resolve a persistent fnOS data directory.");
 expect(/TRIM_PKGVAR\/data/.test(buildScript), "fnOS start script must prefer TRIM_PKGVAR/data when TRIM_DATADEST is unavailable.");
@@ -382,6 +425,10 @@ expect(/install_callback/.test(buildScript) && /write_env_file/.test(buildScript
 expect(!/"run-as": "package"/.test(buildScript), "fnOS lifecycle scripts must not default to the package user; install_init can fail before app data permissions exist.");
 expect(/restart_start_as_package_user/.test(buildScript) && /runuser -u mmh/.test(buildScript), "fnOS start script must drop from app-center/root lifecycle execution to the mmh package user before running Node.");
 expect(/makeFnosPackageEntriesReadable/.test(buildScript), "fnOS package build must normalize entry permissions before packaging.");
+expect(/MMH_SESSION_SECRET/.test(buildScript) && /mmh-session-secret\.txt/.test(buildScript), "fnOS start script must persist a strong session secret for signed login cookies.");
+expect(/resolve_session_secret/.test(buildScript) && /generate_session_secret/.test(buildScript), "fnOS lifecycle settings must generate and reuse a strong signed-session secret.");
+expect(/MMH_SESSION_SECRET=\\?\$\{session_secret\}/.test(buildScript), "fnOS lifecycle settings must write MMH_SESSION_SECRET into mmh.env for production login cookies.");
+expect(/@appcenter\/"\$appname"/.test(buildScript), "fnOS start script must be able to rediscover the appcenter install directory when TRIM_APPDEST is unavailable.");
 expect(/verifySensitiveOperationPassword/.test(authVerifyRoute) && /getCurrentUser/.test(authVerifyRoute) && /isAdmin/.test(authVerifyRoute), "Sensitive operation verification must require the current admin user and check that user's own password.");
 expect(!/process\.env\.(POSTGRES_PASSWORD|MMH_SYSTEM_PASSWORD)/.test(authVerifyRoute), "Sensitive operation verification must not rely on deployment database passwords.");
 expect(/FNOS_MANUAL_FPK/.test(buildScript), "fnOS package build should keep an explicit manual test FPK mode.");
@@ -432,15 +479,17 @@ if (fs.existsSync(stageDir)) {
   const stageManifest = read(path.join(stageDir, "manifest"));
   const stagePrivilege = read(path.join(stageDir, "config", "privilege"));
   const stageMainScript = read(path.join(stageDir, "cmd", "main"));
+  const stageApplySettingsScript = read(path.join(stageDir, "cmd", "apply-settings"));
   expect(new RegExp(`arch\\s*=\\s*${verifyTarget.manifestArch}`).test(stageManifest), `fnOS ${verifyTarget.id} stage manifest must declare arch=${verifyTarget.manifestArch}.`);
   expect(new RegExp(`platform\\s*=\\s*${verifyTarget.manifestPlatform}`).test(stageManifest), `fnOS ${verifyTarget.id} stage manifest must declare platform=${verifyTarget.manifestPlatform}.`);
   expect(!/"run-as"\s*:\s*"package"/.test(stagePrivilege), `fnOS ${verifyTarget.id} stage privilege must not run lifecycle scripts as the package user.`);
   expect(/"username"\s*:\s*"mmh"/.test(stagePrivilege) && /"groupname"\s*:\s*"mmh"/.test(stagePrivilege), `fnOS ${verifyTarget.id} stage privilege must still declare the mmh package user and group.`);
   expect(/restart_start_as_package_user/.test(stageMainScript) && /runuser -u mmh/.test(stageMainScript), `fnOS ${verifyTarget.id} stage cmd/main must drop root-started service execution to the mmh user.`);
-  expect(fs.existsSync(path.join(stageDir, "wizard", "install")), `fnOS ${verifyTarget.id} stage must include wizard/install for first-install service-port setup.`);
-  expect(!fs.existsSync(path.join(stageDir, "wizard", "upgrade")), `fnOS ${verifyTarget.id} stage must not include wizard/upgrade; soft-store updates must be silent.`);
-  expect(!fs.existsSync(path.join(stageDir, "wizard", "config")), `fnOS ${verifyTarget.id} stage must not include wizard/config; updates must not ask for the service port again.`);
-  expect(!fs.existsSync(path.join(stageDir, "wizard", "uninstall")), `fnOS ${verifyTarget.id} stage must not include wizard/uninstall; soft-store updates must be non-interactive.`);
+  expect(/@appcenter\/"\$appname"/.test(stageMainScript), `fnOS ${verifyTarget.id} stage cmd/main must rediscover the appcenter install directory without TRIM_APPDEST.`);
+  expect(/MMH_SESSION_SECRET/.test(stageMainScript) && /mmh-session-secret\.txt/.test(stageMainScript), `fnOS ${verifyTarget.id} stage cmd/main must export and persist MMH_SESSION_SECRET.`);
+  expect(/resolve_session_secret/.test(stageApplySettingsScript) && /MMH_SESSION_SECRET=\$\{session_secret\}/.test(stageApplySettingsScript), `fnOS ${verifyTarget.id} stage cmd/apply-settings must persist MMH_SESSION_SECRET into mmh.env.`);
+  expect(!fs.existsSync(path.join(stageDir, "wizard", "install")), `fnOS ${verifyTarget.id} stage must not include wizard/install; the FN soft-store client parses it and would block silent updates on user input.`);
+  expect(fs.existsSync(path.join(stageDir, "wizard", "config")), `fnOS ${verifyTarget.id} stage must include wizard/config so the service port stays editable after a silent install.`);
   for (const envFile of [".env", ".env.local", ".env.production", ".env.development"]) {
     expect(!fs.existsSync(path.join(stageDir, "app", "server", envFile)), `fnOS stage must not include ${envFile}.`);
   }
@@ -459,17 +508,19 @@ if (process.env.FNOS_VERIFY_BUILT_FPK === "1") {
   expect(fs.existsSync(builtFpk), `Built fnOS ${verifyTarget.id} .fpk must exist before upload.`);
   const manifest = readTarEntry(builtFpk, "manifest");
   const mainScript = readTarEntry(builtFpk, "cmd/main");
+  const applySettingsScript = readTarEntry(builtFpk, "cmd/apply-settings");
   expect(/version\s*=/.test(manifest), "Built fnOS .fpk manifest must include a version.");
   expect(new RegExp(`arch\\s*=\\s*${verifyTarget.manifestArch}`).test(manifest), `Built fnOS .fpk manifest must declare arch=${verifyTarget.manifestArch}.`);
   expect(new RegExp(`platform\\s*=\\s*${verifyTarget.manifestPlatform}`).test(manifest), `Built fnOS .fpk manifest must declare platform=${verifyTarget.manifestPlatform}.`);
-  expect(tarHasEntry(builtFpk, "wizard/install"), "Built fnOS .fpk must include wizard/install for first-install service-port setup.");
-  expect(!tarHasEntryOrChild(builtFpk, "wizard/uninstall"), "Built fnOS .fpk must not include wizard/uninstall; soft-store updates need non-interactive uninstall.");
-  expect(!tarHasEntryOrChild(builtFpk, "wizard/upgrade"), "Built fnOS .fpk must not include wizard/upgrade; soft-store updates need non-interactive upgrade.");
-  expect(!tarHasEntryOrChild(builtFpk, "wizard/config"), "Built fnOS .fpk must not include wizard/config; soft-store updates must not ask for the service port again.");
+  expect(!tarHasEntryOrChild(builtFpk, "wizard/install"), "Built fnOS .fpk must not include wizard/install; the FN soft-store client parses it and would block silent updates on user input.");
+  expect(!tarHasEntryOrChild(builtFpk, "wizard/upgrade"), "Built fnOS .fpk must not include wizard/upgrade; updates must not ask for the service port.");
+  expect(!tarHasEntryOrChild(builtFpk, "wizard/uninstall"), "Built fnOS .fpk must not include wizard/uninstall; uninstall must stay non-interactive.");
+  expect(tarHasEntry(builtFpk, "wizard/config"), "Built fnOS .fpk must include wizard/config so the service port stays editable from App Center settings.");
+  expect(tarHasEntry(builtFpk, "cmd/config_callback"), "Built fnOS .fpk must include cmd/config_callback to apply a changed service port.");
   expect(tarHasEntry(builtFpk, "cmd/upgrade_init"), "Built fnOS .fpk must include cmd/upgrade_init to back up app data before upgrades.");
   expect(tarHasEntry(builtFpk, "cmd/upgrade_callback"), "Built fnOS .fpk must include cmd/upgrade_callback for overlay upgrades.");
   expect(tarHasEntry(builtFpk, "cmd/uninstall_init"), "Built fnOS .fpk must include cmd/uninstall_init to back up app data before uninstall/reinstall flows.");
-  for (const entry of ["cmd", "config", "wizard"]) {
+  for (const entry of ["cmd", "config"]) {
     expectTarEntryModeAtLeast(builtFpk, entry, 0o755, "Built fnOS .fpk");
   }
   for (const entry of [
@@ -497,6 +548,9 @@ if (process.env.FNOS_VERIFY_BUILT_FPK === "1") {
   expect(/DATABASE_URL="file:\$DATA_DEST\/mmh\.db"/.test(mainScript), "Built fnOS .fpk cmd/main must store SQLite data under DATA_DEST.");
   expect(/MMH_SYSTEM_PASSWORD/.test(mainScript), "Built fnOS .fpk cmd/main must export MMH_SYSTEM_PASSWORD.");
   expect(/mmh-system-password\.txt/.test(mainScript), "Built fnOS .fpk cmd/main must persist generated system passwords.");
+  expect(/MMH_SESSION_SECRET/.test(mainScript) && /mmh-session-secret\.txt/.test(mainScript), "Built fnOS .fpk cmd/main must persist the signed-session secret.");
+  expect(/@appcenter\/"\$appname"/.test(mainScript), "Built fnOS .fpk cmd/main must rediscover the appcenter install directory when TRIM_APPDEST is unavailable.");
+  expect(/resolve_session_secret/.test(applySettingsScript) && /MMH_SESSION_SECRET=\$\{session_secret\}/.test(applySettingsScript), "Built fnOS .fpk cmd/apply-settings must persist MMH_SESSION_SECRET into mmh.env.");
   const appEntries = listFpkAppEntries(builtFpk);
   const publicFiles = appEntries
     .filter((entry) => entry.startsWith("server/public/") && !entry.endsWith("/"))

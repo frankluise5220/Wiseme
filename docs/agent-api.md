@@ -1,10 +1,10 @@
 # 外部 Agent API 接入说明
 
-文档版本：`v0.1.0`
+文档版本：`v0.1.1`
 
 适用 API 版本：`/api/v1`
 
-最后更新：`2026-07-02`
+最后更新：`2026-09-04`
 
 本文档给 Hermes、Codex、Claude 等外部 Agent 接入 MMH 后端使用。它说明如何通过 HTTP API 读取和修改数据，以及哪些接口不应直接用于财务业务写入。
 
@@ -12,6 +12,7 @@
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| `v0.1.1` | `2026-09-04` | 外部 Agent 认证改为独立访问 Key；访问 Key 只存哈希，创建后列表仅返回脱敏预览，不再使用管理员密码作为 Bearer / X-Api-Key。 |
 | `v0.1.0` | `2026-07-02` | 初版。记录外部 Agent 认证方式、推荐业务 API、受控通用 DB API、账簿隔离、敏感模型屏蔽、加密与密钥安全边界。 |
 
 ## 基本信息
@@ -27,18 +28,22 @@
 外部 Agent 调用支持以下 header：
 
 ```http
-Authorization: Bearer <管理员密码>
+Authorization: Bearer <访问 Key>
 ```
 
 或：
 
 ```http
-X-Api-Key: <管理员密码>
+X-Api-Key: <访问 Key>
 ```
 
-当前 `src/lib/server/api-auth.ts` 的统一认证逻辑会把 Bearer / X-Api-Key 的值当作管理员密码校验。设置页里的 `AccessKey` 表目前不是通用 DB API 的认证来源，不要让 Agent 误以为可以用 `AccessKey.key` 调用这些接口。
+访问 Key 由 Web 设置页的“外接 API Key”创建。服务端只保存哈希；新建时页面会显示明文一次，保存后列表只返回 `keyPreview`，不会再返回完整明文。旧版本已保存的明文 Key 仍可兼容校验，并会在首次成功使用后自动升级为哈希存储。
 
-浏览器内访问也可以使用登录后的 cookie session。
+不要使用管理员登录密码作为 Bearer / X-Api-Key。管理员密码只用于 Web 登录和需要确认身份的敏感操作。
+
+浏览器内访问也可以使用登录后的签名 cookie session。跨站浏览器 API 请求默认拒绝；原生 App、CLI 和 Agent 这类不发送浏览器 `Origin` 的客户端不受 CORS 限制。
+
+访问 Key 是受限的业务数据凭据，不是管理员会话。它不能访问通用数据库 API、用户/设置/认证、初始化、调试、清理、AI、邮件或移动同步接口；Android 移动端当前使用登录 Cookie。
 
 ## 加密与密钥安全
 
@@ -65,10 +70,10 @@ MMH 里有几类数据必须按敏感数据处理：
 
 安全要求：
 
-- 不要把管理员密码、API Key、数据库连接串、NAS 私有地址写进公开文档、Git 提交或 Agent 回复。
+- 不要把管理员密码、访问 Key、数据库连接串、NAS 私有地址写进公开文档、Git 提交或 Agent 回复。
 - Agent 日志只能记录字段名、记录 ID、操作结果，不记录明文密钥、密码、token。
 - 如果未来要让 Hermes 管理密钥，应新增专门的密钥 API：只允许写入或轮换，不返回明文；返回值只能是 `configured`、`keyPreview`、`updatedAt` 这类摘要。
-- 公开接口认证建议后续从“管理员密码当 API Key”升级为独立 token：只存 hash、支持撤销、支持作用域、支持过期时间。
+- 当前访问 Key 已支持撤销和哈希存储；后续可继续扩展作用域、过期时间和审计。
 
 ## 推荐优先级
 
@@ -94,7 +99,7 @@ MMH 里有几类数据必须按敏感数据处理：
 
 ```http
 GET /api/v1/db/models
-Authorization: Bearer <管理员密码>
+Authorization: Bearer <访问 Key>
 ```
 
 返回：
@@ -119,7 +124,7 @@ Authorization: Bearer <管理员密码>
 
 ```http
 GET /api/v1/db/data?model=TxRecord&take=100&skip=0&orderBy=date&orderDir=desc
-Authorization: Bearer <管理员密码>
+Authorization: Bearer <访问 Key>
 ```
 
 可选参数：
@@ -135,7 +140,7 @@ Authorization: Bearer <管理员密码>
 示例：
 
 ```bash
-curl -H "Authorization: Bearer $MMH_ADMIN_PASSWORD" \
+curl -H "Authorization: Bearer $MMH_ACCESS_KEY" \
   "http://127.0.0.1:7777/api/v1/db/data?model=TxRecord&take=20&orderBy=date&orderDir=desc"
 ```
 
@@ -144,7 +149,7 @@ curl -H "Authorization: Bearer $MMH_ADMIN_PASSWORD" \
 ```http
 POST /api/v1/db/data
 Content-Type: application/json
-Authorization: Bearer <管理员密码>
+Authorization: Bearer <访问 Key>
 ```
 
 Body：
@@ -168,7 +173,7 @@ Body：
 ```http
 PUT /api/v1/db/data
 Content-Type: application/json
-Authorization: Bearer <管理员密码>
+Authorization: Bearer <访问 Key>
 ```
 
 Body：
@@ -189,7 +194,7 @@ Body：
 
 ```http
 DELETE /api/v1/db/data?model=TxRecord&id=目标记录ID
-Authorization: Bearer <管理员密码>
+Authorization: Bearer <访问 Key>
 ```
 
 删除前必须确认业务影响。基金、余额、定投、保险等相关数据通常还需要调用业务 API 或服务函数做重算。

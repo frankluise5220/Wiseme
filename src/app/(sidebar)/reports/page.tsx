@@ -18,6 +18,11 @@ import { StockHoldingReport } from "@/components/StockHoldingReport";
 import { FundHoldingReport, type FundGroupMode } from "@/components/FundHoldingReport";
 import { FundGroupModeFilter } from "@/components/FundGroupModeFilter";
 import { buildAccountDisplayOption, buildGroupedAccountOptions, normalizeCreditCardLabelTemplate } from "@/lib/account-display";
+import { ACCOUNT_LABEL_FIELDS_COOKIE, accountLabelFieldsFromCookieValue } from "@/lib/server/account-label-fields";
+import {
+  ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE,
+  accountDropdownRestrictTypeFromCookieValue,
+} from "@/lib/server/account-dropdown-restrict";
 import { kindLabel } from "@/lib/account-kinds";
 import { isPureInvestmentAccount } from "@/lib/account-kind-utils";
 import { prisma } from "@/lib/db/prisma";
@@ -141,10 +146,10 @@ function buildInvestmentFilterHref(
   if (filters.accountIds.length) query.set("investmentAccounts", filters.accountIds.join(","));
   return `/reports${query.toString() ? `?${query.toString()}` : ""}`;
 }
-function buildStatisticsHref(year: number) {
-  const query = new URLSearchParams();
-  query.set("year", String(year));
-  return `/statistics?${query.toString()}`;
+function buildStatisticsHref() {
+  // 资金统计默认展示"按月、最近 12 期"（/statistics 无参数即命中该默认）。
+  // 不携带 ?year=xxx，避免 level 被判定为年模式而回退到单年/全历史。
+  return `/statistics`;
 }
 
 function parseMonthNumber(value: string | undefined, fallback: number) {
@@ -213,6 +218,12 @@ export default async function ReportsPage({
   const detailColumnKey =
     typeof params.detailColumnKey === "string" ? params.detailColumnKey.trim() : "";
   const cookieStore = await cookies();
+  const accountLabelFields = accountLabelFieldsFromCookieValue(cookieStore.get(ACCOUNT_LABEL_FIELDS_COOKIE)?.value);
+  const restrictAccountDropdownTypes = accountDropdownRestrictTypeFromCookieValue(
+    cookieStore.get(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE)?.value,
+  );
+  const restrictAccountList = <T extends { kind?: string | null }>(items: T[], predicate: (a: T) => boolean) =>
+    restrictAccountDropdownTypes ? items.filter(predicate) : items;
   const colorScheme = (cookieStore.get("colorScheme")?.value === "green_up_red_down"
     ? "green_up_red_down"
     : "red_up_green_down") satisfies ColorScheme;
@@ -238,7 +249,7 @@ export default async function ReportsPage({
   const groupsWithAccounts = commonData.groups.filter((group) =>
     allAccountRecords.some((account) => account.groupId === group.id),
   );
-  const accountRecords = allAccountRecords.filter((account) => !isPureInvestmentAccount(account));
+  const accountRecords = restrictAccountList(allAccountRecords, (account) => !isPureInvestmentAccount(account));
   const allAccountDisplayOptions = allAccountRecords.map((account) =>
     buildAccountDisplayOption({
       id: account.id,
@@ -249,7 +260,7 @@ export default async function ReportsPage({
       investProductType: account.investProductType,
       Institution: account.Institution,
       AccountGroup: account.AccountGroup,
-    }, creditCardLabelTemplate),
+    }, creditCardLabelTemplate, { fields: accountLabelFields }),
   );
   const allAccountDisplayById = new Map(allAccountDisplayOptions.map((account) => [account.id, account]));
   const accountDisplayOptions = accountRecords.map((account) => allAccountDisplayById.get(account.id)!).filter(Boolean);
@@ -303,10 +314,10 @@ export default async function ReportsPage({
     if (scopes.length === 0) return null;
     return accountRecords.map((account) => account.id).filter((id) => scopes.every((ids) => ids.includes(id)));
   })();
-  const cashAccounts = accounts.filter((account) => ["cash", "bank_debit", "ewallet"].includes(account.kind));
+  const cashAccounts = restrictAccountList(accounts, (account) => ["cash", "bank_debit", "ewallet"].includes(account.kind));
   const cashAccountIds = new Set(cashAccounts.map((account) => account.id));
-  const investmentAccountRecords = allAccountRecords.filter(isPureInvestmentAccount);
-  const stockAccountRecords = investmentAccountRecords.filter((account) => account.investProductType === "stock");
+  const investmentAccountRecords = restrictAccountList(allAccountRecords, isPureInvestmentAccount);
+  const stockAccountRecords = restrictAccountList(investmentAccountRecords, (account) => account.investProductType === "stock");
   const investmentAccounts = investmentAccountRecords.map((account) => ({
     id: account.id,
     label: allAccountDisplayById.get(account.id)?.label ?? account.name,
@@ -363,7 +374,7 @@ export default async function ReportsPage({
   });
   const currentStockHref = buildReportHref("stock-holdings", undefined, undefined, undefined, PROFIT_SCOPE_ALL);
   const currentFundHref = buildReportHref("fund-holdings", undefined, undefined, undefined, PROFIT_SCOPE_ALL);
-  const currentStatisticsHref = buildStatisticsHref(profitYear);
+  const currentStatisticsHref = buildStatisticsHref();
   const investmentFilterUsers = commonData.groups
     .filter((group) => investmentAccountRecords.some((account) => account.groupId === group.id))
     .map((group) => ({ id: group.id, name: group.name }));
@@ -374,6 +385,7 @@ export default async function ReportsPage({
     id: account.id,
     name: account.name,
     kind: account.kind,
+    investProductType: account.investProductType,
     label: allAccountDisplayById.get(account.id)?.fullLabel ?? allAccountDisplayById.get(account.id)?.label ?? account.name,
     groupId: account.groupId,
     Institution: account.Institution ? { id: account.Institution.id, name: account.Institution.name } : null,
@@ -523,6 +535,7 @@ export default async function ReportsPage({
       id: account.id,
       name: account.name,
       kind: account.kind,
+      investProductType: account.investProductType,
       label: allAccountDisplayById.get(account.id)?.fullLabel ?? allAccountDisplayById.get(account.id)?.label ?? account.name,
       groupId: account.groupId,
       Institution: account.Institution ? { id: account.Institution.id, name: account.Institution.name } : null,
@@ -659,6 +672,7 @@ export default async function ReportsPage({
       id: account.id,
       name: account.name,
       kind: account.kind,
+      investProductType: account.investProductType,
       label: allAccountDisplayById.get(account.id)?.fullLabel ?? allAccountDisplayById.get(account.id)?.label ?? account.name,
       groupId: account.groupId,
       Institution: account.Institution ? { id: account.Institution.id, name: account.Institution.name } : null,
@@ -823,23 +837,26 @@ export default async function ReportsPage({
   };
 
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
-  let availableYears: number[] = [];
+  // 可用年份无条件取自交易记录的实际年份范围：年份下拉在"年/月"两种粒度下
+  // 都应展示全部历史年份。不能只在 groupBy==="year" 时才计算，否则 URL 无
+  // groupBy 参数时 availableYears 落空，会被下方回退成 [currentYear]，
+  // 年下拉只剩当年（例如只显示 2026），用户无法选择其他年份。
+  const yearBounds = await prisma.txRecord.aggregate({
+    where: {
+      ...ctx.hidFilter,
+      deletedAt: null,
+      type: { in: [TransactionType.income, TransactionType.expense, TransactionType.investment] },
+      ...(scopedIncomeAccountIds && scopedIncomeAccountIds.length
+        ? { OR: [{ accountId: { in: scopedIncomeAccountIds } }, { toAccountId: { in: scopedIncomeAccountIds } }] }
+        : {}),
+    },
+    _min: { date: true },
+    _max: { date: true },
+  });
+  const firstYear = yearBounds._min.date?.getUTCFullYear() ?? now.getUTCFullYear();
+  const lastYear = yearBounds._max.date?.getUTCFullYear() ?? firstYear;
+  const availableYears = Array.from({ length: lastYear - firstYear + 1 }, (_, index) => firstYear + index);
   if (groupBy === "year") {
-    const bounds = await prisma.txRecord.aggregate({
-      where: {
-        ...ctx.hidFilter,
-        deletedAt: null,
-        type: { in: [TransactionType.income, TransactionType.expense, TransactionType.investment] },
-        ...(scopedIncomeAccountIds && scopedIncomeAccountIds.length
-          ? { OR: [{ accountId: { in: scopedIncomeAccountIds } }, { toAccountId: { in: scopedIncomeAccountIds } }] }
-          : {}),
-      },
-      _min: { date: true },
-      _max: { date: true },
-    });
-    const firstYear = bounds._min.date?.getUTCFullYear() ?? now.getUTCFullYear();
-    const lastYear = bounds._max.date?.getUTCFullYear() ?? firstYear;
-    availableYears = Array.from({ length: lastYear - firstYear + 1 }, (_, index) => firstYear + index);
     const selectedStartYear = Math.min(lastYear, Math.max(firstYear, parseYear(rawStartYear) ?? firstYear));
     const selectedEndYear = Math.min(lastYear, Math.max(firstYear, parseYear(rawEndYear) ?? lastYear));
     const rangeStartYear = Math.min(selectedStartYear, selectedEndYear);
@@ -905,7 +922,7 @@ export default async function ReportsPage({
                 buildReportHref("investment-profit", "day", currentYear, currentMonth),
                 buildReportHref("stock-holdings"),
                 buildReportHref("fund-holdings"),
-                buildStatisticsHref(currentYear),
+                buildStatisticsHref(),
                 t,
               )}
             />

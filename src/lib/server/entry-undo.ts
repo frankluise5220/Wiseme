@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient, type TxRecord } from "@prisma/client";
 
 import { prisma } from "@/lib/db/prisma";
+import { chunk, IN_CHUNK_SIZE } from "@/lib/server/prisma-in-chunks";
 import { recalcFundPositions } from "@/lib/fund/recalcPosition";
 import { syncFundTransactionsFromTxRecords } from "@/lib/fund/transactions";
 import { recalcPreciousMetalPositions } from "@/lib/metal/recalcPosition";
@@ -86,22 +87,45 @@ export async function prepareEntryUndo(
       })
     : [];
 
-  const related = await db.txRecord.findMany({
-    where: {
-      OR: [
-        { householdId, id: { in: sourceIds } },
-        { householdId: null, id: { in: sourceIds } },
-        { householdId, fundSourceEntryId: { in: sourceIds } },
-        { householdId: null, fundSourceEntryId: { in: sourceIds } },
-        { householdId, depositSourceEntryId: { in: sourceIds } },
-        { householdId: null, depositSourceEntryId: { in: sourceIds } },
-        ...(planIds.length > 0 ? [
-          { householdId, creditCardInstallmentPlanId: { in: uniquePlanIds } },
-          { householdId: null, creditCardInstallmentPlanId: { in: uniquePlanIds } },
-        ] : []),
-      ],
-    },
+  const related: TxRecord[] = [];
+  const seenRelatedIds = new Set<string>();
+  const relatedWhere = (part: string[]): Prisma.TxRecordWhereInput => ({
+    OR: [
+      { householdId, id: { in: part } },
+      { householdId: null, id: { in: part } },
+      { householdId, fundSourceEntryId: { in: part } },
+      { householdId: null, fundSourceEntryId: { in: part } },
+      { householdId, depositSourceEntryId: { in: part } },
+      { householdId: null, depositSourceEntryId: { in: part } },
+    ],
   });
+  // The OR contains 6 `{ in: sourceIds }` clauses, so large batches exceed
+  // SQLite's parameter limit. Query in sourceIds chunks and merge with dedupe.
+  for (const part of chunk(sourceIds, IN_CHUNK_SIZE)) {
+    const partRows = await db.txRecord.findMany({ where: relatedWhere(part) });
+    for (const row of partRows) {
+      if (seenRelatedIds.has(row.id)) continue;
+      seenRelatedIds.add(row.id);
+      related.push(row);
+    }
+  }
+  if (planIds.length > 0) {
+    for (const part of chunk(uniquePlanIds, IN_CHUNK_SIZE)) {
+      const partRows = await db.txRecord.findMany({
+        where: {
+          OR: [
+            { householdId, creditCardInstallmentPlanId: { in: part } },
+            { householdId: null, creditCardInstallmentPlanId: { in: part } },
+          ],
+        },
+      });
+      for (const row of partRows) {
+        if (seenRelatedIds.has(row.id)) continue;
+        seenRelatedIds.add(row.id);
+        related.push(row);
+      }
+    }
+  }
   const entryTags = await db.entryTag.findMany({
     where: { entryId: { in: related.map((record) => record.id) } },
     select: { entryId: true, tagId: true },

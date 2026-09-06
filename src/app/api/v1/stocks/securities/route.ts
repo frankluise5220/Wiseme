@@ -9,7 +9,6 @@ export const runtime = "nodejs";
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key",
   } as const;
@@ -26,7 +25,8 @@ export async function OPTIONS() {
  * Query:
  * - market?: string; omitted exact lookups infer market from code
  * - code?: exact stock code. Exact lookup first checks local stock data and
- *   then falls back to the stock identity API, caching the resolved name.
+ *   then falls back to the stock identity API unless localOnly=1 is supplied.
+ * - localOnly?: "1" keeps exact lookup inside StockSecurity, holdings, and transactions.
  * - q?: string matches stock code or name
  *
  * Response:
@@ -39,6 +39,7 @@ export async function GET(req: NextRequest) {
     const marketRaw = req.nextUrl.searchParams.get("market")?.trim() || "";
     const codeRaw = req.nextUrl.searchParams.get("code")?.trim() || "";
     const q = req.nextUrl.searchParams.get("q")?.trim() || "";
+    const localOnly = req.nextUrl.searchParams.get("localOnly") === "1";
     const market = marketRaw ? normalizeStockMarket(marketRaw) : (codeRaw ? inferStockMarketFromCode(codeRaw) : "");
 
     if (codeRaw) {
@@ -46,6 +47,7 @@ export async function GET(req: NextRequest) {
         householdId,
         market,
         stockCode: codeRaw,
+        localOnly,
       });
 
       return NextResponse.json({
@@ -88,7 +90,7 @@ export async function GET(req: NextRequest) {
       },
     }, { headers: corsHeaders() });
   } catch (error) {
-    return NextResponse.json({ ok: false, code: "FETCH_FAILED", error: error instanceof Error ? error.message : "查询失败" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ ok: false, code: "FETCH_FAILED", error: error instanceof Error ? error.message : "Fetch failed" }, { status: 500, headers: corsHeaders() });
   }
 }
 
@@ -116,7 +118,7 @@ export async function POST(req: NextRequest) {
     const currency = normalizeCurrency(body.currency);
     const exchange = String(body.exchange ?? "").trim() || null;
 
-    if (!stockCode) return NextResponse.json({ ok: false, code: "STOCK_CODE_REQUIRED", error: "股票代码必填" }, { status: 400, headers: corsHeaders() });
+    if (!stockCode) return NextResponse.json({ ok: false, code: "STOCK_CODE_REQUIRED", error: "Stock code is required" }, { status: 400, headers: corsHeaders() });
 
     const security = await resolveOrCreateStockSecurity(prisma, {
       householdId,
@@ -141,6 +143,6 @@ export async function POST(req: NextRequest) {
       },
     }, { headers: corsHeaders() });
   } catch (error) {
-    return NextResponse.json({ ok: false, code: "CREATE_FAILED", error: error instanceof Error ? error.message : "创建失败" }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ ok: false, code: "CREATE_FAILED", error: error instanceof Error ? error.message : "Create failed" }, { status: 500, headers: corsHeaders() });
   }
 }

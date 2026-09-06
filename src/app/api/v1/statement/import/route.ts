@@ -3,14 +3,22 @@ import { z } from "zod";
 import { AccountKind } from "@prisma/client";
 import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db/prisma";
-import { addDaysUtc, toStatementMonth } from "@/lib/date-utils";
+import { addDaysUtc, parseFlexibleDateToYmd, toStatementMonth } from "@/lib/date-utils";
 import { getCurrentUser } from "@/lib/server/auth";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 import { normalizeDefaultCategoryHierarchyForHousehold, resolveCategorySnapshot } from "@/lib/default-categories";
 import { normalizeCurrency, resolveSameCurrencyTransfer } from "@/lib/currency";
-import { expandImportBankName, isImportPaymentTailSourceHint, normalizeImportAccountMatchKey, parseImportAccountId, resolveImportAccountFromList } from "@/lib/account-import-match";
+import {
+  expandImportBankName,
+  isImportPaymentTailSourceHint,
+  normalizeImportAccountMatchKey,
+  parseImportAccountId,
+  parseImportOwnedMoneyAccountCandidate,
+  resolveImportAccountFromList,
+} from "@/lib/account-import-match";
 import { INCOME_EXPENSE_INSTITUTION_TYPES } from "@/lib/institution-rules";
 import { assertInstitutionDisplayNamesUnique } from "@/lib/server/institution-name-unique";
+import { assertAccountIdentityUnique } from "@/lib/server/account-identity-unique";
 import { resolveDebtAccountByCounterpartyName } from "@/lib/server/import-debt-account";
 import { getCreditBillAccountIds } from "@/lib/server/credit-card-institution-settings";
 import { invalidateCreditCardCycleCacheForAccountIds } from "@/lib/server/credit-card-cycle-cache";
@@ -23,6 +31,7 @@ import {
 import { upsertStatementCategoryRuleFromTx } from "@/lib/statement/category-rules";
 import { upsertStatementInstitutionRuleFromUserEdit } from "@/lib/statement/recognition-rules";
 import { ENTRY_ORIGIN_EMAIL_IMPORT, ENTRY_ORIGIN_EXCEL_IMPORT } from "@/lib/transaction-semantics";
+import { getHouseholdBaseCurrency } from "@/lib/server/fx-rates";
 
 export const runtime = "nodejs";
 
@@ -30,7 +39,6 @@ type Db = typeof prisma;
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key",
   } as const;
@@ -90,8 +98,11 @@ type ParsedItem = z.infer<typeof ParsedItemSchema>;
 type ParsedItemMeta = NonNullable<ParsedItem["_meta"]>;
 type ImportOptions = {
   autoCreateAccounts: boolean;
+  createDebtAccounts?: boolean;
+  forceCreateOwnedMoneyAccounts?: boolean;
   importBatchId?: string | null;
   createdAccounts?: Array<{ id: string; name: string; kind: string; institutionName?: string | null }>;
+  accountGroups?: Array<{ id: string; name: string }>;
 };
 
 const MailSourceSchema = z.object({
@@ -162,16 +173,24 @@ function parseDate(date?: string) {
     ));
   }
   const d = new Date(raw);
-  if (Number.isNaN(d.getTime())) return new Date();
-  return d;
+  if (!Number.isNaN(d.getTime())) return d;
+  // Lenient fallback for day-first ("26-02-2026") and other shapes that the
+  // year-first regex above misses; avoids silently mapping invalid dates to
+  // "today".
+  const ymd = parseFlexibleDateToYmd(raw);
+  if (ymd) {
+    const [ry, rm, rd] = ymd.split("-").map(Number);
+    return new Date(Date.UTC(ry, rm - 1, rd));
+  }
+  return new Date();
 }
 
 function normalizeDateOnlyText(value?: string | null) {
-  const raw = String(value ?? "").trim();
-  if (!raw) return "";
-  const match = raw.match(/^(\d{4})[-\/.年](\d{1,2})[-\/.月](\d{1,2})(?:日)?/);
-  if (!match) return raw.slice(0, 10);
-  return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+  const raw = value == null ? "" : String(value).trim();
+  const rawOnly = raw.replace(/\s+.*$/, "");
+  const match = rawOnly.match(/^(\d{4})[-\/.年](\d{1,2})[-\/.月](\d{1,2})(?:日)?/);
+  if (match) return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+  return parseFlexibleDateToYmd(rawOnly) ?? "";
 }
 
 function parseDateOnlyUtc(value?: string | null) {
@@ -619,6 +638,29 @@ async function ensureBankInstitutionId(tx: Db, householdId: string, institutionN
   return created.id;
 }
 
+async function ensureOwnedMoneyInstitutionId(
+  tx: Db,
+  householdId: string,
+  institutionName: string | undefined,
+  kind: "bank_debit" | "ewallet" | "cash" | "investment",
+) {
+  const name = String(institutionName ?? "").trim();
+  if (!name || kind === "cash") return null;
+  const existing = await findInstitution(tx, householdId, name);
+  if (existing) return existing.id;
+  await assertInstitutionDisplayNamesUnique(tx, { householdId, name });
+  const created = await tx.institution.create({
+    data: {
+      name,
+      shortName: null,
+      type: kind === "ewallet" ? "payment" : "bank",
+      householdId,
+    },
+    select: { id: true },
+  });
+  return created.id;
+}
+
 async function resolveUserIdByName(tx: Db, householdId: string, ownerName?: string) {
   const name = String(ownerName ?? "").trim();
   if (!name) return null;
@@ -627,6 +669,61 @@ async function resolveUserIdByName(tx: Db, householdId: string, ownerName?: stri
     select: { id: true },
   });
   return user?.id ?? null;
+}
+
+async function loadImportAccountGroups(tx: Db, householdId: string, options: ImportOptions) {
+  if (options.accountGroups) return options.accountGroups;
+  options.accountGroups = await tx.accountGroup.findMany({
+    where: { householdId },
+    select: { id: true, name: true },
+    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+  });
+  return options.accountGroups;
+}
+
+async function createOwnedMoneyAccountFromImportName(
+  tx: Db,
+  householdId: string,
+  accountName: string,
+  options: ImportOptions,
+) {
+  if (!options.forceCreateOwnedMoneyAccounts) return null;
+  const groups = await loadImportAccountGroups(tx, householdId, options);
+  const candidate = parseImportOwnedMoneyAccountCandidate(accountName, groups.map((group) => group.name));
+  if (!candidate) return null;
+  const group = groups.find((item) => normalizeImportAccountMatchKey(item.name) === normalizeImportAccountMatchKey(candidate.ownerName));
+  if (!group?.id) return null;
+  const institutionId = await ensureOwnedMoneyInstitutionId(tx, householdId, candidate.institutionName, candidate.kind);
+  await assertAccountIdentityUnique(tx, {
+    householdId,
+    groupId: group.id,
+    institutionId,
+    kind: candidate.kind,
+    name: candidate.accountName,
+    numberMasked: candidate.numberMasked,
+  });
+  const currency = await getHouseholdBaseCurrency(householdId);
+  const created = await tx.account.create({
+    data: {
+      name: candidate.accountName,
+      kind: candidate.kind,
+      currency,
+      groupId: group.id,
+      institutionId,
+      numberMasked: candidate.numberMasked ?? null,
+      investProductType: candidate.kind === "investment" ? candidate.investProductType ?? "fund" : undefined,
+      householdId,
+      isActive: true,
+    },
+    select: { id: true, name: true, kind: true, Institution: { select: { name: true } } },
+  });
+  options.createdAccounts?.push({
+    id: created.id,
+    name: created.name,
+    kind: created.kind,
+    institutionName: created.Institution?.name ?? null,
+  });
+  return created.id;
 }
 
 async function findCreditAccount(tx: Db, householdId: string, accountName: string, meta?: ParsedItemMeta) {
@@ -845,7 +942,11 @@ async function ensureAccountId(tx: Db, householdId: string, accountName?: string
   }
   // When the account name matches the "<owner>'s debt" naming convention and a Counterparty exists,
   // resolve or create the loan account linked to that counterparty.
-  const debtAccountId = await resolveDebtAccountByCounterpartyName(tx, householdId, name);
+  const debtAccountId = await resolveDebtAccountByCounterpartyName(tx, householdId, name, {
+    createCounterparty: options.createDebtAccounts === true,
+    createAccount: options.createDebtAccounts === true,
+    createdAccounts: options.createdAccounts,
+  });
   if (debtAccountId) return debtAccountId;
   const inferredLast4 = inferCardLast4(name, _meta);
   const isCreditCard = !!(_meta?.cardNumberMasked || isCreditAccountText(name));
@@ -866,6 +967,9 @@ async function ensureAccountId(tx: Db, householdId: string, accountName?: string
     if (isCreditCard) await updateCreditAccountMeta(tx, householdId, existingId, _meta);
     return existingId;
   }
+
+  const forcedOwnedMoneyAccountId = await createOwnedMoneyAccountFromImportName(tx, householdId, name, options);
+  if (forcedOwnedMoneyAccountId) return forcedOwnedMoneyAccountId;
 
   if (!options.autoCreateAccounts) {
     throw new Error(`账户不存在：${name}`);
@@ -1112,7 +1216,8 @@ export async function OPTIONS() {
  * POST /api/v1/statement/import
  * Import parsed transaction items from bill recognition, quick add, or credit-card mail.
  *
- * Body: { items, defaultAccountName?, autoCreateAccounts?, mailSource?, manualRecordConflictPolicy? }
+ * Body: { items, defaultAccountName?, autoCreateAccounts?, createDebtAccounts?,
+ * forceCreateOwnedMoneyAccounts?, mailSource?, manualRecordConflictPolicy? }
  * - item.type is one of expense/income/transfer/investment.
  * - item.amount is the absolute display amount for statement-import callers.
  * - item.inflow/item.outflow may carry account-side direction. For an original-spend
@@ -1126,7 +1231,11 @@ export async function OPTIONS() {
  *   a counterparty institution; only values that match the Institution table
  *   are saved and learned. Unmatched institutions are left blank.
  * - transfer rows use fromAccount/toAccount and may carry transferDirection.
- *   Both sides must match existing accounts; incomplete transfers are skipped.
+ *   Both sides must resolve to an account. With createDebtAccounts=true, the
+ *   settlement-account naming pattern may create/reuse the needed Counterparty
+ *   and account. With forceCreateOwnedMoneyAccounts=true, unmatched cash/debit/
+ *   e-wallet/fund investment account text that names an existing owner may create that account.
+ *   Incomplete or otherwise unmatched transfers are skipped.
  * - item._meta may carry statementAmount, statementPeriodStart,
  *   statementPeriodEnd, statementDueDate, and creditLimit from a bank statement.
  *
@@ -1146,6 +1255,8 @@ export async function POST(req: Request) {
     items?: unknown;
     defaultAccountName?: unknown;
     autoCreateAccounts?: unknown;
+    createDebtAccounts?: unknown;
+    forceCreateOwnedMoneyAccounts?: unknown;
     mailSource?: unknown;
   };
 
@@ -1154,6 +1265,8 @@ export async function POST(req: Request) {
       items: z.array(ParsedItemSchema).min(1),
       defaultAccountName: z.string().optional(),
       autoCreateAccounts: z.boolean().optional().default(true),
+      createDebtAccounts: z.boolean().optional().default(false),
+      forceCreateOwnedMoneyAccounts: z.boolean().optional().default(false),
       mailSource: MailSourceSchema.optional(),
       manualRecordConflictPolicy: z.enum(["overwrite", "keep"]).optional(),
     })
@@ -1167,7 +1280,12 @@ export async function POST(req: Request) {
 
   const items = parse.data.items;
   const defaultAccountName = parse.data.defaultAccountName;
-  const options: ImportOptions = { autoCreateAccounts: parse.data.autoCreateAccounts, createdAccounts: [] };
+  const options: ImportOptions = {
+    autoCreateAccounts: parse.data.autoCreateAccounts,
+    createDebtAccounts: parse.data.createDebtAccounts,
+    forceCreateOwnedMoneyAccounts: parse.data.forceCreateOwnedMoneyAccounts,
+    createdAccounts: [],
+  };
   const { householdId } = await getHouseholdScope();
   await normalizeDefaultCategoryHierarchyForHousehold(prisma, householdId);
 

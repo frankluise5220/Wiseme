@@ -15,7 +15,7 @@ export async function invalidateCreditCardCycleCacheForAccountIds(
   const billAccounts = await prisma.account.findMany({
     where: {
       id: { in: ids },
-      kind: { in: [AccountKind.bank_credit, AccountKind.loan] },
+      kind: { in: [AccountKind.bank_credit, AccountKind.loan, AccountKind.settlement] },
       billingDay: { not: null },
     },
     select: { id: true },

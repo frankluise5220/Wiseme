@@ -8,8 +8,16 @@ import { FundImportPreviewDialog, type FundImportDialogContext } from "@/compone
 import { StatementImportPreviewDialog, type StatementImportPreviewItem } from "@/components/StatementImportPreviewDialog";
 import { StockImportPreviewDialog, type StockImportDialogContext, type StockImportUploadItem } from "@/components/StockImportPreviewDialog";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
+import { parseFlexibleDateToYmd } from "@/lib/date-utils";
+import {
+  dropTemplateSampleRows,
+  findTemplateGuideTitleRowIndex,
+  findTemplateSampleColumnIndex,
+  rowsBeforeTemplateGuide,
+} from "@/lib/import-template-sample";
 import { useI18n } from "@/lib/i18n";
 import {
+  STATEMENT_IMPORT_FIELD_HEADERS,
   buildStatementImportFieldHeaders,
   createStatementHeaderReader,
 } from "@/lib/statement/header-catalog";
@@ -19,7 +27,10 @@ import {
 } from "@/lib/statement/import-normalization";
 import {
   hasImportableStatementRows,
+  normalizeStatementExcelParsedItems,
   parseStatementExcelFile,
+  parseStatementTemplateRows,
+  readStatementWorkbookRowsAndText,
 } from "@/lib/statement/excel-preview";
 
 type ViewExcelImportExportItem = {
@@ -74,16 +85,37 @@ type ViewExcelImportMenuButtonProps =
 
 type TranslateFn = (key: string, params?: Record<string, string | number>) => string;
 
+/** 字段填写范围里的一个取值；gloss 会写在说明列做补充说明。 */
+type TemplateGuideValue = {
+  value: string;
+  gloss?: string;
+};
+
+type TemplateGuideRow = {
+  /** 与表头一致的字段显示名 */
+  label: string;
+  /** 填写范围；有值时每个取值单独占一行 */
+  values?: TemplateGuideValue[];
+  /** 说明文字；不要重复写「必填 / 选填」，模板会自动补前缀 */
+  note: string;
+  /** 必填字段：表头与说明区字段名标红 */
+  required?: boolean;
+  /** 用特殊颜色突出该字段（如总费用，突出其覆盖其他费用的行为） */
+  highlight?: boolean;
+};
+
 type TemplateSpec = {
   filename: string;
   sheetName: string;
-  noteSheetName: string;
   headers: string[];
   requiredHeaderIndexes?: number[];
-  labelRow?: string[];
-  rows: string[][];
-  footerRows?: string[][];
-  notes: string[][];
+  /** 突出字段的表头列索引（用特殊颜色标记，提醒用户注意） */
+  highlightHeaderIndexes?: number[];
+  /** 示例数据，导出时样板行列填「是」，导入时会被跳过 */
+  sampleRows: string[][];
+  /** 说明区里除了通用提示外的补充说明，每条一行 */
+  introNotes: string[];
+  guideRows: TemplateGuideRow[];
 };
 
 const NORMAL_HEADER_KEYS = [
@@ -112,11 +144,13 @@ const FUND_HEADER_KEYS = [
   "viewImport.units",
   "viewImport.navDate",
   "detail.column.postedAt",
+  "detail.column.tags",
   "detail.column.remark",
 ] as const;
 const STOCK_HEADER_KEYS = [
   "detail.column.date",
   "stockTx.settleDateLabel",
+  "viewImport.stockAccount",
   "depositShell.colAction",
   "reports.stock.market",
   "stockTx.stockCodeLabel",
@@ -132,11 +166,12 @@ const STOCK_HEADER_KEYS = [
   "stockFee.feeType.exchange_fee",
   "stockFee.feeType.regulatory_fee",
   "stockFee.feeType.other",
+  "detail.column.tags",
   "detail.column.remark",
 ] as const;
 
 type StockImportItem = StockImportUploadItem;
-type StockImportHeaderField = Exclude<keyof StockImportItem, "rawText" | "stockName" | "bankAccountId" | "cashAccountId">;
+type StockImportHeaderField = Exclude<keyof StockImportItem, "rawText" | "stockName" | "stockAccountId" | "accountId" | "bankAccountId" | "cashAccountId" | "exchange">;
 
 type ImportCategoryOption = {
   name: string;
@@ -157,39 +192,64 @@ function templateFor(props: ViewExcelImportMenuButtonProps, t: TranslateFn): Tem
     return {
       filename: `${t("viewImport.stockTemplateFile", { name: safeFileNamePart(stockAccountName, t("viewImport.import")) })}.xlsx`,
       sheetName: t("viewImport.sheetStockTransactions"),
-      noteSheetName: t("viewImport.sheetNotes"),
       headers: localizedHeaders(STOCK_HEADER_KEYS, t),
-      requiredHeaderIndexes: [0, 2, 4, 5, 6],
-      rows: [
-        ["2026-06-08", "2026-06-08", t("stockPanel.action.buy"), "CN", "600519", "100", "1580.00", "", "", "", "5.00", "3.00", "", "1.00", "0.50", "0.50", "", t("viewImport.sampleRemarkStockBuy")],
-        ["2026-06-20", "2026-06-20", t("stockPanel.action.sell"), "CN", "600519", "50", "1620.00", "", "", "", "10.00", "3.00", "", "1.00", "0.50", "0.50", "5.00", t("viewImport.sampleRemarkStockSell")],
-        ["2026-06-25", "2026-06-25", t("viewImport.stockActionBankTransfer"), "", "", "", "", "10000.00", "", t("viewImport.sampleStockBankAccount"), "", "", "", "", "", "", "", t("viewImport.sampleRemarkStockTransferIn")],
-        ["2026-06-30", "2026-06-30", t("stockPanel.action.dividend"), "CN", "600519", "", "", "300.00", "300.00", "", "", "", "", "", "", "", "", t("viewImport.sampleRemarkStockDividend")],
+      requiredHeaderIndexes: [0, 2, 3, 5, 6],
+      highlightHeaderIndexes: [6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17],
+      introNotes: [t("viewImport.notesIntroStock"), t("viewImport.notesRecognitionStock")],
+      sampleRows: [
+        ["2026-06-08", "2026-06-08", stockAccountName, t("stockPanel.action.buy"), "CN_SH", "600519", "100", "1580.00", "", "", "", "5.00", "3.00", "", "1.00", "0.50", "0.50", "", t("viewImport.sampleTagInvest"), t("viewImport.sampleRemarkStockBuy")],
+        ["2026-06-20", "2026-06-20", stockAccountName, t("stockPanel.action.sell"), "CN_SZ", "000001", "50", "12.00", "", "", "", "10.00", "3.00", "", "1.00", "0.50", "0.50", "5.00", "", t("viewImport.sampleRemarkStockSell")],
+        ["2026-06-25", "2026-06-25", stockAccountName, t("viewImport.stockActionBankTransfer"), "", "", "", "", "10000.00", "", t("viewImport.sampleStockBankAccount"), "", "", "", "", "", "", "", "", t("viewImport.sampleRemarkStockTransferIn")],
+        ["2026-06-30", "2026-06-30", stockAccountName, t("stockPanel.action.dividend"), "CN_SH", "600519", "", "", "300.00", "300.00", "", "", "", "", "", "", "", "", "", t("viewImport.sampleRemarkStockDividend")],
       ],
-      footerRows: [
-        [],
-        [],
-        [],
-        [t("detail.column.date"), t("viewImport.notesDate")],
-        [t("stockTx.settleDateLabel"), t("viewImport.notesStockSettleDate")],
-        [t("depositShell.colAction"), t("viewImport.notesStockAction")],
-        [t("reports.stock.market"), t("viewImport.notesStockMarket")],
-        [t("stockTx.stockCodeLabel"), t("viewImport.notesStockCode")],
-        [t("stockHoldingReport.colQuantity"), t("viewImport.notesStockQuantity")],
-        [t("stockPanel.colPrice"), t("viewImport.notesStockPrice")],
-        [t("stockPanel.colGrossAmount"), t("viewImport.notesStockAmount")],
-        [t("stockTx.netAmountLabel"), t("viewImport.notesStockNetAmount")],
-        [t("viewImport.bankAccount"), t("viewImport.notesStockBankAccount")],
-        [t("stockPanel.colFee"), t("viewImport.notesStockFees")],
-        [t("stockFee.feeType.commission"), t("viewImport.notesStockFeeComponent")],
-        [t("stockFee.feeType.stamp_tax"), t("viewImport.notesStockFeeComponent")],
-        [t("stockFee.feeType.transfer_fee"), t("viewImport.notesStockFeeComponent")],
-        [t("stockFee.feeType.exchange_fee"), t("viewImport.notesStockFeeComponent")],
-        [t("stockFee.feeType.regulatory_fee"), t("viewImport.notesStockFeeComponent")],
-        [t("stockFee.feeType.other"), t("viewImport.notesStockFeeComponent")],
-        [t("detail.column.remark"), t("viewImport.notesRemark")],
+      guideRows: [
+        { label: t("detail.column.date"), note: t("viewImport.notesDate"), required: true },
+        { label: t("stockTx.settleDateLabel"), note: t("viewImport.notesStockSettleDate") },
+        { label: t("viewImport.stockAccount"), note: t("viewImport.notesStockAccount"), required: true },
+        {
+          label: t("depositShell.colAction"),
+          note: t("viewImport.notesStockAction"),
+          required: true,
+          values: [
+            { value: t("stockPanel.action.buy") },
+            { value: t("stockPanel.action.sell") },
+            { value: t("stockPanel.action.dividend") },
+            { value: t("stockPanel.action.bonus_share") },
+            { value: t("stockPanel.action.split_share") },
+            { value: t("stockPanel.action.merge_share") },
+            { value: t("stockPanel.action.fee_adjustment") },
+            { value: t("stockPanel.action.tax_adjustment") },
+            { value: t("viewImport.stockActionBankTransfer") },
+          ],
+        },
+        {
+          label: t("reports.stock.market"),
+          note: t("viewImport.notesStockMarket"),
+          values: [
+            { value: "CN_SH", gloss: t("stockFee.scope.CN_SH") },
+            { value: "CN_SZ", gloss: t("stockFee.scope.CN_SZ") },
+            { value: "CN_BJ", gloss: t("stockFee.scope.CN_BJ") },
+            { value: "CN", gloss: t("viewImport.stockMarketGloss.auto") },
+            { value: "HK", gloss: t("viewImport.stockMarketGloss.hk") },
+            { value: "US", gloss: t("viewImport.stockMarketGloss.us") },
+          ],
+        },
+        { label: t("stockTx.stockCodeLabel"), note: t("viewImport.notesStockCode"), required: true },
+        { label: t("stockHoldingReport.colQuantity"), note: t("viewImport.notesStockQuantity"), required: true, highlight: true },
+        { label: t("stockPanel.colPrice"), note: t("viewImport.notesStockPrice"), highlight: true },
+        { label: t("stockPanel.colGrossAmount"), note: t("viewImport.notesStockAmount"), highlight: true },
+        { label: t("stockTx.netAmountLabel"), note: t("viewImport.notesStockNetAmount"), highlight: true },
+        { label: t("viewImport.bankAccount"), note: t("viewImport.notesStockBankAccount") },
+        { label: t("stockPanel.colFee"), note: t("viewImport.notesStockFees"), highlight: true },
+        { label: t("stockFee.feeType.commission"), note: t("viewImport.notesStockFeeComponent") },
+        { label: t("stockFee.feeType.stamp_tax"), note: t("viewImport.notesStockFeeComponent") },
+        { label: t("stockFee.feeType.transfer_fee"), note: t("viewImport.notesStockFeeComponent") },
+        { label: t("stockFee.feeType.exchange_fee"), note: t("viewImport.notesStockFeeComponent") },
+        { label: t("stockFee.feeType.regulatory_fee"), note: t("viewImport.notesStockFeeComponent") },
+        { label: t("stockFee.feeType.other"), note: t("viewImport.notesStockFeeComponent") },
+        { label: t("detail.column.tags"), note: t("viewImport.notesTags") },
+        { label: t("detail.column.remark"), note: t("viewImport.notesRemark") },
       ],
-      notes: [],
     };
   }
 
@@ -199,25 +259,42 @@ function templateFor(props: ViewExcelImportMenuButtonProps, t: TranslateFn): Tem
     return {
       filename: `${t("viewImport.fundTemplateFile", { name: safeFileNamePart(fundAccountName, t("viewImport.import")) })}.xlsx`,
       sheetName: t("viewImport.sheetFundTransactions"),
-      noteSheetName: t("viewImport.sheetNotes"),
       headers: localizedHeaders(FUND_HEADER_KEYS, t),
-      requiredHeaderIndexes: [0, 1, 3, 4, 5],
-      rows: [
-        ["2026-06-03", t("viewImport.fundActionBuy"), t("viewImport.sampleAccountDebit"), fundAccountName, fundCode, "1000.00", "1", "", "1.3521", "738.99", "2026-06-04", "2026-06-04", ""],
-        ["2026-06-10", t("viewImport.fundActionRedeem"), t("viewImport.sampleAccountDebit"), fundAccountName, fundCode, "500.00", "", "0.50", "1.3889", "360.00", "2026-06-11", "2026-06-12", ""],
-        ["2026-06-15", t("viewImport.fundActionDividendCash"), t("viewImport.sampleAccountDebit"), fundAccountName, fundCode, "300.00", "", "", "", "", "", "2026-06-16", ""],
-        ["2026-06-18", t("viewImport.fundActionDividendReinvest"), "", fundAccountName, fundCode, "", "", "", "1.4200", "210.00", "2026-06-18", "", ""],
+      requiredHeaderIndexes: [0, 1, 2, 3, 4, 5],
+      introNotes: [t("viewImport.notesIntroFund"), t("viewImport.notesRecognitionFund")],
+      sampleRows: [
+        ["2026-06-03", t("viewImport.fundActionBuy"), t("viewImport.sampleAccountDebit"), fundAccountName, fundCode, "1000.00", "1", "", "1.3521", "738.99", "2026-06-04", "2026-06-04", t("viewImport.sampleTagInvest"), ""],
+        ["2026-06-10", t("viewImport.fundActionRedeem"), t("viewImport.sampleAccountDebit"), fundAccountName, fundCode, "500.00", "", "0.50", "1.3889", "360.00", "2026-06-11", "2026-06-12", "", ""],
+        ["2026-06-15", t("viewImport.fundActionDividendCash"), t("viewImport.sampleAccountDebit"), fundAccountName, fundCode, "300.00", "", "", "", "", "", "2026-06-16", "", ""],
+        ["2026-06-18", t("viewImport.fundActionDividendReinvest"), "", fundAccountName, fundCode, "", "", "", "1.4200", "210.00", "2026-06-18", "", "", ""],
       ],
-      footerRows: [
-        [],
-        [],
-        [],
-        ...(t("batchImport.guide.fundImportNotes") as unknown as string)
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => line.split("\t")),
+      guideRows: [
+        { label: t("detail.column.date"), note: t("viewImport.notesDate"), required: true },
+        {
+          label: t("viewImport.fundSubtype"),
+          note: t("viewImport.notesFundSubtype"),
+          required: true,
+          values: [
+            { value: t("viewImport.fundActionBuy") },
+            { value: t("viewImport.fundActionRecurringBuy") },
+            { value: t("viewImport.fundActionRedeem") },
+            { value: t("viewImport.fundActionDividendCash") },
+            { value: t("viewImport.fundActionDividendReinvest") },
+          ],
+        },
+        { label: t("viewImport.cashAccount"), note: t("viewImport.notesCashAccount"), required: true },
+        { label: t("viewImport.fundAccount"), note: t("viewImport.notesFundAccount"), required: true },
+        { label: t("viewImport.fundCode"), note: t("viewImport.notesFundCode"), required: true },
+        { label: t("viewImport.amount"), note: t("viewImport.notesFundAmount"), required: true },
+        { label: t("viewImport.feeRate"), note: t("viewImport.notesFundFeeRate") },
+        { label: t("viewImport.fee"), note: t("viewImport.notesFundFee") },
+        { label: t("viewImport.nav"), note: t("viewImport.notesFundNav") },
+        { label: t("viewImport.units"), note: t("viewImport.notesFundUnits") },
+        { label: t("viewImport.navDate"), note: t("viewImport.notesFundConfirmDate") },
+        { label: t("detail.column.postedAt"), note: t("viewImport.notesFundArrivalDate") },
+        { label: t("detail.column.tags"), note: t("viewImport.notesTags") },
+        { label: t("detail.column.remark"), note: t("viewImport.notesRemark") },
       ],
-      notes: [],
     };
   }
 
@@ -227,10 +304,10 @@ function templateFor(props: ViewExcelImportMenuButtonProps, t: TranslateFn): Tem
   return {
     filename: `${t("viewImport.billTemplateFile", { name: safeFileNamePart(accountName, t("viewImport.import")) })}.xlsx`,
     sheetName: t("viewImport.sheetBillRecords"),
-    noteSheetName: t("viewImport.sheetNotes"),
     headers: localizedHeaders(NORMAL_HEADER_KEYS, t),
-    requiredHeaderIndexes: [0, 2, 5],
-    rows: isCreditCardTemplate
+    requiredHeaderIndexes: [0, 2, 3, 4, 5],
+    introNotes: [t("viewImport.notesIntroNormal"), t("viewImport.notesRecognitionNormal")],
+    sampleRows: isCreditCardTemplate
       ? [
         ["2026-06-08", "2026-06-09", t("transaction.type.expense"), "32.50", "", accountName, "", t("viewImport.sampleCategoryDining"), t("viewImport.sampleMerchantFastFood"), t("viewImport.sampleTagLunch"), t("viewImport.sampleRemarkCreditCardSpend")],
         ["2026-06-05", "2026-06-06", t("transaction.type.expense"), "", "20.00", accountName, "", t("viewImport.sampleCategoryDining"), t("viewImport.sampleMerchantRestaurant"), "", t("viewImport.sampleRemarkCreditCardRefund")],
@@ -241,94 +318,238 @@ function templateFor(props: ViewExcelImportMenuButtonProps, t: TranslateFn): Tem
         ["2026-06-08", "", t("transaction.type.income"), "", "1.28", accountName, "", t("viewImport.sampleCategoryInterestIncome"), "", t("viewImport.sampleTagInterest"), t("viewImport.sampleRemarkDemandInterest")],
         ["2026-06-20", "", t("transaction.type.transfer"), "1000.00", "", accountName, t("viewImport.sampleAccountCash"), "", "", "", t("viewImport.sampleRemarkTransfer")],
       ],
-    notes: [
-      [t("viewImport.notesIntroLabel"), t("viewImport.notesIntroNormal")],
-      [t("viewImport.notesRecognitionLabel"), t("viewImport.notesRecognitionNormal")],
-      [t("detail.column.date"), t("viewImport.notesDate")],
-      [t("detail.column.postedAt"), t("viewImport.notesPostedAt")],
-      [t("viewImport.activityType"), t("viewImport.notesActivityType")],
-      [t("detail.column.outflow"), t("viewImport.notesOutflow")],
-      [t("detail.column.inflow"), t("viewImport.notesInflow")],
-      [t("viewImport.account"), t("viewImport.notesAccount")],
-      [t("viewImport.counterAccount"), t("viewImport.notesCounterAccount")],
-      [t("detail.column.category"), t("viewImport.notesCategory")],
-      [t("detail.column.counterparty"), t("viewImport.notesCounterparty")],
-      [t("detail.column.tags"), t("viewImport.notesTags")],
-      [t("detail.column.remark"), t("viewImport.notesRemark")],
+    guideRows: [
+      { label: t("detail.column.date"), note: t("viewImport.notesDate"), required: true },
+      { label: t("detail.column.postedAt"), note: t("viewImport.notesPostedAt") },
+      {
+        label: t("viewImport.activityType"),
+        note: t("viewImport.notesActivityType"),
+        required: true,
+        values: [
+          { value: t("transaction.type.expense") },
+          { value: t("transaction.type.income") },
+          { value: t("transaction.type.transfer") },
+        ],
+      },
+      { label: t("detail.column.outflow"), note: t("viewImport.notesOutflow"), required: true },
+      { label: t("detail.column.inflow"), note: t("viewImport.notesInflow"), required: true },
+      { label: t("viewImport.account"), note: t("viewImport.notesAccount"), required: true },
+      { label: t("viewImport.counterAccount"), note: t("viewImport.notesCounterAccount") },
+      { label: t("detail.column.category"), note: t("viewImport.notesCategory") },
+      { label: t("detail.column.counterparty"), note: t("viewImport.notesCounterparty") },
+      { label: t("detail.column.tags"), note: t("viewImport.notesTags") },
+      { label: t("detail.column.remark"), note: t("viewImport.notesRemark") },
     ],
   };
 }
 
-export async function exportViewImportTemplate(spec: TemplateSpec) {
+export async function exportViewImportTemplate(spec: TemplateSpec, t: TranslateFn) {
   const XLSX = await import("xlsx-js-style");
   const workbook = XLSX.utils.book_new();
-  const rows = [
-    spec.headers,
-    ...(spec.labelRow ? [spec.labelRow] : []),
-    ...spec.rows,
-    ...(Array.isArray(spec.footerRows) && spec.footerRows.length > 0 ? [["", ""], ...spec.footerRows] : []),
-  ];
-  const sheet = XLSX.utils.aoa_to_sheet(rows);
-  const columnCount = Math.max(spec.headers.length, ...rows.map((row) => row.length));
-  sheet["!cols"] = Array.from({ length: columnCount }, (_, index) => ({
-    wch: Math.max(
-      14,
-      Math.min(72, ...rows.map((row) => String(row[index] ?? "").length + 2)),
-    ),
-  }));
-  styleTemplateSheet(XLSX, sheet, rows, spec.requiredHeaderIndexes ?? [], columnCount);
+  const layout = buildTemplateLayout(spec, t);
+  const sheet = XLSX.utils.aoa_to_sheet(layout.rows);
+  applyTemplateColumnWidths(sheet, layout);
+  const noteEndColumn = applyTemplateGuideMerges(sheet, layout);
+  styleTemplateSheet(XLSX, sheet, layout, noteEndColumn);
+  applyTemplateGuideRowHeights(sheet, layout);
   XLSX.utils.book_append_sheet(workbook, sheet, spec.sheetName);
-
-  if (spec.notes.length > 0) {
-    const noteSheet = XLSX.utils.aoa_to_sheet(spec.notes);
-    noteSheet["!cols"] = [{ wch: 18 }, { wch: 72 }];
-    styleTemplateNotesSheet(XLSX, noteSheet, spec.notes);
-    XLSX.utils.book_append_sheet(workbook, noteSheet, spec.noteSheetName);
-  }
   XLSX.writeFile(workbook, spec.filename, { compression: true });
 }
 
 type StyledXlsxModule = typeof import("xlsx-js-style");
 type StyledWorksheet = ReturnType<StyledXlsxModule["utils"]["aoa_to_sheet"]>;
 type ExcelCellStyle = Record<string, unknown>;
+type SheetMergeRange = { s: { r: number; c: number }; e: { r: number; c: number } };
 
-const thinGrayBorder = {
-  top: { style: "thin", color: { rgb: "D9E2F3" } },
-  bottom: { style: "thin", color: { rgb: "D9E2F3" } },
-  left: { style: "thin", color: { rgb: "D9E2F3" } },
-  right: { style: "thin", color: { rgb: "D9E2F3" } },
+/** 说明区结构：样板行之后空一行，再依次是标题行、通用提示行、补充说明行、字段表头行。 */
+const GUIDE_NOTE_COLUMN_START = 2;
+const GUIDE_NOTE_COLUMN_SPAN = 5;
+const GUIDE_NOTE_COLUMN_END = GUIDE_NOTE_COLUMN_START + GUIDE_NOTE_COLUMN_SPAN - 1;
+const GUIDE_MIN_COLUMN_COUNT = GUIDE_NOTE_COLUMN_END + 1;
+const GUIDE_NOTICE_ROW_HEIGHT = 42;
+const GUIDE_INTRO_ROW_HEIGHT = 30;
+// 说明区一行文本的磅值；用于按内容估算说明体（body）行高，避免长说明被截断只显示一行。
+const GUIDE_BODY_LINE_HEIGHT = 15;
+type TemplateLayout = {
+  rows: string[][];
+  columnCount: number;
+  headerCount: number;
+  dataRowCount: number;
+  guideStartRow: number;
+  guideHeaderRow: number;
+  introRowHeights: number[];
+  requiredHeaderIndexes: Set<number>;
+  highlightHeaderIndexes: Set<number>;
+  requiredGuideLabels: Set<string>;
+  highlightGuideLabels: Set<string>;
+  sampleColumnIndex: number;
+};
+
+function guideWideRow(cells: string[], columnCount: number) {
+  return [...cells, ...Array.from({ length: Math.max(0, columnCount - cells.length) }, () => "")];
+}
+
+function buildTemplateLayout(spec: TemplateSpec, t: TranslateFn): TemplateLayout {
+  const headerRow = [...spec.headers, t("settings.accounts.import.sampleRow")];
+  const sampleMark = t("settings.accounts.import.sampleRowYes");
+  const dataRows = [headerRow, ...spec.sampleRows.map((row) => [...row, sampleMark])];
+  const columnCount = Math.max(headerRow.length, GUIDE_MIN_COLUMN_COUNT);
+  const introRows = [
+    t("viewImport.sheetGuideTitleCombined"),
+    t("settings.accounts.import.guideNoRepeatImport"),
+    ...spec.introNotes,
+  ];
+  const guideStartRow = dataRows.length + 1;
+  const guideHeaderRow = guideStartRow + introRows.length;
+  const rows: string[][] = [
+    ...dataRows.map((row) => guideWideRow(row, columnCount)),
+    guideWideRow([], columnCount),
+    ...introRows.map((text) => guideWideRow([text], columnCount)),
+    guideWideRow(
+      [
+        t("settings.accounts.import.guideField"),
+        t("settings.accounts.import.guideValue"),
+        t("settings.accounts.import.guideNote"),
+      ],
+      columnCount,
+    ),
+  ];
+  const requiredGuideLabels = new Set<string>();
+  const highlightGuideLabels = new Set<string>();
+  for (const guide of spec.guideRows) {
+    const values = guide.values ?? [];
+    const required = guide.required === true;
+    if (required) requiredGuideLabels.add(guide.label);
+    if (guide.highlight === true) highlightGuideLabels.add(guide.label);
+    const prefix = values.length > 0
+      ? t(required ? "settings.accounts.import.requiredEnumGuide" : "settings.accounts.import.optionalEnumGuide")
+      : required
+        ? t("settings.accounts.import.requiredFieldGuide")
+        : "";
+    // 字段名行同时承载第一个取值：这样「几个选填项就合并几行」，与基础资料模板一致。
+    const firstValue = values[0];
+    rows.push(guideWideRow(
+      [guide.label, firstValue?.value ?? "", [prefix, guide.note, firstValue?.gloss].filter(Boolean).join(" ")],
+      columnCount,
+    ));
+    // 其余取值每个单独一行，避免挤在一个单元格里。
+    for (const item of values.slice(1)) {
+      rows.push(guideWideRow(["", item.value, item.gloss ?? ""], columnCount));
+    }
+  }
+  return {
+    rows,
+    columnCount,
+    headerCount: headerRow.length,
+    dataRowCount: dataRows.length,
+    guideStartRow,
+    guideHeaderRow,
+    introRowHeights: [
+      GUIDE_NOTICE_ROW_HEIGHT,
+      GUIDE_NOTICE_ROW_HEIGHT,
+      ...spec.introNotes.map(() => GUIDE_INTRO_ROW_HEIGHT),
+    ],
+    requiredHeaderIndexes: new Set(spec.requiredHeaderIndexes ?? []),
+    highlightHeaderIndexes: new Set(spec.highlightHeaderIndexes ?? []),
+    requiredGuideLabels,
+    highlightGuideLabels,
+    sampleColumnIndex: headerRow.length - 1,
+  };
+}
+
+function templateNoteEndColumn(layout: TemplateLayout) {
+  return Math.min(GUIDE_NOTE_COLUMN_END, layout.columnCount - 1);
+}
+
+const templateBorder = {
+  top: { style: "thin", color: { rgb: "E2E8F0" } },
+  bottom: { style: "thin", color: { rgb: "E2E8F0" } },
+  left: { style: "thin", color: { rgb: "E2E8F0" } },
+  right: { style: "thin", color: { rgb: "E2E8F0" } },
 };
 
 const templateHeaderStyle: ExcelCellStyle = {
   fill: { patternType: "solid", fgColor: { rgb: "E2E8F0" } },
   font: { bold: true, color: { rgb: "1F2937" } },
-  alignment: { horizontal: "center", vertical: "center" },
-  border: thinGrayBorder,
+  alignment: { horizontal: "center", vertical: "center", wrapText: true },
+  border: templateBorder,
 };
 
 const templateRequiredHeaderStyle: ExcelCellStyle = {
   fill: { patternType: "solid", fgColor: { rgb: "FCE4D6" } },
   font: { bold: true, color: { rgb: "C00000" } },
+  alignment: { horizontal: "center", vertical: "center", wrapText: true },
+  border: templateBorder,
+};
+
+// 突出字段（数量、价格/成交金额/净金额、总费用等）：灰绿色填充，深绿字。
+const templateHighlightHeaderStyle: ExcelCellStyle = {
+  fill: { patternType: "solid", fgColor: { rgb: "C9E4CA" } },
+  font: { bold: true, color: { rgb: "1B5E20" } },
+  alignment: { horizontal: "center", vertical: "center", wrapText: true },
+  border: templateBorder,
+};
+
+// 既是必填又是突出字段（如数量）：保留红色字强调必填，同时用灰绿底色提醒。
+const templateRequiredHighlightHeaderStyle: ExcelCellStyle = {
+  fill: { patternType: "solid", fgColor: { rgb: "C9E4CA" } },
+  font: { bold: true, color: { rgb: "C00000" } },
+  alignment: { horizontal: "center", vertical: "center", wrapText: true },
+  border: templateBorder,
+};
+
+const templateSampleHeaderStyle: ExcelCellStyle = {
+  fill: { patternType: "solid", fgColor: { rgb: "FEF3C7" } },
+  font: { bold: true, color: { rgb: "92400E" } },
+  alignment: { horizontal: "center", vertical: "center", wrapText: true },
+  border: templateBorder,
+};
+
+const templateSampleValueStyle: ExcelCellStyle = {
+  fill: { patternType: "solid", fgColor: { rgb: "FFFBEB" } },
+  font: { italic: true, color: { rgb: "92400E" } },
   alignment: { horizontal: "center", vertical: "center" },
-  border: thinGrayBorder,
+  border: templateBorder,
 };
 
-const templateRequiredNoteStyle: ExcelCellStyle = {
-  fill: { patternType: "solid", fgColor: { rgb: "FCE4D6" } },
-  font: { color: { rgb: "9C0006" } },
-  alignment: { vertical: "top", wrapText: true },
-  border: thinGrayBorder,
+const templateGuideIntroStyle = (isTitle: boolean): ExcelCellStyle => ({
+  fill: { patternType: "solid", fgColor: { rgb: "DBEAFE" } },
+  font: { bold: isTitle, color: { rgb: isTitle ? "1F2937" : "374151" } },
+  alignment: { horizontal: "left", vertical: "center", wrapText: true },
+  border: templateBorder,
+});
+
+const templateGuideHeaderStyle: ExcelCellStyle = {
+  fill: { patternType: "solid", fgColor: { rgb: "E2E8F0" } },
+  font: { bold: true, color: { rgb: "1F2937" } },
+  alignment: { horizontal: "left", vertical: "center", wrapText: true },
+  border: templateBorder,
 };
 
-const templateOptionalNoteStyle: ExcelCellStyle = {
-  alignment: { vertical: "top", wrapText: true },
-};
-
-const requiredInstructionPrefixes = ["\u5fc5\u586b", "Required", "\u5fc5\u9808"];
-
-function isRequiredInstructionText(value: string) {
-  const text = String(value ?? "").trim();
-  return requiredInstructionPrefixes.some((prefix) => text.startsWith(prefix));
+function templateGuideBodyStyle(
+  columnIndex: number,
+  required: boolean,
+  highlight: boolean,
+  mergedLabel: boolean,
+  mergedNote: boolean,
+): ExcelCellStyle {
+  const isFieldLabel = columnIndex === 0;
+  const isNoteColumn = columnIndex >= GUIDE_NOTE_COLUMN_START;
+  // 特殊颜色：突出字段（数量、价格/成交金额/净金额、总费用等）的字段名与说明都标灰绿色。
+  // 既必填又突出时，字段名用红色（强调必填）其余（说明）用灰绿。
+  const isRequiredLabel = required && isFieldLabel;
+  const fontColor = isRequiredLabel ? "C02626" : highlight ? "1B5E20" : required && isFieldLabel ? "C00000" : "374151";
+  const bold = (isFieldLabel && (required || highlight)) || (isNoteColumn && highlight);
+  return {
+    font: { bold, color: { rgb: fontColor } },
+    alignment: {
+      horizontal: isFieldLabel && mergedLabel ? "left" : undefined,
+      // 字段名或说明跨行合并时垂直居中，单个取值行仍顶部对齐，与基础资料模板一致。
+      vertical: (isFieldLabel && mergedLabel) || (isNoteColumn && mergedNote) ? "center" : isNoteColumn ? "top" : "center",
+      wrapText: true,
+    },
+    border: templateBorder,
+  };
 }
 
 function setTemplateCellStyle(
@@ -337,60 +558,216 @@ function setTemplateCellStyle(
   rowIndex: number,
   columnIndex: number,
   style: ExcelCellStyle,
-  createCell = false,
 ) {
   const address = XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex });
-  const cell = sheet[address] ?? (createCell ? (sheet[address] = { t: "s", v: "" }) : null);
-  if (cell) cell.s = style;
+  const cell = sheet[address] ?? (sheet[address] = { t: "s", v: "" });
+  cell.s = style;
 }
 
-function styleTemplateInstructionRows(
-  XLSX: StyledXlsxModule,
-  sheet: StyledWorksheet,
-  rows: string[][],
-  mergeEndColumnIndex = 1,
-) {
-  const noteMergeEndColumnIndex = Math.max(1, mergeEndColumnIndex);
-  const merges = sheet["!merges"] ?? [];
-  sheet["!merges"] = merges;
-  rows.forEach((row, rowIndex) => {
-    if (row.length !== 2 || !String(row[1] ?? "").trim()) return;
-    const style = isRequiredInstructionText(row[1]) ? templateRequiredNoteStyle : templateOptionalNoteStyle;
-    setTemplateCellStyle(XLSX, sheet, rowIndex, 0, style, true);
-    for (let columnIndex = 1; columnIndex <= noteMergeEndColumnIndex; columnIndex += 1) {
-      setTemplateCellStyle(XLSX, sheet, rowIndex, columnIndex, style, true);
-    }
-    if (noteMergeEndColumnIndex > 1) {
-      merges.push({
-        s: { r: rowIndex, c: 1 },
-        e: { r: rowIndex, c: noteMergeEndColumnIndex },
-      });
-    }
+function applyTemplateColumnWidths(sheet: StyledWorksheet, layout: TemplateLayout) {
+  const noteEndColumn = templateNoteEndColumn(layout);
+  sheet["!cols"] = Array.from({ length: layout.columnCount }, (_, columnIndex) => {
+    const isNoteColumn = columnIndex >= GUIDE_NOTE_COLUMN_START && columnIndex <= noteEndColumn;
+    // 说明列 / 一般列取紧凑宽度；取值列（第 1 列，含入账日期等）适中。
+    const defaultWidth = isNoteColumn ? 16 : columnIndex === 1 ? 20 : 12;
+    const contentWidth = Math.max(
+      ...layout.rows.map((row) => String(row[columnIndex] ?? "").split("\n").reduce((max, item) => Math.max(max, item.length + 2), 0)),
+    );
+    return { wch: Math.max(defaultWidth, Math.min(30, contentWidth)) };
   });
+}
+
+function applyTemplateGuideMerges(sheet: StyledWorksheet, layout: TemplateLayout) {
+  const { rows, guideStartRow, guideHeaderRow } = layout;
+  const noteEndColumn = templateNoteEndColumn(layout);
+  const merges = sheet["!merges"] ?? [];
+  for (let rowIndex = guideStartRow; rowIndex < guideHeaderRow; rowIndex += 1) {
+    merges.push({ s: { r: rowIndex, c: 0 }, e: { r: rowIndex, c: noteEndColumn } });
+  }
+  // 按字段块分组：字段名有内容的行作为块起点，块覆盖该字段名行及其取值行。
+  const blocks: Array<{ start: number; end: number }> = [];
+  let fieldStartRow = guideHeaderRow;
+  for (let rowIndex = fieldStartRow + 1; rowIndex <= rows.length; rowIndex += 1) {
+    const startsNextField = rowIndex === rows.length || Boolean(String(rows[rowIndex]?.[0] ?? "").trim());
+    if (!startsNextField) continue;
+    blocks.push({ start: fieldStartRow, end: rowIndex - 1 });
+    fieldStartRow = rowIndex;
+  }
+  const isNoteEmpty = (row: number) => !String(rows[row]?.[GUIDE_NOTE_COLUMN_START] ?? "").trim();
+  for (const block of blocks) {
+    const isMultiRow = block.end > block.start;
+    const hasLabel = Boolean(String(rows[block.start]?.[0] ?? "").trim());
+    if (isMultiRow && hasLabel) {
+      // 字段名跨取值行纵向合并（收支大类、基金大类、股票动作等枚举字段）。
+      merges.push({ s: { r: block.start, c: 0 }, e: { r: block.end, c: 0 } });
+      // 取值行若没有各自的补充说明，说明区也整体纵向跨行合并，并垂直居中。
+      let hasPerRowNote = false;
+      for (let r = block.start + 1; r <= block.end; r += 1) {
+        if (!isNoteEmpty(r)) { hasPerRowNote = true; break; }
+      }
+      if (!hasPerRowNote) {
+        merges.push({ s: { r: block.start, c: GUIDE_NOTE_COLUMN_START }, e: { r: block.end, c: noteEndColumn } });
+        continue;
+      }
+    }
+    // 否则（单行字段，或取值行带各自补充说明如股票市场），说明区按行横向填充。
+    for (let rowIndex = block.start; rowIndex <= block.end; rowIndex += 1) {
+      merges.push({ s: { r: rowIndex, c: GUIDE_NOTE_COLUMN_START }, e: { r: rowIndex, c: noteEndColumn } });
+    }
+  }
+  sheet["!merges"] = merges;
+  return noteEndColumn;
+}
+
+function mergedTemplateGuideLabelRows(sheet: StyledWorksheet) {
+  const startRows = new Set<number>();
+  for (const merge of (sheet["!merges"] ?? []) as SheetMergeRange[]) {
+    if (merge.s.c === 0 && merge.e.c === 0 && merge.e.r > merge.s.r) startRows.add(merge.s.r);
+  }
+  return startRows;
+}
+
+/** 说明列中纵向跨行合并的起始行（用于垂直居中）。 */
+function mergedTemplateGuideNoteRows(sheet: StyledWorksheet) {
+  const startRows = new Set<number>();
+  for (const merge of (sheet["!merges"] ?? []) as SheetMergeRange[]) {
+    if (merge.s.c >= GUIDE_NOTE_COLUMN_START && merge.s.r < merge.e.r) startRows.add(merge.s.r);
+  }
+  return startRows;
 }
 
 function styleTemplateSheet(
   XLSX: StyledXlsxModule,
   sheet: StyledWorksheet,
-  rows: string[][],
-  requiredHeaderIndexes: number[],
-  columnCount: number,
+  layout: TemplateLayout,
+  noteEndColumn: number,
 ) {
-  const requiredIndexes = new Set(requiredHeaderIndexes);
-  rows[0]?.forEach((_, columnIndex) => {
-    setTemplateCellStyle(
-      XLSX,
-      sheet,
-      0,
-      columnIndex,
-      requiredIndexes.has(columnIndex) ? templateRequiredHeaderStyle : templateHeaderStyle,
-    );
-  });
-  styleTemplateInstructionRows(XLSX, sheet, rows, Math.max(1, columnCount - 1));
+  const { rows, guideStartRow, guideHeaderRow, requiredHeaderIndexes, highlightHeaderIndexes, requiredGuideLabels, highlightGuideLabels, sampleColumnIndex } = layout;
+
+  for (let columnIndex = 0; columnIndex < layout.headerCount; columnIndex += 1) {
+    const style = columnIndex === sampleColumnIndex
+      ? templateSampleHeaderStyle
+      : highlightHeaderIndexes.has(columnIndex)
+        ? (requiredHeaderIndexes.has(columnIndex) ? templateRequiredHighlightHeaderStyle : templateHighlightHeaderStyle)
+        : requiredHeaderIndexes.has(columnIndex)
+          ? templateRequiredHeaderStyle
+          : templateHeaderStyle;
+    setTemplateCellStyle(XLSX, sheet, 0, columnIndex, style);
+  }
+  for (let rowIndex = 1; rowIndex < layout.dataRowCount; rowIndex += 1) {
+    setTemplateCellStyle(XLSX, sheet, rowIndex, sampleColumnIndex, templateSampleValueStyle);
+  }
+
+  for (let rowIndex = guideStartRow; rowIndex < guideHeaderRow; rowIndex += 1) {
+    const style = templateGuideIntroStyle(rowIndex === guideStartRow);
+    for (let columnIndex = 0; columnIndex <= noteEndColumn; columnIndex += 1) {
+      setTemplateCellStyle(XLSX, sheet, rowIndex, columnIndex, style);
+    }
+  }
+  for (let columnIndex = 0; columnIndex <= noteEndColumn; columnIndex += 1) {
+    setTemplateCellStyle(XLSX, sheet, guideHeaderRow, columnIndex, templateGuideHeaderStyle);
+  }
+
+  const mergedLabelRows = mergedTemplateGuideLabelRows(sheet);
+  const mergedNoteRows = mergedTemplateGuideNoteRows(sheet);
+  let currentFieldRequired = false;
+  let currentFieldHighlight = false;
+  for (let rowIndex = guideHeaderRow + 1; rowIndex < rows.length; rowIndex += 1) {
+    const label = String(rows[rowIndex]?.[0] ?? "").trim();
+    if (label) {
+      currentFieldRequired = requiredGuideLabels.has(label);
+      currentFieldHighlight = highlightGuideLabels.has(label);
+    }
+    for (let columnIndex = 0; columnIndex <= noteEndColumn; columnIndex += 1) {
+      setTemplateCellStyle(
+        XLSX,
+        sheet,
+        rowIndex,
+        columnIndex,
+        templateGuideBodyStyle(columnIndex, currentFieldRequired, currentFieldHighlight, mergedLabelRows.has(rowIndex), mergedNoteRows.has(rowIndex)),
+      );
+    }
+  }
 }
 
-function styleTemplateNotesSheet(XLSX: StyledXlsxModule, sheet: StyledWorksheet, rows: string[][]) {
-  styleTemplateInstructionRows(XLSX, sheet, rows);
+function applyTemplateGuideRowHeights(sheet: StyledWorksheet, layout: TemplateLayout) {
+  // 合并单元格不会自动撑高，说明区标题与提示行需要显式行高；说明体（body）行也按内容估算，
+  // 避免成交金额等长说明只显示一行。
+  const heights = sheet["!rows"] ?? [];
+  layout.introRowHeights.forEach((height, index) => {
+    heights[layout.guideStartRow + index] = { hpt: height };
+  });
+  const guideCols = sheet["!cols"] ?? [];
+  const wch = (columnIndex: number) => guideCols[columnIndex]?.wch ?? 8;
+  const noteEnd = templateNoteEndColumn(layout);
+  const noteWidth = Array.from({ length: noteEnd - GUIDE_NOTE_COLUMN_START + 1 }, (_, i) => GUIDE_NOTE_COLUMN_START + i)
+    .reduce((sum, c) => sum + wch(c), 0);
+  // 文本宽度统一以 wch 单位计量：中文/全角按 2，其余按 1。行宽为一格能容纳的 wch 数。
+  const textUnits = (text: string) => {
+    let units = 0;
+    for (const ch of String(text ?? "")) units += /[\u3000-\u9fff\uff00-\uffef\u3400-\u4dbf]/.test(ch) ? 2 : 1;
+    return units;
+  };
+  // 一行（磅）；文本确实换行时才按 N 行抬行高。
+  const lineHeight = GUIDE_BODY_LINE_HEIGHT + 4;
+  const calcLines = (width: number, text: string) => {
+    if (!text) return 1;
+    const charsPerLine = Math.max(2, Math.floor(width));
+    return Math.max(1, Math.ceil(textUnits(text) / charsPerLine));
+  };
+  const setHeight = (row: number, lines: number) => {
+    const h = Math.max(1, Math.min(lines, 8)) * lineHeight;
+    heights[row] = { hpt: h };
+  };
+  const isNoteEmpty = (row: number) => !String(layout.rows[row]?.[GUIDE_NOTE_COLUMN_START] ?? "").trim();
+  // 字段块分组：字段名行 + 取值行（与 applyTemplateGuideMerges 一致）。
+  const blocks: Array<{ start: number; end: number }> = [];
+  let fieldStartRow = layout.guideHeaderRow;
+  for (let rowIndex = fieldStartRow + 1; rowIndex <= layout.rows.length; rowIndex += 1) {
+    const startsNextField = rowIndex === layout.rows.length || Boolean(String(layout.rows[rowIndex]?.[0] ?? "").trim());
+    if (!startsNextField) continue;
+    blocks.push({ start: fieldStartRow, end: rowIndex - 1 });
+    fieldStartRow = rowIndex;
+  }
+  const labelWidth = (text: string, width: number) => (text ? calcLines(width, text) : 1);
+  for (const block of blocks) {
+    const start = block.start;
+    const rowCount = block.end - block.start + 1;
+    const label = String(layout.rows[start]?.[0] ?? "").trim();
+    const labelValue = String(layout.rows[start]?.[1] ?? "").trim();
+    const blockNote = String(layout.rows[start]?.[GUIDE_NOTE_COLUMN_START] ?? "").trim();
+    const hasLabel = Boolean(label);
+    const baseLine = Math.max(labelWidth(label, wch(0)), labelWidth(labelValue, wch(1)));
+    if (rowCount === 1) {
+      // 单行字段（如成交金额）：说明按行横向合并，需按说明实际换行行数定高。
+      const lines = Math.max(baseLine, labelWidth(blockNote, noteWidth));
+      setHeight(start, lines);
+      continue;
+    }
+    // 多取值行：取值行是否各自带独立说明（如股票「市场」）。
+    let hasPerRowNote = false;
+    for (let r = start + 1; r <= block.end; r += 1) {
+      if (!isNoteEmpty(r)) { hasPerRowNote = true; break; }
+    }
+    if (hasPerRowNote) {
+      // 每行独立计高。
+      for (let r = start; r <= block.end; r += 1) {
+        const l = String(layout.rows[r]?.[0] ?? "").trim();
+        const v = String(layout.rows[r]?.[1] ?? "").trim();
+        const n = String(layout.rows[r]?.[GUIDE_NOTE_COLUMN_START] ?? "").trim();
+        const lines = Math.max(labelWidth(l, wch(0)), labelWidth(v, wch(1)), labelWidth(n, noteWidth));
+        setHeight(r, lines);
+      }
+    } else {
+      // 说明整块纵向合并到字段名行：只在字段名行按说明换行数定高，取值行保持默认紧凑高度。
+      const noteLines = calcLines(noteWidth, blockNote);
+      const labelLines = Math.max(baseLine, hasLabel ? noteLines : 1);
+      setHeight(start, labelLines);
+      // 取值行保持默认高度（不显式设置），避免整列被拉高。
+    }
+  }
+  // 单行字段若未命中（说明为空等），给一行基准高度即可，不特殊处理。
+  sheet["!rows"] = heights;
 }
 
 export async function exportRowsToXlsx(rows: ExportCellValue[][], filename: string, sheetName: string) {
@@ -413,7 +790,7 @@ export async function exportRowsToXlsx(rows: ExportCellValue[][], filename: stri
 }
 
 export async function exportNormalAccountImportTemplate(accountName: string, t: TranslateFn) {
-  await exportViewImportTemplate(templateFor({ kind: "normal", accountId: "", accountName }, t));
+  await exportViewImportTemplate(templateFor({ kind: "normal", accountId: "", accountName }, t), t);
 }
 
 function normalizeHeaderText(value: unknown) {
@@ -432,24 +809,13 @@ function parseOptionalNumber(value: unknown) {
 }
 
 function parseDateCell(value: unknown) {
-  if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString().slice(0, 10);
-  const raw = normalizeCellText(value);
-  if (!raw) return "";
-  const direct = raw.slice(0, 10);
-  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(direct)) {
-    const [year, month, day] = direct.split("-");
-    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
-  }
-  if (/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(raw)) {
-    const [year, month, day] = raw.split("/");
-    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
-  }
-  return /^\d{4}-\d{2}-\d{2}$/.test(direct) ? direct : "";
+  return parseFlexibleDateToYmd(value) ?? "";
 }
 
 const STOCK_FIELDS = [
   "tradeDate",
   "settleDate",
+  "stockAccount",
   "action",
   "market",
   "stockCode",
@@ -465,12 +831,14 @@ const STOCK_FIELDS = [
   "exchangeFee",
   "regulatoryFee",
   "otherFee",
+  "tags",
   "note",
 ] as const satisfies readonly StockImportHeaderField[];
 
 const STOCK_FIELD_ALIAS_KEYS: Record<StockImportHeaderField, string> = {
   tradeDate: "viewImport.stockAlias.tradeDate",
   settleDate: "viewImport.stockAlias.settleDate",
+  stockAccount: "viewImport.stockAlias.stockAccount",
   action: "viewImport.stockAlias.action",
   market: "viewImport.stockAlias.market",
   stockCode: "viewImport.stockAlias.stockCode",
@@ -486,6 +854,7 @@ const STOCK_FIELD_ALIAS_KEYS: Record<StockImportHeaderField, string> = {
   exchangeFee: "viewImport.stockAlias.exchangeFee",
   regulatoryFee: "viewImport.stockAlias.regulatoryFee",
   otherFee: "viewImport.stockAlias.otherFee",
+  tags: "viewImport.stockAlias.tags",
   note: "viewImport.stockAlias.note",
 };
 
@@ -564,6 +933,7 @@ function stockHeaderDetectionScore(headers: unknown[], t: TranslateFn) {
   if (index.has("tradeDate")) score += 4;
   if (index.has("action")) score += 4;
   if (index.has("stockCode")) score += 4;
+  if (index.has("stockAccount")) score += 1;
   if (index.has("market")) score += 2;
   if (index.has("quantity")) score += 2;
   if (index.has("price")) score += 2;
@@ -654,6 +1024,7 @@ async function parseStockImportFile(file: File, t: TranslateFn): Promise<StockIm
   const XLSX = await import("xlsx");
   const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
   let bestRows: unknown[][] = [];
+  let bestHeaderRow: unknown[] = [];
   let bestHeader = new Map<StockImportHeaderField, number>();
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
@@ -663,20 +1034,26 @@ async function parseStockImportFile(file: File, t: TranslateFn): Promise<StockIm
       const score = ["tradeDate", "action"].filter((field) => header.has(field as StockImportHeaderField)).length + (header.has("stockCode") || header.has("bankAccount") ? 1 : 0) + header.size / 100;
       if (score > 2 && score > (bestHeader.has("tradeDate") ? 2 : 0) + bestHeader.size / 100) {
         bestHeader = header;
+        bestHeaderRow = rows[index] ?? [];
         bestRows = rows.slice(index + 1);
       }
     }
   }
   if (!bestHeader.has("tradeDate") || !bestHeader.has("action") || (!bestHeader.has("stockCode") && !bestHeader.has("bankAccount"))) return [];
+  // 模板自带的样板行与底部字段说明区都不是真实数据。
+  const guideTitleRowIndex = findTemplateGuideTitleRowIndex(bestRows, t("settings.accounts.import.sheetGuideTitle"));
+  const sampleColumnIndex = findTemplateSampleColumnIndex(bestHeaderRow);
+  const dataRows = dropTemplateSampleRows(rowsBeforeTemplateGuide(bestRows, guideTitleRowIndex), sampleColumnIndex);
   const readField = (row: unknown[], field: StockImportHeaderField) => {
     const index = bestHeader.get(field);
     return index == null ? "" : normalizeCellText(row[index]);
   };
   const unsupportedActions = new Set<string>();
-  const items = bestRows.map((row) => {
+  const items = dataRows.map((row) => {
     const rawAction = readField(row, "action");
     const action = normalizeStockImportAction(rawAction, t);
     const tradeDate = parseDateCell(row[bestHeader.get("tradeDate") ?? -1]);
+    const stockAccount = readField(row, "stockAccount");
     const stockCode = readField(row, "stockCode");
     const bankAccount = readField(row, "bankAccount");
     if (tradeDate && (stockCode || bankAccount) && rawAction && !action) unsupportedActions.add(rawAction);
@@ -684,6 +1061,7 @@ async function parseStockImportFile(file: File, t: TranslateFn): Promise<StockIm
       rawText: row.map((cell) => normalizeCellText(cell)).filter(Boolean).join(" "),
       tradeDate,
       settleDate: bestHeader.has("settleDate") ? parseDateCell(row[bestHeader.get("settleDate") ?? -1]) || null : null,
+      stockAccount,
       action,
       market: readField(row, "market"),
       stockCode,
@@ -700,6 +1078,7 @@ async function parseStockImportFile(file: File, t: TranslateFn): Promise<StockIm
       regulatoryFee: parseOptionalNumber(row[bestHeader.get("regulatoryFee") ?? -1]),
       otherFee: parseOptionalNumber(row[bestHeader.get("otherFee") ?? -1]),
       note: readField(row, "note") || null,
+      tags: readField(row, "tags") || null,
     };
   });
   if (unsupportedActions.size > 0) {
@@ -836,7 +1215,7 @@ export function ViewExcelImportMenuButton(props: ViewExcelImportMenuButtonProps)
     setOpen(false);
     setBusy(true);
     try {
-      await exportViewImportTemplate(templateFor(props, t));
+      await exportViewImportTemplate(templateFor(props, t), t);
     } catch (error) {
       setStatus(t("viewImport.failed", { reason: error instanceof Error ? error.message : String(error) }));
     } finally {
@@ -873,10 +1252,45 @@ export function ViewExcelImportMenuButton(props: ViewExcelImportMenuButtonProps)
       }
 
       {
+        // 财智8检测：文件名含 "财智" → 走财智专用通道
+        const isCaizhiFile = /财智/.test(file.name);
+
+        if (isCaizhiFile) {
+          const { rows, caizhiRows } = await readStatementWorkbookRowsAndText(file, STATEMENT_IMPORT_FIELD_HEADERS);
+          if (!caizhiRows || caizhiRows.length === 0) {
+            throw new Error(t("viewImport.noRows"));
+          }
+          const MMH_STANDARD_HEADERS = [
+            "日期", "入账日期", "收支大类", "流出", "流入", "账户", "对向账户",
+            "分类", "收支机构", "标签", "备注",
+          ];
+          const headerPrefixedRows = [MMH_STANDARD_HEADERS, ...caizhiRows];
+          const localItems = normalizeStatementExcelParsedItems(
+            parseStatementTemplateRows(
+              headerPrefixedRows,
+              statementDefaultAccountName(props),
+              STATEMENT_IMPORT_FIELD_HEADERS,
+              t("settings.accounts.import.sheetGuideTitle"),
+            )
+          );
+          const items = localItems.filter((item) => item.date && Number(item.amount) > 0);
+          if (items.length === 0) throw new Error(t("viewImport.noRows"));
+          setPreviewItems(items);
+          setPreviewOpen(true);
+          setStatus(t("viewImport.recognizedCount", { count: items.length }));
+          return;
+        }
+
+        // 普通文件：走原有京东/支付宝/微信/标准模板链路
         const latestRecognitionSamples = await refreshRecognitionSamples().catch(() => recognitionSamples);
         const categories = await loadImportCategories();
         const latestFieldHeaders = buildStatementImportFieldHeaders(latestRecognitionSamples);
-        const { localItems, preferServerRecognition, text } = await parseStatementExcelFile(file, statementDefaultAccountName(props), latestFieldHeaders);
+        const { localItems, preferServerRecognition, text } = await parseStatementExcelFile(
+          file,
+          statementDefaultAccountName(props),
+          latestFieldHeaders,
+          t("settings.accounts.import.sheetGuideTitle"),
+        );
         let serverError: unknown = null;
         const serverItems = preferServerRecognition || !hasImportableStatementRows(localItems)
           ? await parseByServer(text).catch((error) => {
@@ -922,7 +1336,10 @@ export function ViewExcelImportMenuButton(props: ViewExcelImportMenuButtonProps)
     return Array.isArray(data.items) ? data.items : [];
   }
 
-  async function confirmImport(items: StatementImportPreviewItem[]) {
+  async function confirmImport(
+    items: StatementImportPreviewItem[],
+    options?: { createDebtAccounts?: boolean; forceCreateOwnedMoneyAccounts?: boolean },
+  ) {
     if (items.length === 0) return;
     setBusy(true);
     setStatus(t("viewImport.importingBills"));
@@ -934,6 +1351,8 @@ export function ViewExcelImportMenuButton(props: ViewExcelImportMenuButtonProps)
           items,
           defaultAccountName: statementDefaultAccountName(props),
           autoCreateAccounts: false,
+          createDebtAccounts: options?.createDebtAccounts === true,
+          forceCreateOwnedMoneyAccounts: options?.forceCreateOwnedMoneyAccounts === true,
         }),
       });
       const data = await res.json().catch(() => null) as { ok?: boolean; error?: string; createdCount?: number; skippedCount?: number; errors?: Array<{ error?: string }> } | null;

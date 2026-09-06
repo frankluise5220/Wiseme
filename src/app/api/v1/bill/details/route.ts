@@ -53,7 +53,7 @@ function mdUtcDots(date: Date) {
 }
 
 function isSettlementDebtAccount(account?: { kind?: AccountKind | null; counterpartyId?: string | null } | null) {
-  return account?.kind === AccountKind.loan && !!account.counterpartyId;
+  return account?.kind === AccountKind.settlement || (account?.kind === AccountKind.loan && !!account.counterpartyId);
 }
 
 function mapDetailEntry(

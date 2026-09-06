@@ -90,7 +90,7 @@ export async function resolveOrCreateStockSecurity(
   const explicitCurrency = String(params.currency ?? "").trim().toUpperCase();
   const explicitExchange = String(params.exchange ?? "").trim().toUpperCase();
 
-  if (!stockCode) throw new Error("股票代码必填");
+  if (!stockCode) throw new Error("Stock code is required");
 
   const existing = await client.stockSecurity.findUnique({
     where: {
@@ -162,7 +162,7 @@ export async function resolveOrCreateStockSecurity(
  * Lookup a stock security by code with local-first resolution.
  *
  * The lookup checks StockSecurity first, then local holdings and transactions,
- * and only falls back to the external identity API if no usable local name exists.
+ * and falls back to the external identity API only when localOnly is not set.
  */
 export async function getStockSecurityByCode(
   client: TxClient,
@@ -170,6 +170,7 @@ export async function getStockSecurityByCode(
     householdId: string;
     market?: string;
     stockCode: string;
+    localOnly?: boolean;
   },
 ): Promise<StockSecurityLookupItem | null> {
   const stockCode = normalizeStockCode(params.stockCode);
@@ -194,7 +195,7 @@ export async function getStockSecurityByCode(
     }
   }
 
-  if (!hasUsableStockName(security?.stockName, stockCode)) {
+  if (!hasUsableStockName(security?.stockName, stockCode) && !params.localOnly) {
     const identity = await queryStockIdentity(market, stockCode);
     if (identity?.stockName && identity.stockName !== stockCode) {
       security = await resolveOrCreateStockSecurity(client, {

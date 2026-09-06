@@ -6,6 +6,7 @@ import { buildGroupedAccountOptions, buildAccountDisplayOption, type AccountDisp
 import { SmartSelect } from "@/components/SmartSelect";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { useI18n } from "@/lib/i18n";
+import { getAccountLabelFieldsPreference } from "@/lib/client/appPreferences";
 
 type AccountOption = AccountDisplaySource;
 type CategoryOption = { id: string; name: string; type: string; sortOrder?: number; isSystem?: boolean };
@@ -49,7 +50,7 @@ export function MobileTransactionForm({ accounts, categories, defaultAccountId =
     [categories, draft.type],
   );
   const accountOptions = useMemo(
-    () => buildGroupedAccountOptions(accounts.map((account) => buildAccountDisplayOption(account))),
+    () => buildGroupedAccountOptions(accounts.map((account) => buildAccountDisplayOption(account, undefined, { fields: getAccountLabelFieldsPreference() }))),
     [accounts],
   );
   const transferAccountOptions = useMemo(
@@ -217,7 +218,7 @@ export function MobileTransactionForm({ accounts, categories, defaultAccountId =
 
         <label className="mt-3 block">
           <span className="text-xs text-slate-500">{draft.type === "transfer" ? t("mobileTxForm.transferFromAccount") : t("mobileTxForm.account")}</span>
-          <div className="mt-1 [&>[role=button]]:h-11">
+          <div className="mt-1 rounded-[10px] ring-1 ring-rose-200/80 [&>[role=button]]:h-11">
             <SmartSelect
               mode="single"
               value={draft.accountId}
@@ -232,7 +233,7 @@ export function MobileTransactionForm({ accounts, categories, defaultAccountId =
         {draft.type === "transfer" ? (
           <label className="mt-3 block">
             <span className="text-xs text-slate-500">{t("mobileTxForm.transferToAccount")}</span>
-            <div className="mt-1 [&>[role=button]]:h-11">
+            <div className="mt-1 rounded-[10px] ring-1 ring-rose-200/80 [&>[role=button]]:h-11">
               <SmartSelect
                 mode="single"
                 value={draft.toAccountId}

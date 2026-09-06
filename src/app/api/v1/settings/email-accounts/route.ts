@@ -2,8 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 import { isAdmin } from "@/lib/server/auth";
+import { isValidSender } from "@/lib/mail/address";
 
 export const runtime = "nodejs";
+
+const INVALID_SENDER_MESSAGE =
+  "Invalid sender address. Enter a full email address; QQ/163 usually require it to match the login account.";
+
+function invalidSenderResponse() {
+  return NextResponse.json({ ok: false, code: "INVALID_SMTP_FROM", error: INVALID_SENDER_MESSAGE }, { status: 400 });
+}
 
 /**
  * GET /api/v1/settings/email-accounts
@@ -32,7 +40,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const { householdId, user } = await getHouseholdScope();
   if (!user || !isAdmin(user)) {
-    return NextResponse.json({ ok: false, code: "ADMIN_REQUIRED", error: "仅管理员可操作" }, { status: 403 });
+    return NextResponse.json({ ok: false, code: "ADMIN_REQUIRED", error: "Administrator permission is required" }, { status: 403 });
   }
   const body = await req.json().catch(() => ({}));
   const label = String(body.label ?? "").trim();
@@ -44,7 +52,12 @@ export async function POST(req: NextRequest) {
   const mailbox = String(body.mailbox ?? "INBOX").trim() || "INBOX";
 
   if (!label || !username || !imapHost || !password) {
-    return NextResponse.json({ ok: false, code: "MISSING_FIELDS", error: "请填写标签名、用户名、IMAP 服务器和授权码" }, { status: 400 });
+    return NextResponse.json({ ok: false, code: "MISSING_FIELDS", error: "Label, username, IMAP host, and authorization code are required" }, { status: 400 });
+  }
+
+  const smtpFromRaw = String(body.smtpFrom ?? "").trim();
+  if (smtpFromRaw && !isValidSender(smtpFromRaw)) {
+    return invalidSenderResponse();
   }
 
   const account = await prisma.emailAccount.create({
@@ -55,7 +68,7 @@ export async function POST(req: NextRequest) {
       smtpHost: String(body.smtpHost ?? "").trim() || null,
       smtpPort: Number(body.smtpPort) || 465,
       smtpSecure: body.smtpSecure === undefined ? (Number(body.smtpPort) || 465) === 465 : body.smtpSecure !== false,
-      smtpFrom: String(body.smtpFrom ?? "").trim() || null,
+      smtpFrom: smtpFromRaw || null,
       resendApiKey: null,
       resendFrom: null,
       password, mailbox,
@@ -73,17 +86,17 @@ export async function POST(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const { householdId, user } = await getHouseholdScope();
   if (!user || !isAdmin(user)) {
-    return NextResponse.json({ ok: false, code: "ADMIN_REQUIRED", error: "仅管理员可操作" }, { status: 403 });
+    return NextResponse.json({ ok: false, code: "ADMIN_REQUIRED", error: "Administrator permission is required" }, { status: 403 });
   }
   const body = await req.json().catch(() => ({}));
   const id = String(body.id ?? "").trim();
   if (!id) {
-    return NextResponse.json({ ok: false, code: "MISSING_ID", error: "缺少 id" }, { status: 400 });
+    return NextResponse.json({ ok: false, code: "MISSING_ID", error: "Missing id" }, { status: 400 });
   }
 
   const existing = await prisma.emailAccount.findFirst({ where: { id, householdId } });
   if (!existing) {
-    return NextResponse.json({ ok: false, code: "ACCOUNT_NOT_FOUND", error: "账户不存在" }, { status: 404 });
+    return NextResponse.json({ ok: false, code: "ACCOUNT_NOT_FOUND", error: "Email account not found" }, { status: 404 });
   }
 
   const data: Record<string, unknown> = {};
@@ -92,7 +105,13 @@ export async function PUT(req: NextRequest) {
   if (body.imapHost !== undefined) data.imapHost = String(body.imapHost).trim();
   if (body.imapPort !== undefined) data.imapPort = Number(body.imapPort) || 993;
   if (body.imapSecure !== undefined) data.imapSecure = body.imapSecure !== false;
-  if (body.smtpFrom !== undefined) data.smtpFrom = String(body.smtpFrom).trim();
+  if (body.smtpFrom !== undefined) {
+    const nextFrom = String(body.smtpFrom).trim();
+    if (nextFrom && !isValidSender(nextFrom)) {
+      return invalidSenderResponse();
+    }
+    data.smtpFrom = nextFrom;
+  }
   if (body.smtpHost !== undefined) data.smtpHost = String(body.smtpHost).trim();
   if (body.smtpPort !== undefined) data.smtpPort = Number(body.smtpPort) || 465;
   if (body.smtpSecure !== undefined) data.smtpSecure = body.smtpSecure !== false;
@@ -111,16 +130,16 @@ export async function PUT(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const { householdId, user } = await getHouseholdScope();
   if (!user || !isAdmin(user)) {
-    return NextResponse.json({ ok: false, code: "ADMIN_REQUIRED", error: "仅管理员可操作" }, { status: 403 });
+    return NextResponse.json({ ok: false, code: "ADMIN_REQUIRED", error: "Administrator permission is required" }, { status: 403 });
   }
   const body = await req.json().catch(() => ({}));
   const id = String(body.id ?? "").trim();
   if (!id) {
-    return NextResponse.json({ ok: false, code: "MISSING_ID", error: "缺少 id" }, { status: 400 });
+    return NextResponse.json({ ok: false, code: "MISSING_ID", error: "Missing id" }, { status: 400 });
   }
   const existing = await prisma.emailAccount.findFirst({ where: { id, householdId } });
   if (!existing) {
-    return NextResponse.json({ ok: false, code: "ACCOUNT_NOT_FOUND", error: "账户不存在" }, { status: 404 });
+    return NextResponse.json({ ok: false, code: "ACCOUNT_NOT_FOUND", error: "Email account not found" }, { status: 404 });
   }
   await prisma.emailAccount.delete({ where: { id } });
   return NextResponse.json({ ok: true });

@@ -27,6 +27,9 @@ import { getHouseholdScope } from "@/lib/server/household-scope";
  * When `applyAccounts` is provided (array of investment account ids sharing the
  * same institution), the same rule values are copied to those accounts for the
  * same fundCode.
+ *
+ * DELETE /api/v1/fund/confirm-days?accountId=...&fundCode=...
+ * Deletes the single rule for the given accountId + fundCode pair.
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -130,12 +133,17 @@ type ConfirmDayRowInput = {
 
 function parseRowInput(row: ConfirmDayRowInput) {
   const fundCode = String(row.fundCode ?? "").trim();
+  const hasEffectiveDate = Object.prototype.hasOwnProperty.call(row, "effectiveDate");
   return {
     fundCode,
     days: typeof row.days === "number" ? normalizeNonNegativeDays(row.days, 0) : undefined,
     arrivalDays: typeof row.arrivalDays === "number" ? normalizeNonNegativeDays(row.arrivalDays, 2) : undefined,
     redeemCostDays: typeof row.redeemCostDays === "number" ? normalizeNonNegativeDays(row.redeemCostDays, 1) : undefined,
-    effectiveDate: typeof row.effectiveDate === "string" && row.effectiveDate.trim() ? row.effectiveDate.trim() : undefined,
+    effectiveDate: hasEffectiveDate
+      ? typeof row.effectiveDate === "string" && row.effectiveDate.trim()
+        ? row.effectiveDate.trim()
+        : null
+      : undefined,
   };
 }
 
@@ -143,12 +151,12 @@ async function upsertRule(accountId: string, input: ReturnType<typeof parseRowIn
   const existing = await prisma.fundConfirmDays.findUnique({
     where: { accountId_fundCode: { accountId, fundCode: input.fundCode } },
   });
-  const data: Record<string, string | number | Date> = {};
+  const data: Record<string, string | number | Date | null> = {};
   if (input.days !== undefined) data.days = input.days;
   if (input.arrivalDays !== undefined) data.arrivalDays = input.arrivalDays;
   if (input.redeemCostDays !== undefined) data.redeemCostDays = input.redeemCostDays;
   if (input.effectiveDate !== undefined) {
-    data.effectiveDate = new Date(`${input.effectiveDate}T00:00:00.000Z`);
+    data.effectiveDate = input.effectiveDate ? new Date(`${input.effectiveDate}T00:00:00.000Z`) : null;
   }
   if (existing) {
     if (Object.keys(data).length > 0) {
@@ -166,6 +174,18 @@ async function upsertRule(accountId: string, input: ReturnType<typeof parseRowIn
       },
     });
   }
+}
+
+async function deleteRule(accountId: string, fundCode: string) {
+  const existing = await prisma.fundConfirmDays.findUnique({
+    where: { accountId_fundCode: { accountId, fundCode } },
+    select: { id: true },
+  });
+  if (!existing) {
+    return null;
+  }
+  await prisma.fundConfirmDays.delete({ where: { id: existing.id } });
+  return existing.id;
 }
 
 export async function POST(req: NextRequest) {
@@ -237,6 +257,35 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     return NextResponse.json(
       { ok: false, code: "SAVE_FAILED", error: e instanceof Error ? e.message : "Failed to save confirm days." },
+      { status: 500 }
+    );
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const accountId = searchParams.get("accountId")?.trim();
+    const fundCode = searchParams.get("fundCode")?.trim();
+    if (!accountId || !fundCode) {
+      return NextResponse.json({ ok: false, code: "MISSING_PARAMS", error: "accountId and fundCode are required." }, { status: 400 });
+    }
+    const ctx = await getHouseholdScope();
+    const account = await prisma.account.findUnique({
+      where: { id: accountId, ...ctx.hidFilter },
+      select: { id: true },
+    });
+    if (!account) {
+      return NextResponse.json({ ok: false, code: "ACCOUNT_NOT_FOUND", error: "Investment account not found." }, { status: 404 });
+    }
+    const deletedId = await deleteRule(accountId, fundCode);
+    if (!deletedId) {
+      return NextResponse.json({ ok: false, code: "RULE_NOT_FOUND", error: "Confirm day rule not found." }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    return NextResponse.json(
+      { ok: false, code: "DELETE_FAILED", error: e instanceof Error ? e.message : "Failed to delete confirm day rule." },
       { status: 500 }
     );
   }

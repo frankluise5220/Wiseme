@@ -27,6 +27,7 @@ export type CalcInputProps = {
   className?: string;
   label?: string;
   precision?: number;
+  disabled?: boolean;
 };
 
 export const CalcInput = forwardRef<HTMLInputElement, CalcInputProps>(function CalcInput(
@@ -35,9 +36,10 @@ export const CalcInput = forwardRef<HTMLInputElement, CalcInputProps>(function C
     onChange,
     onBlur,
     placeholder,
-    className,
-    label,
-    precision = 2,
+  className,
+  label,
+  precision = 2,
+  disabled = false,
   },
   ref,
 ) {
@@ -174,20 +176,22 @@ export const CalcInput = forwardRef<HTMLInputElement, CalcInputProps>(function C
         ref={ref}
         inputMode="decimal"
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(sanitizeCalcInputValue(e.target.value))}
         onKeyDown={handleInputKeyDown}
         onBlur={handleInputBlur}
         placeholder={placeholder}
         style={{ caretColor: "var(--foreground)" }}
-        className="form-input pr-10 font-mono placeholder:text-slate-300 caret-slate-800"
+        className={`form-input pr-10 font-mono placeholder:text-slate-300 caret-slate-800 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500`}
       />
 
       <div className="absolute right-0 top-0">
         <button
           ref={triggerRef}
           type="button"
+          disabled={disabled}
           onClick={() => setOpen(true)}
-          className="flex h-9 w-9 items-center justify-center rounded-r-[10px] border border-l-0 border-slate-200 bg-white text-blue-600 hover:bg-blue-50"
+          className="flex h-9 w-9 items-center justify-center rounded-r-[10px] border border-l-0 border-slate-200 bg-white text-blue-600 hover:bg-blue-50 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400 disabled:hover:bg-white"
           title={label ? t("calcInput.titleWithLabel").replace("{label}", label) : t("calcInput.title")}
         >
           <Calculator className="h-4 w-4" />

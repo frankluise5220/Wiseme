@@ -17,6 +17,17 @@ export type ImportAccountMatchResult<T extends ImportAccountMatchSource> = {
   targetBankNames: string[];
 };
 
+export type ImportOwnedMoneyAccountCandidate = {
+  originalName: string;
+  accountName: string;
+  ownerName: string;
+  kind: "bank_debit" | "cash" | "ewallet" | "investment";
+  investProductType?: "fund" | "money" | "wealth";
+  institutionName?: string;
+  institutionDisplayName?: string;
+  numberMasked?: string;
+};
+
 export type ImportAccountIdentityConflictKind =
   | "account"
   | "ambiguous"
@@ -41,7 +52,7 @@ export function encodeImportAccountId(accountId: string) {
 const DEBT_ACCOUNT_NAME_RE = /^(.+?)的往来款$/;
 
 /** Extract counterparty name from "XX的往来款". Returns null on no match. */
-function parseDebtAccountName(v: string): string | null {
+export function parseDebtAccountName(v: string): string | null {
   const m = v.trim().match(DEBT_ACCOUNT_NAME_RE);
   return m?.[1]?.trim() ?? null;
 }
@@ -75,17 +86,31 @@ const BANK_ALIASES: Array<{ canonical: string; aliases: string[] }> = [
 
 const ACCOUNT_KIND_ALIASES: Array<{ kind: ImportAccountKind; aliases: string[] }> = [
   { kind: "bank_credit", aliases: ["信用卡", "贷记卡"] },
-  { kind: "bank_debit", aliases: ["储蓄卡", "借记卡", "银行卡"] },
+  { kind: "bank_debit", aliases: ["储蓄卡", "借记卡", "银行卡", "\u4e00\u5361\u901a"] },
   { kind: "ewallet", aliases: ["\u7535\u5b50\u94b1\u5305", "\u94b1\u5305", "\u96f6\u94b1\u8d26\u6237", "\u4eac\u4e1c\u5c0f\u91d1\u5e93", "\u5c0f\u91d1\u5e93"] },
   { kind: "cash", aliases: ["现金", "现金账户"] },
-  { kind: "investment", aliases: ["投资账户", "投资"] },
-  { kind: "loan", aliases: ["往来款"] },
+  { kind: "investment", aliases: ["投资账户", "投资", "基金", "基金账户", "货币基金", "货币基金账户", "理财", "理财账户"] },
+  { kind: "settlement", aliases: ["往来款"] },
 ];
 
-export function normalizeImportAccountMatchKey(value?: string) {
+const ACCOUNT_KIND_SEPARATOR_WORDS = [
+  "\u4fe1\u7528\u5361",
+  "\u8d37\u8bb0\u5361",
+  "\u50a8\u84c4\u5361",
+  "\u501f\u8bb0\u5361",
+  "\u94f6\u884c\u5361",
+];
+
+const ACCOUNT_SCHEDULE_SUFFIX_RE = /(?:[\/／\\-]\s*\d{1,2}){2}$/;
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function normalizeImportAccountMatchKey(value?: string | null) {
   return String(value ?? "")
     .trim()
-    .replace(/[·•\-—_\s()[\]（）【】]/g, "")
+    .replace(/[·•\-—_\s()[\]（）【】\u7684]/g, "")
     .toLowerCase();
 }
 
@@ -139,10 +164,115 @@ function accountBankKeys(account: ImportAccountMatchSource) {
 }
 
 function accountOwnerNames(account: ImportAccountMatchSource) {
-  if (account.kind === "loan") return [];
+  if (account.kind === "loan" || account.kind === "settlement") return [];
   return [account.AccountGroup?.name ?? ""]
     .map((name) => name.trim())
     .filter(Boolean);
+}
+
+function accountOwnerKeys(account: ImportAccountMatchSource) {
+  return accountOwnerNames(account).map(normalizeImportAccountMatchKey).filter(Boolean);
+}
+
+function stripLeadingImportOwner(value: string, ownerName: string) {
+  const pattern = new RegExp(`^\\s*(?:\\u6240\\u6709\\u4eba\\s*[:\\uff1a]?\\s*)?${escapeRegExp(ownerName)}(?:\\s*\\u7684|[\\s·•_\\-—/／\\\\()[\\]\\uff08\\uff09\\u3010\\u3011:\\uff1a]+)?\\s*`);
+  return value.replace(pattern, "").trim();
+}
+
+function stripImportAccountScheduleSuffix(value: string) {
+  return value.replace(ACCOUNT_SCHEDULE_SUFFIX_RE, "").trim();
+}
+
+function stripImportOwnerFieldPrefix(value: string) {
+  return value.replace(/^\s*\u6240\u6709\u4eba\s*[:\uff1a]?\s*/, "").trim();
+}
+
+function stripLeadingInstitutionName(value: string, institutionNames: string[]) {
+  let next = value.trim();
+  for (const institutionName of institutionNames.sort((a, b) => b.length - a.length)) {
+    if (!institutionName) continue;
+    next = next.replace(new RegExp(`^\\s*${escapeRegExp(institutionName)}(?:\\s*\\u7684|[\\s·•_\\-—/／\\\\()[\\]\\uff08\\uff09\\u3010\\u3011:\\uff1a]+)?\\s*`), "").trim();
+  }
+  return next;
+}
+
+function inferBankDisplayName(value: string, canonicalName?: string) {
+  const key = normalizeImportAccountMatchKey(value);
+  if (!key) return canonicalName;
+  for (const item of BANK_ALIASES) {
+    const variants = [item.canonical, ...item.aliases]
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+    const matched = variants.find((variant) => key.includes(normalizeImportAccountMatchKey(variant)));
+    if (matched) return matched;
+  }
+  return canonicalName;
+}
+function inferOwnedInvestmentProductType(value: string): ImportOwnedMoneyAccountCandidate["investProductType"] | null {
+  if (/\u8d27\u5e01\u57fa\u91d1/.test(value)) return "money";
+  if (/\u7406\u8d22/.test(value)) return "wealth";
+  if (/\u57fa\u91d1/.test(value)) return "fund";
+  return null;
+}
+export function parseImportOwnedMoneyAccountCandidate(
+  value: string | undefined | null,
+  ownerNames: string[],
+): ImportOwnedMoneyAccountCandidate | null {
+  const raw = stripImportAccountScheduleSuffix(String(value ?? "").trim());
+  if (!raw) return null;
+  const ownerSearchText = stripImportOwnerFieldPrefix(raw);
+  const rawKey = normalizeImportAccountMatchKey(ownerSearchText);
+  const ownerName = ownerNames
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .find((name) => {
+      const ownerKey = normalizeImportAccountMatchKey(name);
+      return ownerKey && rawKey.startsWith(ownerKey) && rawKey.length > ownerKey.length;
+    });
+  if (!ownerName) return null;
+
+  const accountPart = stripLeadingImportOwner(ownerSearchText, ownerName);
+  if (!accountPart) return null;
+  const inferredKind = inferAccountKind(accountPart);
+  if (inferredKind === "bank_credit") return null;
+  const bankNames = inferBankNames(accountPart);
+  const bankDisplayName = inferBankDisplayName(accountPart, bankNames[0]);
+  const last4 = extractImportAccountLast4(accountPart);
+  const hasBankHint = bankNames.length > 0;
+  const investProductType = inferOwnedInvestmentProductType(accountPart);
+  const kind = inferredKind === "cash" || inferredKind === "ewallet" || inferredKind === "bank_debit"
+    ? inferredKind
+    : inferredKind === "investment" && investProductType
+      ? "investment"
+      : hasBankHint && last4
+        ? "bank_debit"
+        : null;
+  if (kind !== "bank_debit" && kind !== "cash" && kind !== "ewallet" && kind !== "investment") return null;
+
+  const withoutInstitution = stripLeadingInstitutionName(accountPart, bankNames);
+  const fallbackName = kind === "bank_debit"
+    ? "\u501f\u8bb0\u5361"
+    : kind === "ewallet"
+      ? "\u7535\u5b50\u94b1\u5305"
+      : kind === "investment"
+        ? investProductType === "wealth"
+          ? "\u7406\u8d22"
+          : investProductType === "money"
+            ? "\u8d27\u5e01\u57fa\u91d1"
+            : "\u57fa\u91d1"
+        : "\u73b0\u91d1";
+  const accountName = withoutInstitution || fallbackName;
+  return {
+    originalName: raw,
+    accountName,
+    ownerName,
+    kind,
+    investProductType: kind === "investment" ? investProductType ?? "fund" : undefined,
+    institutionName: kind === "bank_debit" || kind === "ewallet" || kind === "investment" ? bankNames[0] : undefined,
+    institutionDisplayName: kind === "bank_debit" || kind === "ewallet" || kind === "investment" ? bankDisplayName : undefined,
+    numberMasked: kind === "bank_debit" ? last4 || undefined : undefined,
+  };
 }
 
 function bankKeyMatchesAccount(account: ImportAccountMatchSource, targetBankNames: string[]) {
@@ -326,6 +456,7 @@ export function createImportAccountMatcher<T extends ImportAccountMatchSource>(a
     account,
     last4: accountLast4(account),
     keys: buildImportAccountCandidates(account).map(normalizeImportAccountMatchKey).filter(Boolean),
+    ownerKeys: accountOwnerKeys(account),
     bankKeys: [
       account.Institution?.name ?? "",
       account.Institution?.shortName ?? "",
@@ -340,6 +471,32 @@ export function createImportAccountMatcher<T extends ImportAccountMatchSource>(a
     return targetBankKeys.some((targetBankKey) =>
       item.bankKeys.some((bankKey) => bankKey.includes(targetBankKey) || targetBankKey.includes(bankKey)),
     );
+  }
+
+  function ownerKeyMatches(item: (typeof indexed)[number], targetOwnerKeys: string[]) {
+    if (targetOwnerKeys.length === 0) return true;
+    return targetOwnerKeys.some((targetOwnerKey) => item.ownerKeys.includes(targetOwnerKey));
+  }
+
+  function inferTargetOwnerKeys(raw: string) {
+    const rawText = raw.trim();
+    const rawKey = normalizeImportAccountMatchKey(rawText);
+    const ownerKeys = new Set<string>();
+    for (const item of indexed) {
+      for (const ownerKey of item.ownerKeys) {
+        if (!ownerKey || rawKey === ownerKey || !rawKey.startsWith(ownerKey)) continue;
+        const ownerName = accountOwnerNames(item.account).find((name) => normalizeImportAccountMatchKey(name) === ownerKey);
+        if (!ownerName) continue;
+        const ownerPrefix = new RegExp(`^\\s*(?:所有人\\s*[:：]?\\s*)?${escapeRegExp(ownerName)}(?:\\s*的|[\\s·•_\\-—/／\\\\()[\\]（）【】:：]|$)`);
+        const restKey = rawKey.slice(ownerKey.length);
+        const restHasAccountHint =
+          inferBankNames(restKey).length > 0 ||
+          inferAccountKind(restKey) !== null ||
+          ACCOUNT_KIND_SEPARATOR_WORDS.some((word) => restKey.includes(normalizeImportAccountMatchKey(word)));
+        if (ownerPrefix.test(rawText) || (restKey && restHasAccountHint)) ownerKeys.add(ownerKey);
+      }
+    }
+    return Array.from(ownerKeys);
   }
 
   function result(
@@ -359,15 +516,21 @@ export function createImportAccountMatcher<T extends ImportAccountMatchSource>(a
     };
   }
 
+  function hasCompatibleLast4(item: (typeof indexed)[number], targetLast4: string) {
+    return !targetLast4 || !item.last4 || item.last4 === targetLast4;
+  }
+
   function pickUnique(matches: Array<(typeof indexed)[number]>, criteria: {
     last4: string;
     targetKind: ImportAccountKind | null;
     targetBankKeys: string[];
+    targetOwnerKeys: string[];
   }) {
     let narrowed = matches;
     if (criteria.last4) narrowed = narrowed.filter((item) => item.last4 === criteria.last4);
     if (criteria.targetKind) narrowed = narrowed.filter((item) => !item.account.kind || item.account.kind === criteria.targetKind);
     if (criteria.targetBankKeys.length > 0) narrowed = narrowed.filter((item) => bankKeyMatches(item, criteria.targetBankKeys));
+    if (criteria.targetOwnerKeys.length > 0) narrowed = narrowed.filter((item) => ownerKeyMatches(item, criteria.targetOwnerKeys));
     return narrowed.length === 1 ? narrowed[0].account : null;
   }
 
@@ -380,7 +543,7 @@ export function createImportAccountMatcher<T extends ImportAccountMatchSource>(a
       if (kind === "deposit") return 50;
       if (kind === "bank_credit") return 20;
       if (kind === "investment") return -50;
-      if (kind === "loan") return -60;
+      if (kind === "loan" || kind === "settlement") return -60;
       return 0;
     };
     const ranked = matches
@@ -481,6 +644,7 @@ export function createImportAccountMatcher<T extends ImportAccountMatchSource>(a
     const targetKind = inferAccountKind(raw);
     const targetBankNames = inferBankNames(raw);
     const targetBankKeys = targetBankNames.map(normalizeImportAccountMatchKey);
+    const targetOwnerKeys = inferTargetOwnerKeys(raw);
 
     const directAccountId = parseImportAccountId(raw);
     if (directAccountId) {
@@ -494,31 +658,39 @@ export function createImportAccountMatcher<T extends ImportAccountMatchSource>(a
 
     for (const targetKey of targetKeys) {
       const exactMatches = indexed.filter((item) => item.keys.includes(targetKey));
-      if (exactMatches.length > 0) {
-        const narrowed = pickUnique(exactMatches, { last4, targetKind, targetBankKeys });
+      const compatibleExactMatches = exactMatches.filter((item) => hasCompatibleLast4(item, last4));
+      if (compatibleExactMatches.length > 0) {
+        const narrowed = pickUnique(compatibleExactMatches, { last4, targetKind, targetBankKeys, targetOwnerKeys });
         if (narrowed) return result(narrowed, [], { targetKind, targetBankNames });
-        if (exactMatches.length === 1 && (!targetKind || !exactMatches[0].account.kind || exactMatches[0].account.kind === targetKind)) {
-          return result(exactMatches[0].account, [], { targetKind, targetBankNames });
+        if (
+          compatibleExactMatches.length === 1 &&
+          (!targetKind || !compatibleExactMatches[0].account.kind || compatibleExactMatches[0].account.kind === targetKind)
+        ) {
+          return result(compatibleExactMatches[0].account, [], { targetKind, targetBankNames });
         }
-        if (!targetKind && exactMatches.length > 1 && isImportUnionPayDebitTailSourceHint(raw)) {
-          const paymentSource = pickUnionPayDebitSource(exactMatches);
+        if (!targetKind && compatibleExactMatches.length > 1 && isImportUnionPayDebitTailSourceHint(raw)) {
+          const paymentSource = pickUnionPayDebitSource(compatibleExactMatches);
           if (paymentSource) return result(paymentSource, [], { targetKind, targetBankNames });
         }
-        if (!targetKind && exactMatches.length > 1 && isBareLast4Hint(raw)) {
-          const paymentSource = pickPaymentTailSource(exactMatches);
+        if (!targetKind && compatibleExactMatches.length > 1 && isBareLast4Hint(raw)) {
+          const paymentSource = pickPaymentTailSource(compatibleExactMatches);
           if (paymentSource) return result(paymentSource, [], { targetKind, targetBankNames });
         }
-        if (!targetKind && exactMatches.length > 1) return result(null, exactMatches, { targetKind, targetBankNames });
+        if (!targetKind && compatibleExactMatches.length > 1) {
+          return result(null, compatibleExactMatches, { targetKind, targetBankNames });
+        }
+      }
+    }
 
     // "XX的往来款" pattern: try to match extracted counterparty name directly
     // against loan account names, bypassing kind-alias partial matching.
-    if (targetKind === "loan") {
+    if (targetKind === "settlement") {
       const counterpartyName = parseDebtAccountName(raw);
       if (counterpartyName) {
         const cKey = normalizeImportAccountMatchKey(counterpartyName);
         if (cKey) {
           const loanMatches = indexed.filter(
-            (item) => item.account.kind === "loan" && item.keys.includes(cKey),
+            (item) => (item.account.kind === "settlement" || item.account.kind === "loan") && item.keys.includes(cKey),
           );
           if (loanMatches.length === 1) {
             return result(loanMatches[0].account, [], { targetKind, targetBankNames });
@@ -526,13 +698,12 @@ export function createImportAccountMatcher<T extends ImportAccountMatchSource>(a
         }
       }
     }
-      }
-    }
 
     if (last4) {
       const byLast4 = indexed.filter((item) => {
         if (item.last4 !== last4) return false;
         if (targetKind && item.account.kind && targetKind !== item.account.kind) return false;
+        if (!ownerKeyMatches(item, targetOwnerKeys)) return false;
         return bankKeyMatches(item, targetBankKeys);
       });
       if (byLast4.length === 1) return result(byLast4[0].account, [], { targetKind, targetBankNames });
@@ -562,6 +733,8 @@ export function createImportAccountMatcher<T extends ImportAccountMatchSource>(a
     if (targetKind && targetBankKeys.length > 0) {
       const byBankAndKind = indexed.filter((item) => {
         if (item.account.kind !== targetKind) return false;
+        if (!hasCompatibleLast4(item, last4)) return false;
+        if (!ownerKeyMatches(item, targetOwnerKeys)) return false;
         return bankKeyMatches(item, targetBankKeys);
       });
       if (byBankAndKind.length === 1) return result(byBankAndKind[0].account, [], { targetKind, targetBankNames });
@@ -572,11 +745,20 @@ export function createImportAccountMatcher<T extends ImportAccountMatchSource>(a
       const partialMatches = indexed.filter((item) =>
         item.keys.some((key) => key.length >= 3 && (targetKey.includes(key) || key.includes(targetKey))),
       );
-      if (partialMatches.length === 1) return result(partialMatches[0].account, [], { targetKind, targetBankNames });
-      if (partialMatches.length > 1) {
-        const narrowed = pickUnique(partialMatches, { last4, targetKind, targetBankKeys });
+      const compatiblePartialMatches = partialMatches.filter((item) => {
+        if (!hasCompatibleLast4(item, last4)) return false;
+        if (targetKind && item.account.kind && item.account.kind !== targetKind) return false;
+        if (targetBankKeys.length > 0 && !bankKeyMatches(item, targetBankKeys)) return false;
+        if (!ownerKeyMatches(item, targetOwnerKeys)) return false;
+        return true;
+      });
+      if (compatiblePartialMatches.length === 1) {
+        return result(compatiblePartialMatches[0].account, [], { targetKind, targetBankNames });
+      }
+      if (compatiblePartialMatches.length > 1) {
+        const narrowed = pickUnique(compatiblePartialMatches, { last4, targetKind, targetBankKeys, targetOwnerKeys });
         if (narrowed) return result(narrowed, [], { targetKind, targetBankNames });
-        return result(null, partialMatches, { targetKind, targetBankNames });
+        return result(null, compatiblePartialMatches, { targetKind, targetBankNames });
       }
     }
 
@@ -604,7 +786,7 @@ function accountKindNames(kind?: ImportAccountKind | null) {
   if (kind === "ewallet") return ["电子钱包", "钱包"];
   if (kind === "cash") return ["现金"];
   if (kind === "investment") return ["投资账户", "投资"];
-  if (kind === "loan") return [];
+  if (kind === "loan" || kind === "settlement") return [];
   return [];
 }
 
@@ -645,8 +827,23 @@ function expandBankName(value: string) {
   return expandImportBankName(value);
 }
 
+function stripAccountKindSeparatorWords(value: string) {
+  const names = new Set<string>();
+  for (const word of ACCOUNT_KIND_SEPARATOR_WORDS) {
+    const normalizedWord = normalizeImportAccountMatchKey(word);
+    const key = normalizeImportAccountMatchKey(value);
+    if (!normalizedWord || !key.includes(normalizedWord)) continue;
+    const next = value.replaceAll(word, "").trim();
+    if (next) names.add(next);
+  }
+  return Array.from(names);
+}
+
 function expandImportAccountName(value: string) {
-  const names = new Set<string>([value.trim()]);
+  const trimmed = value.trim();
+  const withoutScheduleSuffix = stripImportAccountScheduleSuffix(trimmed);
+  const names = new Set<string>([trimmed]);
+  if (withoutScheduleSuffix && withoutScheduleSuffix !== trimmed) names.add(withoutScheduleSuffix);
   const last4 = extractImportAccountLast4(value);
   const kinds = new Set<string>();
   const banks = inferBankNames(value);
@@ -662,7 +859,7 @@ function expandImportAccountName(value: string) {
   }
   if (kind === "cash") kinds.add("现金");
   if (kind === "investment") kinds.add("投资账户");
-  if (kind === "loan") {}
+  if (kind === "loan" || kind === "settlement") {}
 
   for (const kindName of kinds) {
     const normalizedKindName = normalizeImportAccountMatchKey(kindName);
@@ -686,6 +883,10 @@ function expandImportAccountName(value: string) {
         names.add(`${bank}${cardKind}(${last4})`);
       }
     }
+  }
+
+  for (const name of [...names]) {
+    for (const stripped of stripAccountKindSeparatorWords(name)) names.add(stripped);
   }
 
   return Array.from(names).filter(Boolean);

@@ -126,7 +126,7 @@ export async function setFxRate(params: {
   const fromCurrency = normalizeCurrency(params.fromCurrency);
   const toCurrency = normalizeCurrency(params.toCurrency);
   const rate = parseRate(params.rate);
-  if (!rate) throw new Error("汇率不正确");
+  if (!rate) throw new Error("Invalid exchange rate");
   const rateDate = typeof params.rateDate === "string"
     ? dateOnlyUtc(new Date(params.rateDate))
     : params.rateDate instanceof Date
@@ -195,16 +195,19 @@ export async function getConversionRate(params: {
   const cached = await prisma.fxRate.findFirst({
     where: {
       householdId: params.householdId,
-      baseCurrency: fromCurrency,
-      quoteCurrency: toCurrency,
+      OR: [
+        { baseCurrency: fromCurrency, quoteCurrency: toCurrency },
+        { baseCurrency: toCurrency, quoteCurrency: fromCurrency },
+      ],
     },
     orderBy: [{ rateDate: "desc" }, { updatedAt: "desc" }],
   });
-  if (cached) {
+  const cachedRate = cached ? parseRate(cached.rate) : null;
+  if (cached && cachedRate != null) {
     return {
       fromCurrency,
       toCurrency,
-      rate: toNumber(cached.rate),
+      rate: cached.baseCurrency === fromCurrency ? cachedRate : 1 / cachedRate,
       rateDate: ymd(cached.rateDate),
       source: cached.source,
       missing: false,

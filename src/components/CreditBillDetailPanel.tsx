@@ -252,7 +252,6 @@ export function CreditBillDetailPanel({
           categoryOptions={categoryOptions}
           tagOptions={tagOptions}
           investmentProductTypeByAccountId={investmentProductTypeByAccountId}
-          compactRows
           showAccountColumn={showCardColumn}
           accountColumnLabel={t("creditBillDetail.accountNo")}
           accountColumnMode="cardLast4"

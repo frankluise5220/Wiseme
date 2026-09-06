@@ -39,12 +39,14 @@ type AccountSnapshot = {
 
 export function propertyActionLabel(action: PropertyTransactionAction | string) {
   if (action === PropertyTransactionAction.sale || action === "sale") return "房产出售";
+  if (action === PropertyTransactionAction.disposal || action === "disposal") return "房产废弃";
   if (action === PropertyTransactionAction.improvement || action === "improvement") return "装修投入";
   return "房产购入";
 }
 
 export function propertyCashFlowDirection(action: PropertyTransactionAction | string): EntryCashFlowDirection {
   if (action === PropertyTransactionAction.sale || action === "sale") return "inflow";
+  if (action === PropertyTransactionAction.disposal || action === "disposal") return "inflow";
   if (action === PropertyTransactionAction.purchase || action === "purchase") return "outflow";
   if (action === PropertyTransactionAction.improvement || action === "improvement") return "outflow";
   return "none";

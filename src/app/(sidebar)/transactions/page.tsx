@@ -4,6 +4,7 @@ import { formatDateLocal } from "@/lib/date-utils";
 import { MobileTransactions, type MobileTransactionRow } from "@/components/mobile/MobileTransactions";
 import { MobileTransactionForm } from "@/components/mobile/MobileTransactionForm";
 import { buildAccountDisplayOption, formatAccountTableLabel } from "@/lib/account-display";
+import { getServerAccountLabelFields } from "@/lib/server/account-label-fields";
 import { getServerT } from "@/lib/server/i18n";
 import { categoryOrderBy } from "@/lib/category-order";
 
@@ -11,6 +12,7 @@ export const dynamic = "force-dynamic";
 
 export default async function TransactionsPage() {
   const t = await getServerT();
+  const accountLabelFields = await getServerAccountLabelFields();
   const { hidFilter } = await getHouseholdScope();
   const [entries, accounts, categories] = await Promise.all([
     prisma.txRecord.findMany({
@@ -53,8 +55,8 @@ export default async function TransactionsPage() {
 
   const accountDisplayById = new Map(
     accounts.map((account) => {
-      const option = buildAccountDisplayOption({ ...account, kind: String(account.kind) });
-      return [account.id, formatAccountTableLabel(option)] as const;
+      const option = buildAccountDisplayOption({ ...account, kind: String(account.kind) }, undefined, { fields: accountLabelFields });
+      return [account.id, formatAccountTableLabel(option, "", accountLabelFields)] as const;
     }),
   );
   const rows: MobileTransactionRow[] = entries.map((entry) => ({

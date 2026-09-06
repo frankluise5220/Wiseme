@@ -82,17 +82,19 @@ ENV PORT=7777
 ENV HOSTNAME=0.0.0.0
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends postgresql-client openssl ca-certificates \
+  && apt-get install -y --no-install-recommends postgresql-client openssl ca-certificates gosu \
   && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /app/.next/standalone ./
-COPY --from=build /app/.next/static ./.next/static
-COPY --from=build /app/public ./public
-COPY --from=build /app/prisma ./prisma
-COPY --from=build /app/prisma.config.ts ./prisma.config.ts
-COPY --from=prisma-deps /opt/prisma-runtime/node_modules ./node_modules
+COPY --chown=node:node --from=build /app/.next/standalone ./
+COPY --chown=node:node --from=build /app/.next/static ./.next/static
+COPY --chown=node:node --from=build /app/public ./public
+COPY --chown=node:node --from=build /app/prisma ./prisma
+COPY --chown=node:node --from=build /app/prisma.config.ts ./prisma.config.ts
+COPY --chown=node:node --from=prisma-deps /opt/prisma-runtime/node_modules ./node_modules
 COPY scripts/docker-entrypoint.sh ./docker-entrypoint.sh
-RUN chmod +x ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh \
+  && mkdir -p /app/data \
+  && chown -R node:node /app/data
 
 EXPOSE 7777
 

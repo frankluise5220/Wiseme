@@ -3,6 +3,13 @@ import { prisma } from "@/lib/db/prisma";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 import { getCurrentUser } from "@/lib/server/auth";
 
+function noStoreJson(body: unknown) {
+  const response = NextResponse.json(body);
+  response.headers.set("Cache-Control", "no-store, max-age=0");
+  response.headers.set("Pragma", "no-cache");
+  return response;
+}
+
 /**
  * GET /api/v1/auth/household-password-status
  * Queries whether an admin user of the current household has set a password.
@@ -19,7 +26,7 @@ export async function GET() {
   // When the user is not logged in, skip household-level password guidance (the login page has its own setup flow)
   const currentUser = await getCurrentUser();
   if (!currentUser) {
-    return NextResponse.json({ ok: true, hasPassword: true, adminUser: null });
+    return noStoreJson({ ok: true, hasPassword: true, adminUser: null });
   }
 
   const { householdId } = await getHouseholdScope();
@@ -45,5 +52,5 @@ export async function GET() {
     ? { id: allAdmins[0].id, name: allAdmins[0].name }
     : null;
 
-  return NextResponse.json({ ok: true, hasPassword, adminUser });
+  return noStoreJson({ ok: true, hasPassword, adminUser });
 }

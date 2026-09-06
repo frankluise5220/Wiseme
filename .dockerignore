@@ -9,6 +9,8 @@ node_modules
 .dbg
 .roo
 .claude
+.skill
+.workbuddy-ai
 .codex-logs
 .playwright-cli
 .obsidian
@@ -20,6 +22,7 @@ public/branding/*.preview.png
 public/branding/mmh-logo-*-directions.svg
 public/branding/mmh-logo-v*.svg
 docs/*.png
+preview-*.png
 *.log
 *.png
 *.jpg
@@ -27,6 +30,8 @@ docs/*.png
 *.gif
 *.webp
 *.db
+UPGRADE_AUDIT.md
+scripts/diag-*.cjs
 tmp
 tmp-*
 coverage

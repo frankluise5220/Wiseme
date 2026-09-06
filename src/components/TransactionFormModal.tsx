@@ -9,6 +9,7 @@ import { EntityCreateForm, NestedAddModal } from "./EntityCreateForm";
 import { EntryAttachmentButton, uploadEntryAttachmentFiles } from "./EntryAttachmentPanel";
 import { ModalLayerProvider, getNextModalLayerZIndex, useModalLayerZIndex } from "./ModalLayer";
 import { SmartSelect, SmartSelectOption } from "./SmartSelect";
+import { CurrencySmartSelect } from "./CurrencySmartSelect";
 import { UnifiedEntryLauncher } from "./UnifiedEntryLauncher";
 import { useAccountSSFilter } from "./accountSSFilter";
 import { kindLabel } from "@/lib/account-kinds";
@@ -33,7 +34,6 @@ import {
   isFixedAssetAccountLike,
   isFixedAssetExpenseCategoryPath,
 } from "@/lib/fixed-asset";
-import { systemCategoryLabel } from "@/lib/system-category-labels";
 import { useI18n } from "@/lib/i18n";
 import {
   buildCreditCardInstallmentSchedule,
@@ -41,13 +41,18 @@ import {
   type CreditCardInstallmentRateType,
 } from "@/lib/credit/installment";
 import { filterIncomeExpenseInstitutions } from "@/lib/institution-rules";
-import { sortCategorySources } from "@/components/categorySmartSelect";
+import { buildCategoryParentOptions, buildCategoryTreeOptions } from "@/components/categorySmartSelect";
+import { getAccountLabelFieldsPreference } from "@/lib/client/appPreferences";
+import { restrictAccountsByType } from "@/lib/client/account-dropdown-filter";
 
 type TxType = "expense" | "income" | "advance" | "transfer" | "fx" | "investment";
 type TransactionActionResult =
   | { ok: true; data?: { id?: string | null; cashEntryId?: string | null } | null }
   | { ok: false; error: string };
 type DebtTransferMode = "borrow_in" | "repay_out" | "lend_out" | "collect_in";
+
+/** Red frame marking required select fields (from/to accounts etc.). */
+const REQUIRED_FIELD_CLASS = "rounded-[10px] ring-1 ring-rose-200/80";
 
 type AccountOption = {
   id: string;
@@ -58,6 +63,10 @@ type AccountOption = {
   investProductType?: string | null;
   debtDirection?: string | null;
   institutionId?: string | null;
+  institutionType?: string | null;
+  counterpartyId?: string | null;
+  isSettlementDebt?: boolean | null;
+  isConsumerLoan?: boolean | null;
   currency?: string | null;
   billingDay?: number | null;
   isHeader?: boolean;
@@ -163,7 +172,6 @@ function formatFxQuoteAmount(value: number, locale: string) {
   });
 }
 
-const COMMON_CURRENCY_OPTIONS = ["CNY", "USD", "JPY", "HKD", "EUR", "GBP"];
 const BASE_CASH_CURRENCY = "CNY";
 
 function isForeignCurrency(value: string | null | undefined) {
@@ -190,13 +198,22 @@ function inferDebtTransferMode(
 ): DebtTransferMode | null {
   const source = sourceAccount as AccountOption | undefined;
   const target = targetAccount as AccountOption | undefined;
-  if (source?.kind === "loan") {
+  if (source?.kind === "loan" || source?.kind === "settlement") {
     return source.debtDirection === "receivable" ? "collect_in" : "borrow_in";
   }
-  if (target?.kind === "loan") {
+  if (target?.kind === "loan" || target?.kind === "settlement") {
     return target.debtDirection === "receivable" ? "lend_out" : "repay_out";
   }
   return null;
+}
+
+function isLoanDialogAccount(account: AccountOption | SmartSelectOption | undefined) {
+  const option = account as AccountOption | undefined;
+  return option?.kind === "loan" && option.isSettlementDebt !== true;
+}
+
+function debtDialogEventName(sourceAccount: AccountOption | SmartSelectOption | undefined, targetAccount: AccountOption | SmartSelectOption | undefined) {
+  return isLoanDialogAccount(sourceAccount) || isLoanDialogAccount(targetAccount) ? "mmh:loan:create" : "mmh:debt:create";
 }
 
 function findAccountIdByLabel(input: string | undefined, options: AccountOption[]) {
@@ -257,7 +274,7 @@ function buildCategoryOptionsFromSettings(categories: SettingsCategory[], type: 
 }
 
 function settingsAccountToOption(account: SettingsAccountRecord): AccountOption {
-  const display = buildAccountDisplayOption(account as Parameters<typeof buildAccountDisplayOption>[0]);
+  const display = buildAccountDisplayOption(account as Parameters<typeof buildAccountDisplayOption>[0], undefined, { fields: getAccountLabelFieldsPreference() });
   return {
     id: account.id,
     label: display.selectorLabel || display.label,
@@ -272,7 +289,7 @@ function settingsAccountToOption(account: SettingsAccountRecord): AccountOption 
 }
 
 function buildGroupedOptionsFromSettingsAccounts(accounts: SettingsAccountRecord[]): SmartSelectOption[] {
-  const displayOptions = accounts.map((account) => buildAccountDisplayOption(account as Parameters<typeof buildAccountDisplayOption>[0]));
+  const displayOptions = accounts.map((account) => buildAccountDisplayOption(account as Parameters<typeof buildAccountDisplayOption>[0], undefined, { fields: getAccountLabelFieldsPreference() }));
   const metaById = new Map(accounts.map((account) => [account.id, settingsAccountToOption(account)]));
   return buildGroupedAccountOptions(displayOptions).map((option) => (
     option.isHeader || option.isGroup ? option : { ...option, ...metaById.get(option.id) }
@@ -404,7 +421,7 @@ export function TransactionFormModal({
   const [localFixedAssetAccountSSOpts, setLocalFixedAssetAccountSSOpts] = useState(fixedAssetAccountSSOptions);
   const [localNestedFieldData, setLocalNestedFieldData] = useState<NestedFieldData | undefined>(nestedFieldData);
   const formRef = useRef<HTMLFormElement>(null);
-  const submitModeRef = useRef<SubmitMode>("close");
+  const submittingRef = useRef(false);
 
   function mergeSmartSelectOptions(base?: SmartSelectOption[], extra?: SmartSelectOption[]) {
     const merged = [...(base ?? [])];
@@ -533,97 +550,16 @@ export function TransactionFormModal({
    * so every existing category, including top-level categories, can be selected
    * as the parent.
    */
-  const categoryParentOptions = useMemo(() => {
-    // Build a parent-id → children map for all categories of current type
-    const byParentId = new Map<string | null, CategoryOption[]>();
-    for (const c of categoryList) {
-      const list = byParentId.get(c.parentId) ?? [];
-      list.push(c);
-      byParentId.set(c.parentId, list);
-    }
-    for (const [parentId, list] of byParentId) {
-      byParentId.set(parentId, sortCategorySources(list));
-    }
-
-    const options: Array<{ id: string; name: string; label: string; type: string; depth: number; parentId?: string; isGroup?: boolean }> = [];
-
-    // Recursively walk the tree, building indented options
-    function walk(parentId: string | null, depth: number, pathPrefix: string) {
-      const children = byParentId.get(parentId) ?? [];
-      for (const child of children) {
-        const rawShortName = child.label.includes(".") ? child.label.split(".").pop() ?? child.label : child.label;
-        const shortName = systemCategoryLabel(rawShortName, t);
-        const fullLabel = pathPrefix ? `${pathPrefix}.${shortName}` : shortName;
-        options.push({
-          id: child.id,
-          name: shortName,
-          label: fullLabel,
-          type: currentCategoryType,
-          depth,
-          parentId: child.parentId ?? undefined,
-          isGroup: (byParentId.get(child.id) ?? []).length > 0,
-        });
-        walk(child.id, depth + 1, fullLabel);
-      }
-    }
-
-    // Start from root (parentId=null)
-    walk(null, 0, "");
-
-    return options;
-  }, [categoryList, currentCategoryType, t]);
+  const categoryParentOptions = useMemo(
+    () => buildCategoryParentOptions(categoryList, t, currentCategoryType),
+    [categoryList, currentCategoryType, t],
+  );
 
   /** Build hierarchical SmartSelect options for category dropdown.
    * All real categories are selectable. Categories with children are collapsible
    * groups, and their caret toggles expansion without taking away selection.
    */
-  const categorySSOptions = useMemo(() => {
-    const byParentId = new Map<string | null, CategoryOption[]>();
-    for (const c of categoryList) {
-      const list = byParentId.get(c.parentId) ?? [];
-      list.push(c);
-      byParentId.set(c.parentId, list);
-    }
-    for (const [parentId, list] of byParentId) {
-      byParentId.set(parentId, sortCategorySources(list));
-    }
-
-    const opts: SmartSelectOption[] = [];
-    const INDENT = "　";
-
-    /** Walk the tree recursively.
-     *  currentGroupId tracks the nearest isHeader or isGroup ancestor for parentId linkage. */
-    function walk(parentId: string | null, level: number, currentGroupId?: string) {
-      const children = byParentId.get(parentId) ?? [];
-      for (const child of children) {
-        const rawShortName = child.label.includes(".") ? child.label.split(".").pop() ?? child.label : child.label;
-        const shortName = systemCategoryLabel(rawShortName, t);
-        const grandChildren = byParentId.get(child.id) ?? [];
-
-        if (grandChildren.length > 0) {
-          // Category with children -> collapsible group and selectable category.
-          opts.push({
-            id: child.id,
-            label: `${INDENT.repeat(level)}${shortName}`,
-            isGroup: true,
-            parentId: currentGroupId,
-          });
-          walk(child.id, level + 1, child.id);
-        } else {
-          // Leaf → regular selectable item
-          opts.push({
-            id: child.id,
-            label: `${INDENT.repeat(level)}${shortName}`,
-            parentId: currentGroupId,
-          });
-          // No deeper walk needed for leaf
-        }
-      }
-    }
-
-    walk(null, 0);
-    return opts;
-  }, [categoryList, t]);
+  const categorySSOptions = useMemo(() => buildCategoryTreeOptions(categoryList, t), [categoryList, t]);
 
   useEffect(() => {
     const nextCategoryList = txType === "income" ? incomeCategories : txType === "advance" ? (advanceCategories ?? []) : expenseCategories;
@@ -685,7 +621,7 @@ export function TransactionFormModal({
           .map((account) => account.kind)
           .filter((kind): kind is string => Boolean(kind)),
       );
-      const nextAccountOptions = allOptions.filter((option) => !allowedKinds.size || allowedKinds.has(option.kind ?? ""));
+      const nextAccountOptions = restrictAccountsByType(allOptions, (option) => !allowedKinds.size || allowedKinds.has(option.kind ?? ""));
       const nextFixedAssetAccountOptions = allOptions.filter(isFixedAssetAccountLike);
       const selectedIds = new Set([accountId, fromAccountId, toAccountId].filter(Boolean));
       setAccountList((prev) => {
@@ -702,7 +638,7 @@ export function TransactionFormModal({
       });
       const groupedAll = buildGroupedOptionsFromSettingsAccounts(rawAccounts);
       const groupedAccount = buildGroupedOptionsFromSettingsAccounts(
-        rawAccounts.filter((account) => !allowedKinds.size || allowedKinds.has(account.kind ?? "")),
+        restrictAccountsByType(rawAccounts, (account) => !allowedKinds.size || allowedKinds.has(account.kind ?? "")),
       );
       const groupedFixedAsset = buildGroupedOptionsFromSettingsAccounts(
         rawAccounts.filter(isFixedAssetAccountLike),
@@ -761,20 +697,20 @@ export function TransactionFormModal({
   ]);
 
   const {
-    ownerFilter,
-    ownerFilterLabel,
-    cycleOwnerFilter,
+    typeFilter: accountTypeFilter,
+    typeFilterLabel: accountTypeFilterLabel,
+    cycleTypeFilter: cycleAccountTypeFilter,
     filteredOptions: accountSSOptionsFiltered,
     visibleOptionIds: accountVisibleOptionIds,
-  } = useAccountSSFilter(localAccountSSOpts);
+  } = useAccountSSFilter(localAccountSSOpts, undefined, (bucket) => (bucket ? t(`accountTypeBucket.${bucket}`) : t("common.all")));
   const {
     filteredOptions: transferFiltered,
     visibleOptionIds: transferVisibleOptionIds,
-  } = useAccountSSFilter(localTransferAccountSSOpts, ownerFilter);
+  } = useAccountSSFilter(localTransferAccountSSOpts, accountTypeFilter);
   const {
     filteredOptions: fixedAssetFiltered,
     visibleOptionIds: fixedAssetVisibleOptionIds,
-  } = useAccountSSFilter(localFixedAssetAccountSSOpts, ownerFilter);
+  } = useAccountSSFilter(localFixedAssetAccountSSOpts, accountTypeFilter);
 
   const accountUsage = useAccountUsage();
   const displayTransferOptions = useMemo(() => {
@@ -885,16 +821,6 @@ export function TransactionFormModal({
     const toValue = parseMoneyDraft(fxToAmount);
     return fromValue > 0 && toValue > 0 ? toValue / fromValue : null;
   }, [amount, fxToAmount]);
-  const fxCurrencyOptions = useMemo(() => {
-    const currencies = new Set(COMMON_CURRENCY_OPTIONS);
-    for (const option of displayTransferOptions) {
-      const currency = normalizeCurrencyLabel((option as AccountOption).currency);
-      if (currency) currencies.add(currency);
-    }
-    return Array.from(currencies)
-      .filter(isForeignCurrency)
-      .sort((a, b) => COMMON_CURRENCY_OPTIONS.indexOf(a) - COMMON_CURRENCY_OPTIONS.indexOf(b));
-  }, [displayTransferOptions]);
   const fxFromAccountOptions = useMemo(
     () => displayTransferOptions.filter((option) => (option as AccountOption).kind === "bank_debit"),
     [displayTransferOptions],
@@ -905,6 +831,7 @@ export function TransactionFormModal({
       return account.id !== fromAccountId
         && account.kind !== "bank_credit"
         && account.kind !== "loan"
+        && account.kind !== "settlement"
         && isForeignCurrency(account.currency);
     }),
     [displayTransferOptions, fromAccountId],
@@ -1027,7 +954,7 @@ export function TransactionFormModal({
           return true;
         }
 
-        window.dispatchEvent(new CustomEvent("mmh:debt:create", {
+        window.dispatchEvent(new CustomEvent(debtDialogEventName(sourceAccount, targetAccount), {
           detail: {
             requestId: requestId ?? makeRequestId(operation),
             editEntryId,
@@ -1096,7 +1023,7 @@ export function TransactionFormModal({
         },
       }));
     } else if (operation === "debt") {
-      window.dispatchEvent(new CustomEvent("mmh:debt:create", {
+      window.dispatchEvent(new CustomEvent(debtDialogEventName(sourceAccount, targetAccount), {
         detail: {
           requestId: nextRequestId,
           mode: debtMode ?? (targetAccount?.debtDirection === "receivable" ? "lend_out" : "repay_out"),
@@ -1614,10 +1541,26 @@ export function TransactionFormModal({
     };
   }
 
-  async function onSubmit(e: FormEvent<HTMLFormElement>) {
+  function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (submitting) return;
+    void submitForm(e.currentTarget, "close");
+  }
 
+  async function submitForm(form: HTMLFormElement, submitMode: SubmitMode) {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await saveTransaction(form, submitMode);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  }
+
+  // Form fields + submit mode -> persisted transaction -> close or next draft.
+  // Capture the mode before awaiting so another event cannot change this save.
+  async function saveTransaction(form: HTMLFormElement, submitMode: SubmitMode) {
     if (openSpecialTransferTargetIfNeeded()) return;
 
     if (editEntryId && editEntryOriginalType === "investment" && txType !== "investment" && editEntryHasFundDetail) {
@@ -1626,7 +1569,7 @@ export function TransactionFormModal({
         message: t("txForm.fundDetailMessage"),
       });
       if (!confirmed) {
-        const formData = new FormData(e.currentTarget);
+        const formData = new FormData(form);
         formData.set("type", txType);
         formData.set("date", date);
         if (txType === "expense" || txType === "income") formData.set("postedAt", postedAt);
@@ -1635,7 +1578,6 @@ export function TransactionFormModal({
         formData.set("toNote", txType === "transfer" ? note : "");
         formData.set("entryId", editEntryId);
         formData.set("keepFundDetail", "true");
-        setSubmitting(true);
         try {
           const res = await (editAction ?? action)(formData);
           if (!res.ok) {
@@ -1648,8 +1590,6 @@ export function TransactionFormModal({
           resetDraft();
         } catch (err) {
           window.alert(String(err));
-        } finally {
-          setSubmitting(false);
         }
         return;
       }
@@ -1660,7 +1600,23 @@ export function TransactionFormModal({
       window.alert(t("txForm.alert.selectFixedAssetAccount"));
       return;
     }
-    
+
+    // Required account validation: transfers need both a source and a
+    // destination account; income/expense/advance need a posting account.
+    if (txType === "transfer") {
+      if (!fromAccountId) {
+        window.alert(t("txForm.alert.selectTransferFromAccount"));
+        return;
+      }
+      if (!toAccountId) {
+        window.alert(t("txForm.alert.selectTransferToAccount"));
+        return;
+      }
+    } else if ((txType === "income" || txType === "expense" || txType === "advance") && !accountId) {
+      window.alert(t("txForm.alert.selectAccount"));
+      return;
+    }
+
     if (txType === "fx") {
       const fromValue = parseMoneyDraft(amount);
       const toValue = parseMoneyDraft(fxToAmount);
@@ -1697,7 +1653,6 @@ export function TransactionFormModal({
         window.alert(t("txForm.alert.feePositiveOrEmpty"));
         return;
       }
-      setSubmitting(true);
       try {
         const res = await fetch("/api/v1/fx-conversions", {
           method: editEntryId ? "PATCH" : "POST",
@@ -1738,7 +1693,7 @@ export function TransactionFormModal({
         requestAnimationFrame(() => {
           dispatchFinanceDataChanged(currentFinanceRefreshDetail());
         });
-        if (submitModeRef.current === "repeat" && !editEntryId) {
+        if (submitMode === "repeat" && !editEntryId) {
           repeatDraft();
         } else {
           setOpen(false);
@@ -1747,16 +1702,13 @@ export function TransactionFormModal({
       } catch (err) {
         const msg = err instanceof Error ? err.message : t("txForm.alert.fxSaveFailed");
         window.alert(msg);
-      } finally {
-        submitModeRef.current = "close";
-        setSubmitting(false);
       }
       return;
     }
 
     let formData: FormData;
     if (txType === "investment") {
-      formData = new FormData(e.currentTarget);
+      formData = new FormData(form);
       formData.set("type", "investment");
       formData.set("date", date);
       formData.set("amount", amount);
@@ -1802,7 +1754,6 @@ export function TransactionFormModal({
         formData.set("installmentRate", installmentRate);
       }
     }
-    setSubmitting(true);
     try {
       const res = editEntryId ? await (editAction ?? action)(formData) : await action(formData);
       if (!res.ok) {
@@ -1828,7 +1779,7 @@ export function TransactionFormModal({
       requestAnimationFrame(() => {
         dispatchFinanceDataChanged(currentFinanceRefreshDetail());
       });
-      if (submitModeRef.current === "repeat" && !editEntryId) {
+      if (submitMode === "repeat" && !editEntryId) {
         repeatDraft();
       } else {
         setOpen(false);
@@ -1837,9 +1788,6 @@ export function TransactionFormModal({
     } catch (err) {
       const msg = err instanceof Error ? err.message : t("txForm.alert.saveFailed");
       window.alert(msg);
-    } finally {
-      submitModeRef.current = "close";
-      setSubmitting(false);
     }
   }
 
@@ -2091,13 +2039,15 @@ export function TransactionFormModal({
                         </div>
                         <div className="space-y-1">
                           <div className="form-label">{t("txForm.belongingAccount")}</div>
-                          <SmartSelect mode="single" value={accountId}
-                            onChange={(id: string) => { setAccountId(id); recordRecentAccount(id); }}
-                            options={displayAccountOptions} placeholder={t("txForm.selectPlaceholder")}
-                            onCreateClick={() => { void openAccountCreate("account"); }}
-                            onCycleOwnerFilter={cycleOwnerFilter}
-                            ownerFilterLabel={ownerFilterLabel}
-                            behavior={compactAccountSelectBehavior} />
+                          <div className={REQUIRED_FIELD_CLASS}>
+                            <SmartSelect mode="single" value={accountId}
+                              onChange={(id: string) => { setAccountId(id); recordRecentAccount(id); }}
+                              options={displayAccountOptions} placeholder={t("txForm.selectPlaceholder")}
+                              onCreateClick={() => { void openAccountCreate("account"); }}
+                              onCycleOwnerFilter={cycleAccountTypeFilter}
+                              ownerFilterLabel={accountTypeFilterLabel}
+                              behavior={compactAccountSelectBehavior} />
+                          </div>
                         </div>
                       </div>
                     </>
@@ -2112,13 +2062,15 @@ export function TransactionFormModal({
                           <div className="form-label">
                             {isCreditCardAccount ? t("txForm.recordAccount") : (txType === "income" ? t("txForm.receiveAccount") : t("txForm.cashAccount"))}
                           </div>
-                          <SmartSelect mode="single" value={accountId}
-                            onChange={(id: string) => { setAccountId(id); recordRecentAccount(id); }}
-                            options={displayAccountOptions} placeholder={t("txForm.selectPlaceholder")}
-                            onCreateClick={() => { void openAccountCreate("account"); }}
-                            onCycleOwnerFilter={cycleOwnerFilter}
-                            ownerFilterLabel={ownerFilterLabel}
-                            behavior={compactAccountSelectBehavior} />
+                          <div className={REQUIRED_FIELD_CLASS}>
+                            <SmartSelect mode="single" value={accountId}
+                              onChange={(id: string) => { setAccountId(id); recordRecentAccount(id); }}
+                              options={displayAccountOptions} placeholder={t("txForm.selectPlaceholder")}
+                              onCreateClick={() => { void openAccountCreate("account"); }}
+                              onCycleOwnerFilter={cycleAccountTypeFilter}
+                              ownerFilterLabel={accountTypeFilterLabel}
+                              behavior={compactAccountSelectBehavior} />
+                          </div>
                         </div>
                       </div>
                       <div className="grid grid-cols-2 gap-3">
@@ -2266,8 +2218,8 @@ export function TransactionFormModal({
                         placeholder={t("txForm.selectFixedAssetAccount")}
                         onCreateClick={() => setFixedAssetAccountNestedOpen(true)}
                         createLabel={t("txForm.createFixedAssetAccount")}
-                        onCycleOwnerFilter={cycleOwnerFilter}
-                        ownerFilterLabel={ownerFilterLabel}
+                        onCycleOwnerFilter={cycleAccountTypeFilter}
+                        ownerFilterLabel={accountTypeFilterLabel}
                         behavior={fixedAssetAccountSelectBehavior}
                       />
                     </div>
@@ -2414,7 +2366,7 @@ export function TransactionFormModal({
                       }}
                         options={fxFromAccountOptions} placeholder={t("txForm.fxFromAccountPlaceholder")}
                         onCreateClick={() => { void openAccountCreate("from"); }} createLabel={t("txForm.addDebitAccount")}
-                        onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
+                        onCycleOwnerFilter={cycleAccountTypeFilter} ownerFilterLabel={accountTypeFilterLabel}
                         behavior={compactAccountSelectBehavior} />
                     </div>
                     <div className="space-y-1">
@@ -2428,7 +2380,7 @@ export function TransactionFormModal({
                         options={fxToAccountOptions}
                         placeholder={t("txForm.fxToAccountPlaceholder", { currency: fxToCurrencyDraft })}
                         onCreateClick={() => { void openAccountCreate("to"); }} createLabel={t("settings.accounts.add")}
-                        onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
+                        onCycleOwnerFilter={cycleAccountTypeFilter} ownerFilterLabel={accountTypeFilterLabel}
                         behavior={compactAccountSelectBehavior} />
                     </div>
                   </div>
@@ -2447,15 +2399,15 @@ export function TransactionFormModal({
                           {fxToCurrency}
                         </div>
                       ) : (
-                        <select
+                        <CurrencySmartSelect
                           value={fxToCurrencyDraft}
-                          onChange={(event) => setFxToCurrencyDraft(event.target.value)}
-                          className="form-input"
-                        >
-                          {fxCurrencyOptions.map((currency) => (
-                            <option key={`to-${currency}`} value={currency}>{currency}</option>
-                          ))}
-                        </select>
+                          onChange={setFxToCurrencyDraft}
+                          onSubmitted={setFxToCurrencyDraft}
+                          excludeCodes={[BASE_CASH_CURRENCY]}
+                          labelSystem={(code) => t(`entityForm.currency.${code.toLowerCase()}`, { defaultValue: code })}
+                          placeholder={t("txForm.fxToCurrency")}
+                          density="compact"
+                        />
                       )}
                     </div>
                   </div>
@@ -2548,11 +2500,13 @@ export function TransactionFormModal({
                     <div className="grid grid-cols-[1fr_auto_1fr] gap-3 items-end">
                       <div className="space-y-1">
                         <div className="form-label">{t("txForm.transferFrom")}</div>
-                        <SmartSelect mode="single" value={fromAccountId} onChange={v => { setFromAccountId(v); setFromAccountIdEdited(true); recordRecentAccount(v); }}
-                          options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
-                          onCreateClick={() => { void openAccountCreate("from"); }} createLabel={t("settings.accounts.add")}
-                          onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
-                          behavior={compactAccountSelectBehavior} />
+                        <div className={REQUIRED_FIELD_CLASS}>
+                          <SmartSelect mode="single" value={fromAccountId} onChange={v => { setFromAccountId(v); setFromAccountIdEdited(true); recordRecentAccount(v); }}
+                            options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
+                            onCreateClick={() => { void openAccountCreate("from"); }} createLabel={t("settings.accounts.add")}
+                            onCycleOwnerFilter={cycleAccountTypeFilter} ownerFilterLabel={accountTypeFilterLabel}
+                            behavior={compactAccountSelectBehavior} />
+                        </div>
                       </div>
                       <div className="flex flex-col items-center pb-0.5">
                         <div className="h-6 flex items-center justify-center text-emerald-600 mb-1"><ArrowRight className="w-4 h-4" /></div>
@@ -2561,21 +2515,25 @@ export function TransactionFormModal({
                       </div>
                       <div className="space-y-1">
                         <div className="form-label">{t("txForm.transferTo")}</div>
-                        <SmartSelect mode="single" value={toAccountId} onChange={(v) => { setToAccountId(v); recordRecentAccount(v); }}
-                          options={stockTransferToOptions} placeholder={t("txForm.selectPlaceholder")}
-                          onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
-                          behavior={compactAccountSelectBehavior} />
+                        <div className={REQUIRED_FIELD_CLASS}>
+                          <SmartSelect mode="single" value={toAccountId} onChange={(v) => { setToAccountId(v); recordRecentAccount(v); }}
+                            options={stockTransferToOptions} placeholder={t("txForm.selectPlaceholder")}
+                            onCycleOwnerFilter={cycleAccountTypeFilter} ownerFilterLabel={accountTypeFilterLabel}
+                            behavior={compactAccountSelectBehavior} />
+                        </div>
                       </div>
                     </div>
                   ) : isCreditCardAccount ? (
                     <div className="grid grid-cols-[1fr_auto_1fr] gap-3 items-end">
                       <div className="space-y-1">
                         <div className="form-label">{t("txForm.transferFrom")}</div>
-                        <SmartSelect mode="single" value={fromAccountId} onChange={v => { setFromAccountId(v); setFromAccountIdEdited(true); recordRecentAccount(v); }}
-                          options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
-                          onCreateClick={() => { void openAccountCreate("from"); }} createLabel={t("settings.accounts.add")}
-                          onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
-                          behavior={compactAccountSelectBehavior} />
+                        <div className={REQUIRED_FIELD_CLASS}>
+                          <SmartSelect mode="single" value={fromAccountId} onChange={v => { setFromAccountId(v); setFromAccountIdEdited(true); recordRecentAccount(v); }}
+                            options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
+                            onCreateClick={() => { void openAccountCreate("from"); }} createLabel={t("settings.accounts.add")}
+                            onCycleOwnerFilter={cycleAccountTypeFilter} ownerFilterLabel={accountTypeFilterLabel}
+                            behavior={compactAccountSelectBehavior} />
+                        </div>
                       </div>
                       <div className="flex flex-col items-center pb-0.5">
                         <div className="h-6 flex items-center justify-center text-emerald-600 mb-1"><ArrowRight className="w-4 h-4" /></div>
@@ -2584,22 +2542,26 @@ export function TransactionFormModal({
                       </div>
                       <div className="space-y-1">
                         <div className="form-label">{t("txForm.transferTo")}</div>
-                        <SmartSelect mode="single" value={toAccountId} onChange={(v) => { setToAccountId(v); recordRecentAccount(v); }}
-                          options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
-                          onCreateClick={() => { void openAccountCreate("to"); }} createLabel={t("settings.accounts.add")}
-                          onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
-                          behavior={compactAccountSelectBehavior} />
+                        <div className={REQUIRED_FIELD_CLASS}>
+                          <SmartSelect mode="single" value={toAccountId} onChange={(v) => { setToAccountId(v); recordRecentAccount(v); }}
+                            options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
+                            onCreateClick={() => { void openAccountCreate("to"); }} createLabel={t("settings.accounts.add")}
+                            onCycleOwnerFilter={cycleAccountTypeFilter} ownerFilterLabel={accountTypeFilterLabel}
+                            behavior={compactAccountSelectBehavior} />
+                        </div>
                       </div>
                     </div>
                   ) : (
                     <div className="grid grid-cols-[1fr_auto_1fr] gap-3 items-end">
                       <div className="space-y-1">
                         <div className="form-label">{t("txForm.transferFrom")}</div>
-                        <SmartSelect mode="single" value={fromAccountId} onChange={(v) => { setFromAccountId(v); recordRecentAccount(v); }}
-                          options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
-                          onCreateClick={() => { void openAccountCreate("from"); }} createLabel={t("settings.accounts.add")}
-                          onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
-                          behavior={compactAccountSelectBehavior} />
+                        <div className={REQUIRED_FIELD_CLASS}>
+                          <SmartSelect mode="single" value={fromAccountId} onChange={(v) => { setFromAccountId(v); recordRecentAccount(v); }}
+                            options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
+                            onCreateClick={() => { void openAccountCreate("from"); }} createLabel={t("settings.accounts.add")}
+                            onCycleOwnerFilter={cycleAccountTypeFilter} ownerFilterLabel={accountTypeFilterLabel}
+                            behavior={compactAccountSelectBehavior} />
+                        </div>
                       </div>
                       <div className="flex items-center justify-center pb-0.5">
                         <button type="button" className="secondary-button h-9 w-9 px-0 text-slate-700"
@@ -2607,11 +2569,13 @@ export function TransactionFormModal({
                       </div>
                       <div className="space-y-1">
                         <div className="form-label">{t("txForm.transferTo")}</div>
-                        <SmartSelect mode="single" value={toAccountId} onChange={(v) => { setToAccountId(v); recordRecentAccount(v); }}
-                          options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
-                          onCreateClick={() => { void openAccountCreate("to"); }} createLabel={t("settings.accounts.add")}
-                          onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
-                          behavior={compactAccountSelectBehavior} />
+                        <div className={REQUIRED_FIELD_CLASS}>
+                          <SmartSelect mode="single" value={toAccountId} onChange={(v) => { setToAccountId(v); recordRecentAccount(v); }}
+                            options={displayTransferOptions} placeholder={t("txForm.selectPlaceholder")}
+                            onCreateClick={() => { void openAccountCreate("to"); }} createLabel={t("settings.accounts.add")}
+                            onCycleOwnerFilter={cycleAccountTypeFilter} ownerFilterLabel={accountTypeFilterLabel}
+                            behavior={compactAccountSelectBehavior} />
+                        </div>
                       </div>
                     </div>
                   )}
@@ -2651,8 +2615,8 @@ export function TransactionFormModal({
                     type="button"
                     className="secondary-button h-9 px-3 border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
                     onClick={() => {
-                      submitModeRef.current = "repeat";
-                      formRef.current?.requestSubmit();
+                      const form = formRef.current;
+                      if (form?.reportValidity()) void submitForm(form, "repeat");
                     }}
                     disabled={submitting}
                   >
@@ -2662,7 +2626,6 @@ export function TransactionFormModal({
                 <button
                   type="submit"
                   className="primary-button h-9 px-3"
-                  onClick={() => { submitModeRef.current = "close"; }}
                   disabled={submitting}
                 >
                   {submitting ? t("txForm.saving") : editEntryId ? t("txForm.saveChanges") : t("common.save")}
@@ -2794,7 +2757,7 @@ export function TransactionFormModal({
         title={t("txForm.addInstitution")}
         nameLabel={t("txForm.institutionName")}
         namePlaceholder={t("txForm.institutionNamePlaceholder")}
-        allowedInstitutionTypes={["bank", "payment", "ewallet"]}
+        allowedInstitutionTypes={["bank", "payment"]}
         existingNames={incomeExpenseInstitutionOptions.map((item) => item.name)}
         onCreated={(id, name, extra) => {
           const next = { id, name, type: extra?.type ?? "payment" };

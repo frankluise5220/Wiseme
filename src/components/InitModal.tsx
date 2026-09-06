@@ -11,6 +11,8 @@ import { kindLabel } from "@/lib/account-kinds";
 import { buildAccountDisplayOption } from "@/lib/account-display";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { useI18n } from "@/lib/i18n";
+import { getAccountLabelFieldsPreference } from "@/lib/client/appPreferences";
+import { restrictAccountsByType } from "@/lib/client/account-dropdown-filter";
 
 /* Types */
 
@@ -96,7 +98,7 @@ export function InitModal({
   const tempIdCounter = useRef(0);
 
   function rebuildSSOptions(accounts: AccountOption[], investAccounts: AccountOption[]) {
-    setCashSSOptions(accounts.filter((a) => ["cash", "bank_debit", "ewallet"].includes(a.kind)).map((a) => ({ id: a.id, label: a.label, subLabel: kindLabel(a.kind) })));
+    setCashSSOptions(restrictAccountsByType(accounts, (a) => ["cash", "bank_debit", "ewallet"].includes(a.kind)).map((a) => ({ id: a.id, label: a.label, subLabel: kindLabel(a.kind) })));
     setInvestSSOptions(investAccounts.map((a) => ({ id: a.id, label: a.label, subLabel: kindLabel(a.kind) })));
   }
 
@@ -107,11 +109,11 @@ export function InitModal({
       const data = await res.json();
       if (data.ok && data.accounts) {
         const accounts: AccountOption[] = data.accounts.map((a: any) => {
-          const display = buildAccountDisplayOption(a);
+          const display = buildAccountDisplayOption(a, undefined, { fields: getAccountLabelFieldsPreference() });
           return { id: a.id, label: display.selectorLabel || display.label, kind: a.kind };
         });
-        const cashAccounts = accounts.filter((a) => ["cash", "bank_debit", "ewallet"].includes(a.kind));
-        const investAccounts = accounts.filter((a) => a.kind === "investment");
+        const cashAccounts = restrictAccountsByType(accounts, (a) => ["cash", "bank_debit", "ewallet"].includes(a.kind));
+        const investAccounts = restrictAccountsByType(accounts, (a) => a.kind === "investment");
         setAllAccounts(accounts);
         setAccountGroups((data.groups ?? []).map((g: any) => ({ id: g.id, name: g.name })));
         setInstitutions((data.institutions ?? []).map((it: any) => ({ id: it.id, name: it.name, type: it.type ?? undefined })));
@@ -432,8 +434,7 @@ export function InitModal({
   );
 
   const balanceAccountSSOptions = useMemo(
-    () => allAccounts
-      .filter((account) => account.kind !== "investment")
+    () => restrictAccountsByType(allAccounts, (account) => account.kind !== "investment")
       .map((account) => ({ id: account.id, label: account.label, subLabel: kindLabel(account.kind) })),
     [allAccounts],
   );
@@ -510,7 +511,7 @@ export function InitModal({
                     <th className="text-left px-3 py-2 border-b border-slate-200">{t("detail.column.date")}</th>
                   </tr></thead>
                   <tbody>{balanceRows.map((row) => {
-                    const kl = row.kind ? (row.kind === "bank_debit" ? t("account.kind.bank_debit") : row.kind === "bank_credit" ? t("account.kind.bank_credit") : row.kind === "cash" ? t("account.kind.cash") : row.kind === "loan" ? t("account.kind.loan") : row.kind === "ewallet" ? t("account.kind.ewallet") : row.kind) : "";
+                    const kl = row.kind ? (row.kind === "bank_debit" ? t("account.kind.bank_debit") : row.kind === "bank_credit" ? t("account.kind.bank_credit") : row.kind === "cash" ? t("account.kind.cash") : row.kind === "loan" ? t("account.kind.loan") : row.kind === "settlement" ? t("account.kind.settlement") : row.kind === "ewallet" ? t("account.kind.ewallet") : row.kind) : "";
                     const accountOptions = getBalanceAccountSSOptions(row);
                     return (<tr key={row.tempId} className="hover:bg-slate-50">
                       <td className="px-3 py-1.5 border-b border-slate-100 text-sm text-slate-700">

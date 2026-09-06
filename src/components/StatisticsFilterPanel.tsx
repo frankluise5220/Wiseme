@@ -32,13 +32,16 @@ type Props = {
   accountParam?: string;
   periodParam?: string;
   hideRange?: boolean;
+  /** Draft level to show when the URL has no explicit level (default "year"). */
+  defaultLevel?: "year" | "month";
 };
 
-export function StatisticsFilterPanel({ allAccounts, allInstitutions = [], allUsers = [], year, reportPath = "/statistics", exportHref, exportFilename, start, end, availableYears = [], baseParams = {}, accountParam, periodParam, hideRange = false }: Props) {
+export function StatisticsFilterPanel({ allAccounts, allInstitutions = [], allUsers = [], year, reportPath = "/statistics", exportHref, exportFilename, start, end, availableYears = [], baseParams = {}, accountParam, periodParam, hideRange = false, defaultLevel = "year" }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { t } = useI18n();
-  const [level, setLevel] = useState<"year" | "month">(searchParams.get(periodParam ?? "groupBy") === "month" || searchParams.get("level") === "month" ? "month" : "year");
+  const urlLevel = searchParams.get(periodParam ?? "groupBy") === "month" || searchParams.get("level") === "month" ? "month" : searchParams.get(periodParam ?? "groupBy") === "year" || searchParams.get("level") === "year" ? "year" : null;
+  const [level, setLevel] = useState<"year" | "month">(urlLevel ?? defaultLevel);
   const [accountId, setAccountId] = useState(searchParams.get(accountParam ?? "accounts") ?? "");
   const [institutionId, setInstitutionId] = useState(searchParams.get("institutionIds") ?? searchParams.get("institutionId") ?? "");
   const [userIds, setUserIds] = useState<string[]>(searchParams.get("userIds")?.split(",").filter(Boolean) ?? (searchParams.get("userId") ? [searchParams.get("userId")!] : []));
@@ -68,6 +71,7 @@ export function StatisticsFilterPanel({ allAccounts, allInstitutions = [], allUs
     } else {
       params.set("level", level);
       if (level === "month") { params.set("startMonth", startMonth); params.set("endMonth", endMonth); }
+      else { params.set("startYear", startYear); params.set("endYear", endYear); }
     }
     if (nextAccountId) params.set(accountParam ?? (reportPath === "/reports" ? "accountId" : "accounts"), nextAccountId);
     if (nextInstitutionId) {

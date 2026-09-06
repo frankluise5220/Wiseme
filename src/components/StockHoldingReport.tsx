@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { formatCurrencyMoney, formatMoney, formatPercent } from "@/lib/format";
 import { pnlClassFromRedUp } from "@/lib/client/colors";
 import type {
@@ -8,6 +9,7 @@ import type {
 } from "@/lib/server/stock-holding-report";
 import { stockMarketLabel } from "@/lib/stock/market";
 import { useI18n } from "@/lib/i18n";
+import { AdvancedDataTable, type AdvancedDataTableColumn, type AdvancedDataTableSummaryRow } from "@/components/AdvancedDataTable";
 
 type Props = {
   rows: StockHoldingReportRow[];
@@ -32,11 +34,180 @@ function compactDate(value: string | null) {
   return /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date.slice(5, 7)}.${date.slice(8, 10)}` : String(value ?? "");
 }
 
+function renderReportStockNameCode(row: StockHoldingReportRow) {
+  const displayName = String(row.stockName || row.stockCode || "-").trim() || "-";
+  const code = [stockMarketLabel(row.market), row.stockCode].filter(Boolean).join(" ");
+  return (
+    <div className="flex min-w-0 items-center gap-1.5" title={[displayName, code].filter(Boolean).join(" ")}>
+      <span className="min-w-0 truncate font-medium text-slate-900">{displayName}</span>
+      {code ? (
+        <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] leading-none text-slate-500">
+          {code}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function StockHoldingReport({ rows, totals, isRedUp }: Props) {
   const currency = rows[0]?.currency || "CNY";
   const best = [...rows].sort((a, b) => b.totalProfit - a.totalProfit)[0] ?? null;
   const worst = [...rows].sort((a, b) => a.totalProfit - b.totalProfit)[0] ?? null;
   const { t } = useI18n();
+  const stockReportDefaultSort = useMemo(() => ({ key: "marketValue", direction: "desc" as const }), []);
+  const columns = useMemo<AdvancedDataTableColumn<StockHoldingReportRow>[]>(() => [
+    {
+      key: "stock",
+      label: t("stockHoldingReport.colStock"),
+      width: 190,
+      minWidth: 150,
+      headerClassName: "text-left",
+      filterText: (row) => `${row.stockName} ${row.stockCode}`,
+      filterSearchText: (row) => `${stockMarketLabel(row.market)} ${row.stockCode} ${row.stockName}`,
+      sortValue: (row) => `${row.market}:${row.stockCode}:${row.stockName}`,
+      render: renderReportStockNameCode,
+    },
+    {
+      key: "account",
+      label: t("stockHoldingReport.colAccount"),
+      width: 160,
+      minWidth: 120,
+      headerClassName: "text-left",
+      className: "text-slate-600",
+      filterText: (row) => row.accountName,
+      sortValue: (row) => row.accountName,
+      render: (row) => <span className="block truncate" title={row.accountName}>{row.accountName}</span>,
+    },
+    {
+      key: "quantity",
+      label: t("stockHoldingReport.colQuantity"),
+      width: 92,
+      minWidth: 76,
+      align: "right",
+      className: "tabular-nums",
+      filterText: (row) => String(row.quantity),
+      sortValue: (row) => row.quantity,
+      render: (row) => formatMoney(row.quantity),
+    },
+    {
+      key: "avgCost",
+      label: t("stockHoldingReport.colAvgCost"),
+      width: 92,
+      minWidth: 76,
+      align: "right",
+      className: "tabular-nums",
+      filterText: (row) => String(row.avgCost),
+      sortValue: (row) => row.avgCost,
+      render: (row) => formatMoney(row.avgCost),
+    },
+    {
+      key: "cost",
+      label: t("stockHoldingReport.colCost"),
+      width: 112,
+      minWidth: 88,
+      align: "right",
+      className: "tabular-nums",
+      filterText: (row) => String(row.cost),
+      sortValue: (row) => row.cost,
+      render: (row) => formatCurrencyMoney(row.cost, row.currency),
+    },
+    {
+      key: "closePrice",
+      label: t("stockHoldingReport.colClosePrice"),
+      width: 120,
+      minWidth: 96,
+      align: "right",
+      className: "tabular-nums",
+      filterText: (row) => row.latestPrice == null ? "-" : String(row.latestPrice),
+      sortValue: (row) => row.latestPrice ?? null,
+      render: (row) => (
+        <>
+          {row.latestPrice == null ? "-" : formatMoney(row.latestPrice)}
+          {row.latestPriceDate ? <span className="ml-1 text-xs text-slate-400">({compactDate(row.latestPriceDate)})</span> : null}
+        </>
+      ),
+    },
+    {
+      key: "marketValue",
+      label: t("stockHoldingReport.colMarketValue"),
+      width: 116,
+      minWidth: 92,
+      align: "right",
+      className: "tabular-nums",
+      filterText: (row) => String(row.marketValue),
+      sortValue: (row) => row.marketValue,
+      render: (row) => formatCurrencyMoney(row.marketValue, row.currency),
+    },
+    {
+      key: "floatingPnL",
+      label: t("stockHoldingReport.colFloatingPnL"),
+      width: 112,
+      minWidth: 88,
+      align: "right",
+      className: "tabular-nums",
+      filterText: (row) => String(row.floatingPnL),
+      sortValue: (row) => row.floatingPnL,
+      render: (row) => <span className={valueClass(row.floatingPnL, isRedUp)}>{signedMoney(row.floatingPnL, row.currency)}</span>,
+    },
+    {
+      key: "floatingPnLRate",
+      label: t("stockHoldingReport.colFloatingPnLRate"),
+      width: 104,
+      minWidth: 82,
+      align: "right",
+      className: "tabular-nums",
+      filterText: (row) => String(row.floatingPnLRate),
+      sortValue: (row) => row.floatingPnLRate,
+      render: (row) => <span className={valueClass(row.floatingPnLRate, isRedUp)}>{formatRate(row.floatingPnLRate)}</span>,
+    },
+    {
+      key: "historicalProfit",
+      label: t("stockHoldingReport.colRealized"),
+      width: 112,
+      minWidth: 88,
+      align: "right",
+      className: "tabular-nums",
+      filterText: (row) => String(row.historicalProfit),
+      sortValue: (row) => row.historicalProfit,
+      render: (row) => <span className={valueClass(row.historicalProfit, isRedUp)}>{signedMoney(row.historicalProfit, row.currency)}</span>,
+    },
+    {
+      key: "totalProfit",
+      label: t("stockHoldingReport.colTotalPnL"),
+      width: 112,
+      minWidth: 88,
+      align: "right",
+      className: "tabular-nums",
+      filterText: (row) => String(row.totalProfit),
+      sortValue: (row) => row.totalProfit,
+      render: (row) => <span className={valueClass(row.totalProfit, isRedUp)}>{signedMoney(row.totalProfit, row.currency)}</span>,
+    },
+  ], [isRedUp, t]);
+  const summaryRow = useMemo<AdvancedDataTableSummaryRow | undefined>(() => {
+    if (rows.length === 0) return undefined;
+    return {
+      cells: {
+        stock: <span className="text-xs font-medium text-slate-700">{t("common.total")}</span>,
+        quantity: <span className="tabular-nums text-xs text-slate-700">{formatMoney(totals.quantity)}</span>,
+        cost: <span className="tabular-nums text-xs text-slate-700">{formatCurrencyMoney(totals.cost, currency)}</span>,
+        marketValue: <span className="tabular-nums text-xs text-slate-700">{formatCurrencyMoney(totals.marketValue, currency)}</span>,
+        floatingPnL: <span className={`tabular-nums text-xs ${valueClass(totals.floatingPnL, isRedUp)}`}>{signedMoney(totals.floatingPnL, currency)}</span>,
+        floatingPnLRate: <span className={`tabular-nums text-xs ${valueClass(totals.floatingPnLRate, isRedUp)}`}>{formatRate(totals.floatingPnLRate)}</span>,
+        historicalProfit: <span className={`tabular-nums text-xs ${valueClass(totals.historicalProfit, isRedUp)}`}>{signedMoney(totals.historicalProfit, currency)}</span>,
+        totalProfit: <span className={`tabular-nums text-xs ${valueClass(totals.totalProfit, isRedUp)}`}>{signedMoney(totals.totalProfit, currency)}</span>,
+      },
+      rowClassName: "bg-slate-50",
+      cellClassName: "text-xs",
+    };
+  }, [currency, isRedUp, rows.length, t, totals]);
+  const emptyText = (
+    <div className="flex min-h-[260px] flex-col items-center justify-center px-6 text-center">
+      <div className="text-sm font-medium text-slate-900">{t("stockHoldingReport.empty")}</div>
+      <div className="mt-2 max-w-md text-xs leading-5 text-slate-500">
+        {t("stockHoldingReport.emptyDesc")}
+      </div>
+    </div>
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -71,84 +242,23 @@ export function StockHoldingReport({ rows, totals, isRedUp }: Props) {
               : ""}
           </div>
         </div>
-        {rows.length > 0 ? (
-          <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 z-10 bg-slate-50 text-xs text-slate-500">
-                <tr className="border-b border-slate-200">
-                  <th className="px-3 py-2 text-left font-medium">{t("stockHoldingReport.colStock")}</th>
-                  <th className="px-3 py-2 text-left font-medium">{t("stockHoldingReport.colAccount")}</th>
-                  <th className="px-3 py-2 text-right font-medium">{t("stockHoldingReport.colQuantity")}</th>
-                  <th className="px-3 py-2 text-right font-medium">{t("stockHoldingReport.colAvgCost")}</th>
-                  <th className="px-3 py-2 text-right font-medium">{t("stockHoldingReport.colCost")}</th>
-                  <th className="px-3 py-2 text-right font-medium">{t("stockHoldingReport.colClosePrice")}</th>
-                  <th className="px-3 py-2 text-right font-medium">{t("stockHoldingReport.colMarketValue")}</th>
-                  <th className="px-3 py-2 text-right font-medium">{t("stockHoldingReport.colFloatingPnL")}</th>
-                  <th className="px-3 py-2 text-right font-medium">{t("stockHoldingReport.colFloatingPnLRate")}</th>
-                  <th className="px-3 py-2 text-right font-medium">{t("stockHoldingReport.colRealized")}</th>
-                  <th className="px-3 py-2 text-right font-medium">{t("stockHoldingReport.colTotalPnL")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <tr key={row.id} className="border-b border-slate-100 hover:bg-slate-50">
-                    <td className="px-3 py-2">
-                      <div className="font-medium text-slate-900">{row.stockName}</div>
-                      <div className="text-xs text-slate-500">{stockMarketLabel(row.market)} {row.stockCode}</div>
-                    </td>
-                    <td className="px-3 py-2 text-xs text-slate-600">{row.accountName}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatMoney(row.quantity)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatMoney(row.avgCost)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatCurrencyMoney(row.cost, row.currency)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{row.latestPrice == null ? "-" : formatMoney(row.latestPrice)}{row.latestPriceDate ? <span className="ml-1 text-xs text-slate-400">({compactDate(row.latestPriceDate)})</span> : null}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatCurrencyMoney(row.marketValue, row.currency)}</td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${valueClass(row.floatingPnL, isRedUp)}`}>
-                      {signedMoney(row.floatingPnL, row.currency)}
-                    </td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${valueClass(row.floatingPnLRate, isRedUp)}`}>
-                      {formatRate(row.floatingPnLRate)}
-                    </td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${valueClass(row.historicalProfit, isRedUp)}`}>
-                      {signedMoney(row.historicalProfit, row.currency)}
-                    </td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${valueClass(row.totalProfit, isRedUp)}`}>
-                      {signedMoney(row.totalProfit, row.currency)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot className="sticky bottom-0 bg-slate-50">
-                <tr>
-                  <td className="px-3 py-2 text-xs font-medium text-slate-700" colSpan={2}>{t("common.total")}</td>
-                  <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{formatMoney(totals.quantity)}</td>
-                  <td className="px-3 py-2" />
-                  <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{formatCurrencyMoney(totals.cost, currency)}</td>
-                  <td className="px-3 py-2" />
-                  <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{formatCurrencyMoney(totals.marketValue, currency)}</td>
-                  <td className={`px-3 py-2 text-right text-xs tabular-nums ${valueClass(totals.floatingPnL, isRedUp)}`}>
-                    {signedMoney(totals.floatingPnL, currency)}
-                  </td>
-                  <td className={`px-3 py-2 text-right text-xs tabular-nums ${valueClass(totals.floatingPnLRate, isRedUp)}`}>
-                    {formatRate(totals.floatingPnLRate)}
-                  </td>
-                  <td className={`px-3 py-2 text-right text-xs tabular-nums ${valueClass(totals.historicalProfit, isRedUp)}`}>
-                    {signedMoney(totals.historicalProfit, currency)}
-                  </td>
-                  <td className={`px-3 py-2 text-right text-xs tabular-nums ${valueClass(totals.totalProfit, isRedUp)}`}>
-                    {signedMoney(totals.totalProfit, currency)}
-                  </td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        ) : (
-          <div className="flex min-h-[260px] flex-1 flex-col items-center justify-center px-6 text-center">
-            <div className="text-sm font-medium text-slate-900">{t("stockHoldingReport.empty")}</div>
-            <div className="mt-2 max-w-md text-xs leading-5 text-slate-500">
-              {t("stockHoldingReport.emptyDesc")}
-            </div>
-          </div>
-        )}
+        <div className="min-h-0 flex-1">
+          <AdvancedDataTable
+            storageKey="mmh_stock_holding_report_v1"
+            columns={columns}
+            rows={rows}
+            rowKey={(row) => row.id}
+            emptyText={emptyText}
+            minTableWidth={1280}
+            rowClassName={() => "hover:bg-slate-50"}
+            showFilters={false}
+            fillHeight
+            toolbarMode="none"
+            draggableRows={false}
+            defaultSort={stockReportDefaultSort}
+            summaryRow={summaryRow}
+          />
+        </div>
       </div>
     </div>
   );

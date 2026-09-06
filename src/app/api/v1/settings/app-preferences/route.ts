@@ -1,16 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  DEFAULT_ACCOUNT_LABEL_FIELDS,
+  EMPTY_ACCOUNT_LABEL_FIELDS_VALUE,
   SIDEBAR_CREDIT_CARD_LABEL_TEMPLATE,
+  normalizeAccountLabelFields,
   normalizeCreditCardLabelTemplate,
+  parseAccountLabelFields,
+  serializeAccountLabelFields,
+  type AccountLabelField,
 } from "@/lib/account-display";
 import { normalizeDateDisplayFormat } from "@/lib/date-utils";
+import { normalizeRowHeightMode } from "@/lib/row-height";
+import {
+  HOUSEHOLD_COOKIE as HOUSEHOLD_KEY,
+  SESSION_DAYS_COOKIE as SESSION_DAYS_KEY,
+  USER_ID_COOKIE as USER_ID_KEY,
+  USERNAME_COOKIE as USERNAME_KEY,
+  VERIFIED_COOKIE as VERIFIED_KEY,
+  createVerifiedSessionValue,
+  sessionCookieOptions,
+  verifyVerifiedSessionValue,
+} from "@/lib/server/session-cookies";
 
 /**
  * GET /api/v1/settings/app-preferences returns browser-scoped display preferences.
  * PUT /api/v1/settings/app-preferences accepts any subset of the returned fields and
  * persists them as cookies without changing ledger data or financial calculations.
  */
-const SESSION_DAYS_KEY = "mmh_session_days";
 const FUND_UNITS_DECIMALS_KEY = "mmh_fund_units_decimals";
 const AI_PANEL_ENABLED_KEY = "mmh_ai_panel_enabled";
 const TIME_ZONE_MODE_KEY = "mmh_time_zone_mode";
@@ -26,11 +42,9 @@ const DATE_DISPLAY_FORMAT_KEY = "mmh_date_display_format";
 const SIDEBAR_HIDE_INITIAL_DATA_KEY = "sidebar_hide_initial_data";
 const SIDEBAR_SHOW_FIXED_ASSETS_KEY = "sidebar_show_fixed_assets";
 const DETAIL_DATE_BACKGROUND_KEY = "detail_date_background";
-const COMPACT_ROW_HEIGHT_KEY = "advanced_data_table_compact_row_height";
-const VERIFIED_KEY = "mmh_access_password_verified";
-const USER_ID_KEY = "mmh_user_id";
-const USERNAME_KEY = "mmh_username";
-const HOUSEHOLD_KEY = "householdId";
+const ROW_HEIGHT_MODE_KEY = "advanced_data_table_row_height_mode";
+const ACCOUNT_LABEL_FIELDS_KEY = "mmh_account_label_fields";
+const ACCOUNT_DROPDOWN_RESTRICT_TYPE_KEY = "mmh_account_dropdown_restrict_type";
 
 function normalizeSessionDays(input: unknown) {
   const n = Number(input);
@@ -76,10 +90,25 @@ function normalizeDisplayLanguage(input: unknown) {
   return input === "en-US" || input === "ja-JP" || input === "zh-CN" ? input : "zh-CN";
 }
 
-function normalizeCompactRowHeight(input: unknown) {
-  const n = Number(input);
-  if (!Number.isFinite(n)) return 30;
-  return Math.min(Math.max(Math.round(n), 25), 35);
+function normalizeAccountLabelFieldsPreference(input: unknown): AccountLabelField[] {
+  if (Array.isArray(input)) {
+    // An explicitly provided value wins even when it is empty: the user may
+    // want to strip the label down to the raw account name.
+    return normalizeAccountLabelFields(input, []);
+  }
+  if (typeof input === "string") {
+    const value = input.trim();
+    if (!value) return [];
+    if (value === EMPTY_ACCOUNT_LABEL_FIELDS_VALUE) return [];
+    return parseAccountLabelFields(value);
+  }
+  if (input === null) return [];
+  return [...DEFAULT_ACCOUNT_LABEL_FIELDS];
+}
+
+function accountLabelFieldsFromPreferenceCookie(value: string | undefined): AccountLabelField[] {
+  if (value === undefined) return [...DEFAULT_ACCOUNT_LABEL_FIELDS];
+  return parseAccountLabelFields(value);
 }
 
 export async function GET(req: NextRequest) {
@@ -105,7 +134,9 @@ export async function GET(req: NextRequest) {
   const sidebarHideInitialData = normalizeBoolean(req.cookies.get(SIDEBAR_HIDE_INITIAL_DATA_KEY)?.value, false);
   const sidebarShowFixedAssets = normalizeBoolean(req.cookies.get(SIDEBAR_SHOW_FIXED_ASSETS_KEY)?.value, true);
   const detailDateBackground = normalizeBoolean(req.cookies.get(DETAIL_DATE_BACKGROUND_KEY)?.value, false);
-  const compactRowHeight = normalizeCompactRowHeight(req.cookies.get(COMPACT_ROW_HEIGHT_KEY)?.value);
+  const rowHeightMode = normalizeRowHeightMode(req.cookies.get(ROW_HEIGHT_MODE_KEY)?.value);
+  const accountLabelFields = accountLabelFieldsFromPreferenceCookie(req.cookies.get(ACCOUNT_LABEL_FIELDS_KEY)?.value);
+  const accountDropdownRestrictType = normalizeBoolean(req.cookies.get(ACCOUNT_DROPDOWN_RESTRICT_TYPE_KEY)?.value, true);
   return NextResponse.json({
     ok: true,
     sessionDays,
@@ -124,7 +155,9 @@ export async function GET(req: NextRequest) {
     sidebarHideInitialData,
     sidebarShowFixedAssets,
     detailDateBackground,
-    compactRowHeight,
+    rowHeightMode,
+    accountLabelFields,
+    accountDropdownRestrictType,
   });
 }
 
@@ -147,7 +180,9 @@ export async function PUT(req: NextRequest) {
     sidebarHideInitialData?: unknown;
     sidebarShowFixedAssets?: unknown;
     detailDateBackground?: unknown;
-    compactRowHeight?: unknown;
+    rowHeightMode?: unknown;
+    accountLabelFields?: unknown;
+    accountDropdownRestrictType?: unknown;
   } : {};
   const hasSessionDays = Object.prototype.hasOwnProperty.call(prefs, "sessionDays");
   const hasFundUnitsDecimals = Object.prototype.hasOwnProperty.call(prefs, "fundUnitsDecimals");
@@ -165,7 +200,9 @@ export async function PUT(req: NextRequest) {
   const hasSidebarHideInitialData = Object.prototype.hasOwnProperty.call(prefs, "sidebarHideInitialData");
   const hasSidebarShowFixedAssets = Object.prototype.hasOwnProperty.call(prefs, "sidebarShowFixedAssets");
   const hasDetailDateBackground = Object.prototype.hasOwnProperty.call(prefs, "detailDateBackground");
-  const hasCompactRowHeight = Object.prototype.hasOwnProperty.call(prefs, "compactRowHeight");
+  const hasRowHeightMode = Object.prototype.hasOwnProperty.call(prefs, "rowHeightMode");
+  const hasAccountLabelFields = Object.prototype.hasOwnProperty.call(prefs, "accountLabelFields");
+  const hasAccountDropdownRestrictType = Object.prototype.hasOwnProperty.call(prefs, "accountDropdownRestrictType");
   const sessionDays = normalizeSessionDays(hasSessionDays ? prefs.sessionDays : req.cookies.get(SESSION_DAYS_KEY)?.value ?? 30);
   const fundUnitsDecimals = normalizeFundUnitsDecimals(hasFundUnitsDecimals ? prefs.fundUnitsDecimals : req.cookies.get(FUND_UNITS_DECIMALS_KEY)?.value ?? 2);
   const aiPanelEnabled = normalizeBoolean(hasAiPanelEnabled ? prefs.aiPanelEnabled : req.cookies.get(AI_PANEL_ENABLED_KEY)?.value, true);
@@ -212,8 +249,17 @@ export async function PUT(req: NextRequest) {
     hasDetailDateBackground ? prefs.detailDateBackground : req.cookies.get(DETAIL_DATE_BACKGROUND_KEY)?.value,
     false,
   );
-  const compactRowHeight = normalizeCompactRowHeight(
-    hasCompactRowHeight ? prefs.compactRowHeight : req.cookies.get(COMPACT_ROW_HEIGHT_KEY)?.value,
+  const rowHeightMode = normalizeRowHeightMode(
+    hasRowHeightMode ? prefs.rowHeightMode : req.cookies.get(ROW_HEIGHT_MODE_KEY)?.value,
+  );
+  const accountLabelFields = hasAccountLabelFields
+    ? normalizeAccountLabelFieldsPreference(prefs.accountLabelFields)
+    : accountLabelFieldsFromPreferenceCookie(req.cookies.get(ACCOUNT_LABEL_FIELDS_KEY)?.value);
+  const accountDropdownRestrictType = normalizeBoolean(
+    hasAccountDropdownRestrictType
+      ? prefs.accountDropdownRestrictType
+      : req.cookies.get(ACCOUNT_DROPDOWN_RESTRICT_TYPE_KEY)?.value,
+    true,
   );
   const maxAge = sessionDays * 24 * 60 * 60;
 
@@ -235,7 +281,9 @@ export async function PUT(req: NextRequest) {
     sidebarHideInitialData,
     sidebarShowFixedAssets,
     detailDateBackground,
-    compactRowHeight,
+    rowHeightMode,
+    accountLabelFields,
+    accountDropdownRestrictType,
   });
   response.cookies.set(SESSION_DAYS_KEY, String(sessionDays), {
     path: "/",
@@ -333,7 +381,19 @@ export async function PUT(req: NextRequest) {
     httpOnly: false,
     sameSite: "lax",
   });
-  response.cookies.set(COMPACT_ROW_HEIGHT_KEY, String(compactRowHeight), {
+  response.cookies.set(ROW_HEIGHT_MODE_KEY, String(rowHeightMode), {
+    path: "/",
+    maxAge: 60 * 60 * 24 * 365,
+    httpOnly: false,
+    sameSite: "lax",
+  });
+  response.cookies.set(ACCOUNT_LABEL_FIELDS_KEY, serializeAccountLabelFields(accountLabelFields), {
+    path: "/",
+    maxAge: 60 * 60 * 24 * 365,
+    httpOnly: false,
+    sameSite: "lax",
+  });
+  response.cookies.set(ACCOUNT_DROPDOWN_RESTRICT_TYPE_KEY, accountDropdownRestrictType ? "1" : "0", {
     path: "/",
     maxAge: 60 * 60 * 24 * 365,
     httpOnly: false,
@@ -344,37 +404,19 @@ export async function PUT(req: NextRequest) {
   const userId = req.cookies.get(USER_ID_KEY)?.value;
   const username = req.cookies.get(USERNAME_KEY)?.value;
   const householdId = req.cookies.get(HOUSEHOLD_KEY)?.value;
-  if (verified === "ok") {
-    response.cookies.set(VERIFIED_KEY, verified, {
-      path: "/",
-      maxAge,
-      httpOnly: true,
-      sameSite: "lax",
-    });
+  const verifiedSession = verifyVerifiedSessionValue(verified, userId);
+  const authCookieOptions = sessionCookieOptions(maxAge, req);
+  if (verifiedSession.ok) {
+    response.cookies.set(VERIFIED_KEY, createVerifiedSessionValue(verifiedSession.userId, maxAge), authCookieOptions);
   }
   if (userId) {
-    response.cookies.set(USER_ID_KEY, userId, {
-      path: "/",
-      maxAge,
-      httpOnly: true,
-      sameSite: "lax",
-    });
+    response.cookies.set(USER_ID_KEY, userId, authCookieOptions);
   }
   if (username) {
-    response.cookies.set(USERNAME_KEY, username, {
-      path: "/",
-      maxAge,
-      httpOnly: false,
-      sameSite: "lax",
-    });
+    response.cookies.set(USERNAME_KEY, username, authCookieOptions);
   }
   if (householdId) {
-    response.cookies.set(HOUSEHOLD_KEY, householdId, {
-      path: "/",
-      maxAge,
-      httpOnly: false,
-      sameSite: "lax",
-    });
+    response.cookies.set(HOUSEHOLD_KEY, householdId, authCookieOptions);
   }
 
   return response;

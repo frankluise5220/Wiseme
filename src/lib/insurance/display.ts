@@ -1,4 +1,4 @@
-﻿export type InsuranceMetricMode = "balance" | "coverage" | "hybrid";
+export type InsuranceMetricMode = "balance" | "coverage" | "hybrid";
 
 const BALANCE_PRODUCT_TYPES = new Set([
   "savings",

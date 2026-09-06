@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { computeOverviewSummary } from "@/lib/server/overview-summary";
 import { getHouseholdScope } from "@/lib/server/household-scope";
+import { accountLabelFieldsFromRequest } from "@/lib/server/account-label-fields";
 import { DISPLAY_LANGUAGE_COOKIE } from "@/lib/server/i18n";
 
 export const dynamic = "force-dynamic";
@@ -69,7 +70,9 @@ export async function GET(req: NextRequest) {
     const ctx = await getHouseholdScope();
     const raw = req.cookies.get(DISPLAY_LANGUAGE_COOKIE)?.value;
     const language = raw === "en-US" || raw === "ja-JP" ? raw : "zh-CN";
-    const data = await computeOverviewSummary(ctx, undefined, language);
+    const data = await computeOverviewSummary(ctx, undefined, language, {
+      accountLabelFields: accountLabelFieldsFromRequest(req),
+    });
     return NextResponse.json({ ok: true, data });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to read overview summary";

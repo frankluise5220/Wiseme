@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
+import { getCurrentUser, isAdmin } from "@/lib/server/auth";
 import { getOrCreateMasterKey, decrypt, isEncrypted } from "@/lib/auth/encrypt";
 import { normalizeAiApiMode } from "@/lib/ai/config";
 import { buildResponsesRequestBody, extractResponsesText } from "@/lib/ai/responses";
@@ -84,6 +85,11 @@ async function getActiveModel() {
 }
 
 export async function POST() {
+  const user = await getCurrentUser();
+  if (!isAdmin(user)) {
+    return NextResponse.json({ ok: false, code: "ADMIN_ONLY", error: "Administrator access required." }, { status: 403 });
+  }
+
   try {
     const config = await getActiveModel();
     if (!config) return NextResponse.json({ ok: false, error: "没有活跃的 AI 模型" }, { status: 400 });
@@ -92,7 +98,6 @@ export async function POST() {
     const cleanUrl = baseUrl.replace(/\/$/, "");
     const today = new Date().toISOString().slice(0, 10);
 
-    // Clear old results
     await prisma.commandTestResult.deleteMany({});
 
     let okCount = 0, failCount = 0;
@@ -185,6 +190,11 @@ export async function POST() {
 }
 
 export async function GET() {
+  const user = await getCurrentUser();
+  if (!isAdmin(user)) {
+    return NextResponse.json({ ok: false, code: "ADMIN_ONLY", error: "Administrator access required." }, { status: 403 });
+  }
+
   const results = await prisma.commandTestResult.findMany({
     orderBy: { index: "asc" },
   });

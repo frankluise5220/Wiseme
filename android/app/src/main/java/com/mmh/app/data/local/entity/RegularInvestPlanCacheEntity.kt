@@ -16,6 +16,7 @@ data class RegularInvestPlanCacheEntity(
     @ColumnInfo(name = "cash_account_institution_name") val cashAccountInstitutionName: String?,
     @ColumnInfo(name = "fund_code") val fundCode: String,
     @ColumnInfo(name = "fund_name") val fundName: String,
+    @ColumnInfo(name = "plan_name") val planName: String?,
     @ColumnInfo(name = "fund_product_type") val fundProductType: String?,
     val amount: Double,
     @ColumnInfo(name = "interval_unit") val intervalUnit: String,

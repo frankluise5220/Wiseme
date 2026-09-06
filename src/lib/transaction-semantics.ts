@@ -97,8 +97,41 @@ export function isCreditCardRepaymentTransfer(entry: CreditCardRepaymentLike) {
 
 function statementMonthForBillSide(date: Date, account: StatementAccountLike | null | undefined) {
   if (!account?.billingDay) return null;
-  if (account.kind !== "bank_credit" && account.kind !== "loan") return null;
+  if (account.kind !== "bank_credit" && account.kind !== "loan" && account.kind !== "settlement") return null;
   return toStatementMonth(date, account.billingDay);
+}
+
+/**
+ * Returns true for transfer records whose cash movement represents a debt-principal
+ * flow (borrow/lend, repayment, collection) and should not be counted as income
+ * or expense in cash-flow statistics.  These are:
+ *   debt_borrow_in         — money I borrowed (principal enters my cash account)
+ *   debt_financed_purchase — installment purchase (principal enters my cash account)
+ *   debt_lend_out          — money I lent out (principal leaves my cash account)
+ *   debt_collect_in        — money I borrowed / collected back (principal enters my cash account)
+ *   debt_repay_out         — principal repaid to a creditor
+ *   debt_prepay_out        — early repayment of principal
+ *   scheduled_task         — scheduled repayment (same as debt_repay_out)
+ *
+ * Only the interest portion (handled separately via getBusinessResultStatisticItems)
+ * should appear in income/expense statistics.
+ *
+ * ⚠️ 必须包含 `debt_borrow_in` / `debt_financed_purchase`：当 scope 排除债务账户时，
+ * 这两种 source 的现金方向（现金账户 in、债务账户 out）会触发 `isToSelf && !isFromSelf`，
+ * 本金会落入"收入来源"饼图。这是统计页与 API 端点都必须调用的过滤函数，
+ * 任何漏配都会让借到的钱变成"收入"被错误呈现。
+ */
+export function isDebtPrincipalTransfer(entry: { source?: string | null } | null | undefined) {
+  const src = entry?.source ?? "";
+  return (
+    src === "debt_borrow_in" ||
+    src === "debt_financed_purchase" ||
+    src === "debt_lend_out" ||
+    src === "debt_collect_in" ||
+    src === "debt_repay_out" ||
+    src === "debt_prepay_out" ||
+    src === "scheduled_task"
+  );
 }
 
 export function statementMonthForTransfer(

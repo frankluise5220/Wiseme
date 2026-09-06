@@ -24,3 +24,15 @@
 *.pdf binary
 *.zip binary
 *.db binary
+
+# Release archives should omit local-only docs, skills, and one-off tools.
+.github/** export-ignore
+docs/** export-ignore
+deploy/** export-ignore
+skills/** export-ignore
+scripts/archive/** export-ignore
+scripts/caizhi/** export-ignore
+scripts/codex-*.cjs export-ignore
+scripts/mh8-csv-to-backup.cjs export-ignore
+scripts/install-windows.bat export-ignore
+logo/logo.jpg export-ignore

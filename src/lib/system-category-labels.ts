@@ -258,6 +258,7 @@ const SYSTEM_CATEGORY_LABEL_KEYS: Record<string, string> = {
   "住院": "systemCategory.hospitalization",
   "转账": "systemCategory.transfer",
   "装修": "systemCategory.homeRenovation",
+  "资金账户": "systemCategory.fundAccount",
   "装修投入": "systemCategory.renovation",
   "子女育儿": "systemCategory.childcareParenting",
   "宗教香火": "systemCategory.religionOfferings",

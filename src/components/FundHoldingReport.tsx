@@ -347,7 +347,7 @@ export function FundHoldingReport({ rows, clearedRows, totals, isRedUp, groupMod
       render: (row) => (row.isGroup ? (
         <span className="flex min-w-0 items-center gap-1">
           {expandToggle(holdings.expanded.has(row.groupId), row.groupId, holdings.toggle)}
-          <span className="truncate text-xs font-medium text-slate-800">{row.label}</span>
+          <span className="truncate font-medium text-slate-800">{row.label}</span>
           {row.subLabel ? <span className="shrink-0 text-[11px] text-slate-500">{row.subLabel}</span> : null}
         </span>
       ) : (
@@ -365,7 +365,7 @@ export function FundHoldingReport({ rows, clearedRows, totals, isRedUp, groupMod
       filterText: (row) => row.accountLabel,
       sortValue: (row) => row.accountLabel,
       render: (row) => (
-        <span className="block truncate text-xs text-slate-600" title={row.accountLabel}>{row.accountLabel}</span>
+        <span className="block truncate text-slate-600" title={row.accountLabel}>{row.accountLabel}</span>
       ),
     },
     {
@@ -475,7 +475,7 @@ export function FundHoldingReport({ rows, clearedRows, totals, isRedUp, groupMod
       render: (row) => (row.isGroup ? (
         <span className="flex min-w-0 items-center gap-1">
           {expandToggle(cleared.expanded.has(row.groupId), row.groupId, cleared.toggle)}
-          <span className="truncate text-xs font-medium text-slate-800">{row.label}</span>
+          <span className="truncate font-medium text-slate-800">{row.label}</span>
           {row.subLabel ? <span className="shrink-0 text-[11px] text-slate-500">{row.subLabel}</span> : null}
         </span>
       ) : (
@@ -493,7 +493,7 @@ export function FundHoldingReport({ rows, clearedRows, totals, isRedUp, groupMod
       filterText: (row) => row.accountLabel,
       sortValue: (row) => row.accountLabel,
       render: (row) => (
-        <span className="block truncate text-xs text-slate-600" title={row.accountLabel}>{row.accountLabel}</span>
+        <span className="block truncate text-slate-600" title={row.accountLabel}>{row.accountLabel}</span>
       ),
     },
     {
@@ -671,7 +671,6 @@ export function FundHoldingReport({ rows, clearedRows, totals, isRedUp, groupMod
             minTableWidth={1280}
             showFilters={false}
             fillHeight
-            compactRows
             toolbarMode="none"
             draggableRows={false}
             defaultSort={{ key: "marketValue", direction: "desc" }}
@@ -701,7 +700,6 @@ export function FundHoldingReport({ rows, clearedRows, totals, isRedUp, groupMod
             minTableWidth={1080}
             showFilters={false}
             fillHeight
-            compactRows
             toolbarMode="none"
             draggableRows={false}
             sortRows={sortCleared}

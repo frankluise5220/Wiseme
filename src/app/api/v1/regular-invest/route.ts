@@ -7,19 +7,20 @@ import { normalizeNonNegativeDays, setFundConfirmDays, setFundConfirmDaysInTx, s
 import { setFundFeeRate, setFundFeeRateInTx } from "@/lib/fund/feeRate";
 import { getFundProfileNameMap, normalizeFundDisplayName, resolveFundName } from "@/lib/fund/fundProfile";
 import { getHouseholdScope } from "@/lib/server/household-scope";
-import { decodeScheduledTaskMemo, encodeScheduledTaskMemo, normalizeScheduledTaskType, scheduledTaskTypeLabel } from "@/lib/scheduled-task";
+import { decodeScheduledTaskMemo, encodeScheduledTaskMemo, getLoanScheduledPlanRole, normalizeScheduledTaskType, scheduledTaskTypeLabel } from "@/lib/scheduled-task";
 import { revalidateAfterInvestChange, revalidateAfterTxChange } from "@/lib/server/revalidate";
 import { calcInitialScheduledRunDate as calcInitialRunDate, calcResumedScheduledRunDate as calcResumedRunDate, skipWeekend } from "@/lib/scheduled-task-date";
 import { deriveRegularInvestNextRunDate } from "@/lib/server/regular-invest-plan";
-import { isInstallmentRepaymentMethod, normalizeLoanRepaymentMethod } from "@/lib/loan-repayment";
+import { allowsZeroAnnualRateRepaymentMethod, normalizeLoanRepaymentMethod } from "@/lib/loan-repayment";
 
 /**
  * /api/v1/regular-invest
  *
  * GET lists scheduled tasks. POST creates fund regular-invest, transfer,
  * insurance-premium, fixed-income, or fixed-expense tasks. PUT updates task
- * metadata/status. Fixed income and fixed expense store category/note fields in
- * the task memo and generate ordinary TxRecord rows when executed.
+ * metadata/status, including the optional user-editable planName display field.
+ * Fixed income and fixed expense store category/note fields in the task memo and
+ * generate ordinary TxRecord rows when executed.
  */
 
 function normalizeIntervalUnit(value: unknown): IntervalUnit {
@@ -125,8 +126,9 @@ export async function GET(req: NextRequest) {
         .map((plan) => plan.fundCode),
     );
 
-    // System-level scheduled tasks (loan repayment plans) are shown in the plan
-    // table but marked read-only: users can see the schedule, not stop/edit it.
+    // Mortgage bills ("bill" loan plans) are system-generated: the schedule and
+    // the rate (PBOC/LPR driven) are derived from the loan, so they are shown
+    // read-only. Auto-debit transfer plans remain user-editable.
     return NextResponse.json({
       ok: true,
       plans: plans.map((plan) => {
@@ -139,9 +141,11 @@ export async function GET(req: NextRequest) {
           : plan.targetName;
         return {
           ...plan,
+          planName: plan.planName ?? null,
           fundName: displayFundName,
           targetName: displayTargetName,
-          isSystemTask: scheduledTask.type === "loan_repayment",
+          isSystemTask: scheduledTask.type === "loan_repayment" && getLoanScheduledPlanRole(scheduledTask) === "bill",
+          taskLoanPlanRole: getLoanScheduledPlanRole(scheduledTask),
           accountInstitutionName: plan.Account_RegularInvestPlan_accountIdToAccount.Institution?.name ?? "",
           cashAccountInstitutionName: plan.Account_RegularInvestPlan_cashAccountIdToAccount?.Institution?.name ?? "",
         };
@@ -164,6 +168,7 @@ export async function POST(req: NextRequest) {
       insuranceProductId,
       fundCode,
       fundName,
+      planName,
       fundProductType,
       amount,
       intervalUnit = "month" as IntervalUnit,
@@ -193,7 +198,7 @@ export async function POST(req: NextRequest) {
     const requiresCashAccount = scheduledTaskType === "transfer" || scheduledTaskType === "loan_repayment" || isInsuranceTask;
     const loanRepaymentMethod = normalizeLoanRepaymentMethod(typeof repaymentMethod === "string" ? repaymentMethod : null);
     const parsedLoanAnnualRate = parseOptionalNonNegativeNumber(annualRate);
-    const loanAnnualRate = parsedLoanAnnualRate ?? (isLoanTask && isInstallmentRepaymentMethod(loanRepaymentMethod) ? 0 : null);
+    const loanAnnualRate = parsedLoanAnnualRate ?? (isLoanTask && allowsZeroAnnualRateRepaymentMethod(loanRepaymentMethod) ? 0 : null);
     const loanRepaymentIntervalMonths = parsePositiveInteger(repaymentIntervalMonths, 1);
     const taskCategoryId = cleanOptionalString(categoryId);
     const taskCategoryName = cleanOptionalString(categoryName);
@@ -303,6 +308,7 @@ export async function POST(req: NextRequest) {
           cashAccountName: cashAcc?.name || null,
           fundCode: isFundTask ? fundCode : scheduledTaskType,
           fundName: taskTitle,
+          planName: cleanOptionalString(planName) ?? taskTitle,
           taskType: scheduledTaskType,
           targetName: taskTitle,
           insuranceProductName: isInsuranceTask ? insuranceProductName ?? taskTitle : null,
@@ -333,6 +339,7 @@ export async function POST(req: NextRequest) {
             annualRate: isLoanTask ? loanAnnualRate : null,
             repaymentMethod: isLoanTask ? loanRepaymentMethod : null,
             repaymentIntervalMonths: isLoanTask ? loanRepaymentIntervalMonths : null,
+            loanPlanRole: isLoanTask ? "auto_debit" : null,
           }),
           skipPendingPreceding: isFundTask ? skipPendingPreceding !== false : false,
         },
@@ -369,6 +376,7 @@ export async function POST(req: NextRequest) {
         ...createdPlan,
         taskType: scheduledTaskType,
         taskTypeLabel: scheduledTaskTypeLabel(scheduledTaskType),
+        planName: createdPlan.planName ?? null,
         taskTitle,
         taskFromAccountId: cashAccountId || null,
         taskToAccountId: effectiveAccountId,
@@ -412,6 +420,7 @@ export async function PUT(req: NextRequest) {
       insuranceProductId,
       fundCode,
       fundName,
+      planName,
       accountId,
       amount,
       intervalUnit,
@@ -444,10 +453,12 @@ export async function PUT(req: NextRequest) {
     const existingTaskForAction = decodeScheduledTaskMemo(existing.memo);
     const actionUsesBusinessDays = existingTaskForAction.type === "fund_regular_invest";
 
-    // System-level plans (loan repayment) are read-only here: the schedule is
-    // derived from the loan and managed through loan flows, not this endpoint.
-    if (existingTaskForAction.type === "loan_repayment") {
-      return NextResponse.json({ ok: false, code: "SYSTEM_MANAGED_PLAN", error: "贷款还款计划由系统管理，不可手动修改" }, { status: 403 });
+    // Mortgage bills ("bill" loan plans) are read-only here: the bill schedule
+    // and the rate (PBOC/LPR driven) are derived from the loan and managed
+    // through the loan flows, not this endpoint. Auto-debit transfer plans
+    // stay user-editable below.
+    if (existingTaskForAction.type === "loan_repayment" && getLoanScheduledPlanRole(existingTaskForAction) === "bill") {
+      return NextResponse.json({ ok: false, code: "SYSTEM_MANAGED_PLAN", error: "房贷账单由系统生成（利率由人行/LPR调整），不可作为计划任务修改" }, { status: 403 });
     }
 
     // Status actions
@@ -468,7 +479,15 @@ export async function PUT(req: NextRequest) {
         return NextResponse.json({ ok: false, code: "PLAN_NOT_PAUSED", error: "只有暂停状态的计划才能恢复" }, { status: 400 });
       }
       // Resume from the current period; do not backfill runs missed while paused.
-      const nextRunDate = calcResumedRunDate(existing.nextRunDate, new Date(), actionUsesBusinessDays);
+      const nextRunDate = calcResumedRunDate(
+        existing.nextRunDate,
+        new Date(),
+        existing.intervalUnit,
+        existing.intervalValue,
+        existing.executionDay,
+        actionUsesBusinessDays,
+        existing.secondaryExecutionDay,
+      );
 
       const plan = await prisma.regularInvestPlan.update({
         where: { id },
@@ -495,9 +514,17 @@ export async function PUT(req: NextRequest) {
 
     // Regular update
     const updateData: any = {};
+    const hasPlanName = Object.prototype.hasOwnProperty.call(body, "planName");
     const existingTask = decodeScheduledTaskMemo(existing.memo);
     const existingTaskType = normalizeScheduledTaskType(existing.taskType ?? existingTask.type);
     const nextTaskType = normalizeScheduledTaskType(taskType || existingTaskType);
+    if (existingTaskType === "loan_repayment" && amount != null) {
+      const requestedAmount = parseOptionalNonNegativeNumber(amount);
+      const currentAmount = Number(existing.amount ?? 0);
+      if (requestedAmount == null || Math.abs(requestedAmount - currentAmount) > 0.001) {
+        return NextResponse.json({ ok: false, code: "LOAN_REPAYMENT_AMOUNT_LOCKED", error: "Loan repayment amount is generated by the repayment schedule and cannot be changed." }, { status: 403 });
+      }
+    }
     const isFundTask = nextTaskType === "fund_regular_invest";
     const isInsuranceTask = nextTaskType === "insurance_premium";
     const isLoanTask = nextTaskType === "loan_repayment";
@@ -508,7 +535,7 @@ export async function PUT(req: NextRequest) {
         : normalizeLoanRepaymentMethod(existingTask.repaymentMethod);
     const parsedNextAnnualRate =
       annualRate !== undefined ? parseOptionalNonNegativeNumber(annualRate) : existingTask.annualRate ?? null;
-    const nextAnnualRate = parsedNextAnnualRate ?? (isLoanTask && isInstallmentRepaymentMethod(nextRepaymentMethod) ? 0 : null);
+    const nextAnnualRate = parsedNextAnnualRate ?? (isLoanTask && allowsZeroAnnualRateRepaymentMethod(nextRepaymentMethod) ? 0 : null);
     const nextRepaymentIntervalMonths =
       repaymentIntervalMonths !== undefined ? parsePositiveInteger(repaymentIntervalMonths, 1) : existingTask.repaymentIntervalMonths ?? 1;
     const nextCategoryId = categoryId !== undefined ? cleanOptionalString(categoryId) : existingTask.categoryId ?? null;
@@ -678,6 +705,7 @@ export async function PUT(req: NextRequest) {
       updateData.cashAccountName = null;
     }
     if (memo != null) updateData.memo = memo || null;
+    if (hasPlanName) updateData.planName = cleanOptionalString(planName);
     if (skipPendingPreceding !== undefined) (updateData as any).skipPendingPreceding = skipPendingPreceding;
     updateData.memo = encodeScheduledTaskMemo({
       type: nextTaskType,
@@ -691,6 +719,7 @@ export async function PUT(req: NextRequest) {
       annualRate: isLoanTask ? nextAnnualRate : null,
       repaymentMethod: isLoanTask ? nextRepaymentMethod : null,
       repaymentIntervalMonths: isLoanTask ? nextRepaymentIntervalMonths : null,
+      loanPlanRole: isLoanTask ? getLoanScheduledPlanRole(existingTask) ?? "auto_debit" : null,
     });
     if (!isFundTask) {
       updateData.fundCode = nextTaskType;
@@ -700,6 +729,32 @@ export async function PUT(req: NextRequest) {
       updateData.arrivalDays = 0;
       updateData.feeRate = 0;
       updateData.skipPendingPreceding = false;
+    }
+
+    // Auto-debit loan transfer plans are user-editable, but only for the
+    // funding (cash) account, next run date and plan name.
+    // The repayment schedule and the rate (PBOC/LPR driven) are derived from
+    // the loan and must be changed through the debt module. The memo is
+    // rebuilt from the existing payload so loan-derived fields (LPR discount,
+    // rate adjustments, original total runs, role) are preserved.
+    if (existingTaskType === "loan_repayment") {
+      const loanUpdateData: any = {};
+      if (updateData.cashAccountId !== undefined) {
+        loanUpdateData.cashAccountId = updateData.cashAccountId;
+        loanUpdateData.cashAccountName = updateData.cashAccountName;
+      }
+      if (updateData.nextRunDate !== undefined) loanUpdateData.nextRunDate = updateData.nextRunDate;
+      if (updateData.planName !== undefined) loanUpdateData.planName = updateData.planName;
+      loanUpdateData.memo = encodeScheduledTaskMemo({
+        ...existingTask,
+        fromAccountId: updateData.cashAccountId !== undefined ? updateData.cashAccountId : existing.cashAccountId,
+        toAccountId: existing.accountId,
+      });
+      const plan = await prisma.regularInvestPlan.update({
+        where: { id },
+        data: loanUpdateData,
+      });
+      return NextResponse.json({ ok: true, plan });
     }
 
     const plan = await prisma.regularInvestPlan.update({

@@ -1,4 +1,0 @@
-interface:
-  display_name: "MMH Product Memory"
-  short_description: "Keep MMH product rules aligned."
-  default_prompt: "Use $mmh-product-memory to align this MMH change with stable product memory."

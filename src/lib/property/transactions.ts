@@ -46,6 +46,10 @@ function saleRecovery(row: { amount: unknown; fee?: unknown | null; tax?: unknow
   return Math.max(0, Math.abs(toNumber(row.amount)) - Math.abs(toNumber(row.fee)) - Math.abs(toNumber(row.tax)));
 }
 
+function isMortgageLoanAccount(account: { kind: AccountKind; isConsumerLoan?: boolean | null } | null | undefined) {
+  return account?.kind === AccountKind.loan && account.isConsumerLoan !== true;
+}
+
 export async function linkExpenseToFixedAsset(
   client: TxClient,
   params: {
@@ -74,6 +78,15 @@ export async function linkExpenseToFixedAsset(
     select: { id: true, name: true, kind: true, investProductType: true, fixedAssetType: true, currency: true },
   });
   if (!propertyAccount) throw new Error("Fixed asset account not found");
+  const fundingAccount = await client.account.findFirst({
+    where: {
+      id: params.cashEntry.accountId,
+      householdId: params.householdId,
+      isPlaceholder: { not: true },
+    },
+    select: { id: true, kind: true, isConsumerLoan: true },
+  });
+  const mortgageLoanAccountId = isMortgageLoanAccount(fundingAccount) ? (fundingAccount?.id ?? null) : null;
 
   const requestedPropertyAssetId = params.propertyAssetId?.trim() ?? "";
   const requestedPropertyAsset = requestedPropertyAssetId
@@ -119,6 +132,7 @@ export async function linkExpenseToFixedAsset(
         data: {
           householdId: params.householdId,
           accountId: propertyAccount.id,
+          mortgageLoanAccountId,
           name: propertyName,
           assetType: nextAssetType,
           propertyType: "fixed_asset",
@@ -133,6 +147,12 @@ export async function linkExpenseToFixedAsset(
       });
       if (targetAsset.assetType !== nextAssetType) {
         await client.propertyAsset.update({ where: { id: targetAsset.id }, data: { assetType: nextAssetType } });
+      }
+      if (mortgageLoanAccountId) {
+        await client.propertyAsset.update({
+          where: { id: targetAsset.id },
+          data: { mortgageLoanAccountId },
+        });
       }
       targetPropertyAssetId = targetAsset.id;
     }
@@ -226,11 +246,11 @@ export async function linkExpenseToFixedAsset(
   });
 
   const row = await client.propertyTransaction.create({
-    data: {
-      householdId: params.householdId,
-      accountId: propertyAccount.id,
-      cashAccountId: params.cashEntry.accountId,
-      cashEntryId: params.cashEntry.id,
+      data: {
+        householdId: params.householdId,
+        accountId: propertyAccount.id,
+        cashAccountId: params.cashEntry.accountId,
+        cashEntryId: params.cashEntry.id,
       propertyAssetId: propertyAsset.id,
       action,
       source: "expense_fixed_asset",
@@ -343,28 +363,45 @@ export async function recalcPropertyAssetsFromTransactions(
       where: { householdId: params.householdId, propertyAssetId, deletedAt: null },
       orderBy: [{ tradeDate: "asc" }, { createdAt: "asc" }],
     });
+    const relatedAccountIds = Array.from(new Set(rows.map((row) => row.cashAccountId).filter((value): value is string => Boolean(value))));
+    const relatedAccounts = relatedAccountIds.length > 0
+      ? await client.account.findMany({
+          where: { householdId: params.householdId, id: { in: relatedAccountIds } },
+          select: { id: true, kind: true, isConsumerLoan: true },
+        })
+      : [];
+    const mortgageLoanAccountIds = new Set(
+      relatedAccounts.filter((account) => isMortgageLoanAccount(account)).map((account) => account.id),
+    );
+    const latestMortgageLoanAccountId = rows.reduce<string | null>((current, row) => {
+      if (!row.cashAccountId || !mortgageLoanAccountIds.has(row.cashAccountId)) return current;
+      if (row.action === PropertyTransactionAction.sale || row.action === PropertyTransactionAction.disposal) return current;
+      return row.cashAccountId;
+    }, null);
 
     if (rows.length === 0) {
       await client.propertyAsset.updateMany({
         where: { id: propertyAssetId, householdId: params.householdId, deletedAt: null },
-        data: { deletedAt: new Date(), cost: "0", marketValue: "0", status: "deleted" },
+        data: { deletedAt: new Date(), cost: "0", marketValue: "0", status: "deleted", mortgageLoanAccountId: null },
       });
       continue;
     }
 
     const firstPurchase = rows.find((row) => row.action === PropertyTransactionAction.purchase);
-    const latestSale = [...rows].reverse().find((row) => row.action === PropertyTransactionAction.sale);
+    const latestTerminal = [...rows].reverse().find(
+      (row) => row.action === PropertyTransactionAction.sale || row.action === PropertyTransactionAction.disposal,
+    );
     const cost = rows.reduce((sum, row) => sum + transactionCost(row), 0);
     const manualValuation = await client.propertyValuation.findFirst({
       where: { householdId: params.householdId, propertyAssetId, source: "manual" },
       orderBy: [{ valuationDate: "desc" }, { createdAt: "desc" }],
     });
-    const marketValue = latestSale
-      ? saleRecovery(latestSale)
+    const marketValue = latestTerminal
+      ? saleRecovery(latestTerminal)
       : manualValuation
         ? toNumber(manualValuation.marketValue)
         : cost;
-    const latestValuationDate = latestSale?.settlementDate ?? latestSale?.tradeDate ?? manualValuation?.valuationDate ?? firstPurchase?.tradeDate ?? rows[0]?.tradeDate ?? null;
+    const latestValuationDate = latestTerminal?.settlementDate ?? latestTerminal?.tradeDate ?? manualValuation?.valuationDate ?? firstPurchase?.tradeDate ?? rows[0]?.tradeDate ?? null;
 
     await client.propertyAsset.updateMany({
       where: { id: propertyAssetId, householdId: params.householdId },
@@ -373,7 +410,10 @@ export async function recalcPropertyAssetsFromTransactions(
         cost: String(cost),
         marketValue: String(marketValue),
         latestValuationDate,
-        status: latestSale ? "sold" : "active",
+        status: latestTerminal
+          ? latestTerminal.action === PropertyTransactionAction.disposal ? "disposed" : "sold"
+          : latestMortgageLoanAccountId ? "mortgaged" : "active",
+        mortgageLoanAccountId: latestTerminal ? null : latestMortgageLoanAccountId,
         purchaseDate: firstPurchase?.tradeDate ?? rows[0]?.tradeDate ?? null,
         purchasePrice: decimalString(firstPurchase ? Math.abs(toNumber(firstPurchase.amount)) : null),
       },

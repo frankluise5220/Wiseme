@@ -7,7 +7,7 @@ import {
 } from "@/components/settings/SettingsPageScaffold";
 import { useI18n } from "@/lib/i18n";
 
-const RESEND_FROM = "mmh@floatingice.win";
+const RESEND_FROM = (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_RESEND_FROM) || "onboarding@resend.dev";
 
 type EmailServiceStatus = {
   hasEmailService: boolean;

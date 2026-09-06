@@ -5,11 +5,57 @@ import { SettingsCatalogIcon } from "@/components/settings/SettingsCatalogIcon";
 import { localizeSettingsCatalog } from "@/lib/settings/catalog";
 import { getServerT } from "@/lib/server/i18n";
 
+const BASIC_DATA_SECONDARY_IDS = new Set(["family-members", "counterparties", "institutions", "tags"]);
+const BASIC_DATA_PRIMARY_HREF = "/settings/family-members";
+
 export default async function SettingsPage() {
   const t = await getServerT();
   const cookieStore = await cookies();
   const hideDescriptions = cookieStore.get("sidebar_hide_initial_data")?.value === "true";
   const catalog = localizeSettingsCatalog(t, "web");
+  const displayGroups = catalog.groups.map((group) => {
+    if (group.id !== "master-data") return group;
+    return {
+      ...group,
+      items: group.items.flatMap((item) => {
+        if (item.id === "institutions") {
+          return [{
+            ...item,
+            id: "basic-data",
+            label: t("settings.basicDataSubmenu"),
+            description: t("settings.basicDataSubmenu.desc"),
+            icon: "database",
+            webHref: BASIC_DATA_PRIMARY_HREF,
+          }];
+        }
+        return BASIC_DATA_SECONDARY_IDS.has(item.id) ? [] : [item];
+      }),
+    };
+  });
+
+  // Desktop-app-only group. The /settings/desktop page and /api/desktop/config
+  // only exist for the Windows Electron build; hide it on web/NAS/mobile.
+  const isWindowsDesktop = process.env.MMH_DEPLOY_TARGET === "windows";
+  const groupsWithDesktop = isWindowsDesktop
+    ? [
+        ...displayGroups,
+        {
+          id: "desktop",
+          label: t("settings.group.desktop"),
+          description: t("settings.group.desktop.desc"),
+          items: [
+            {
+              id: "desktop-lan",
+              label: t("settings.desktop.title"),
+              description: t("settings.desktop.allowLanDesc"),
+              icon: "globe",
+              surfaces: ["web"] as const,
+              webHref: "/settings/desktop",
+            },
+          ],
+        },
+      ]
+    : displayGroups;
 
   return (
     <>
@@ -20,7 +66,7 @@ export default async function SettingsPage() {
             {hideDescriptions ? null : <div className="mt-1 text-xs leading-5 text-indigo-100">{t("settings.catalogDescription")}</div>}
           </section>
 
-          {catalog.groups.map((group) => (
+          {groupsWithDesktop.map((group) => (
             <section key={group.id} className="overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
               <div className="border-b border-slate-100 px-3 py-2.5" title={hideDescriptions ? group.description : undefined}>
                 <h3 className="text-sm font-semibold text-slate-950">{group.label}</h3>
@@ -59,7 +105,7 @@ export default async function SettingsPage() {
           </p>}
         </div>
 
-        {catalog.groups.map((group) => (
+        {groupsWithDesktop.map((group) => (
           <section key={group.id} className="space-y-2">
             <div className="px-1" title={hideDescriptions ? group.description : undefined}>
               <h3 className="text-xs font-semibold text-slate-700">{group.label}</h3>

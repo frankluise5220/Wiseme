@@ -9,6 +9,7 @@ import {
 } from "@/lib/server/counterparty-name-unique";
 import { isInstitutionNameUniqueError } from "@/lib/server/institution-name-unique";
 import { revalidateAfterSettingsChange } from "@/lib/server/revalidate";
+import { loadCounterpartyAccountCounts, withAccountCounts } from "@/lib/server/entity-account-counts";
 
 export const dynamic = "force-dynamic";
 
@@ -53,14 +54,17 @@ async function updateCounterpartyRow(formData: FormData) {
 
 export default async function SettingsCounterpartiesPage() {
   const { hidFilter } = await getHouseholdScope();
-  const counterparties = await prisma.counterparty.findMany({
-    where: hidFilter,
-    orderBy: [{ type: "asc" }, { name: "asc" }],
-  });
+  const [counterparties, accountCounts] = await Promise.all([
+    prisma.counterparty.findMany({
+      where: hidFilter,
+      orderBy: [{ type: "asc" }, { name: "asc" }],
+    }),
+    loadCounterpartyAccountCounts(hidFilter),
+  ]);
 
   return (
     <SettingsInstitutionsClient
-      institutions={counterparties.map(i => ({ id: i.id, name: i.name, shortName: i.shortName, type: i.type }))}
+      institutions={withAccountCounts(counterparties, accountCounts).map(i => ({ id: i.id, name: i.name, shortName: i.shortName, type: i.type, accountCount: i.accountCount }))}
       updateAction={updateCounterpartyRow}
       mode="counterparty"
     />

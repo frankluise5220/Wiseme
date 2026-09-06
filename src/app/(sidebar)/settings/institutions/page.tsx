@@ -6,6 +6,7 @@ import {
 } from "@/lib/server/institution-name-unique";
 import { SettingsInstitutionsClient } from "./client";
 import { revalidateAfterSettingsChange } from "@/lib/server/revalidate";
+import { loadInstitutionAccountCounts, withAccountCounts } from "@/lib/server/entity-account-counts";
 
 export const dynamic = "force-dynamic";
 
@@ -44,14 +45,17 @@ async function updateInstitutionRow(formData: FormData) {
 
 export default async function SettingsInstitutionsPage() {
   const { hidFilter } = await getHouseholdScope();
-  const institutions = await prisma.institution.findMany({
-    where: { ...hidFilter, type: { in: ["bank", "insurance", "brokerage", "fund_company", "payment", "ewallet", "other"] } },
-    orderBy: [{ type: "asc" }, { name: "asc" }],
-  });
+  const [institutions, accountCounts] = await Promise.all([
+    prisma.institution.findMany({
+      where: { ...hidFilter, type: { in: ["bank", "insurance", "brokerage", "fund_company", "payment", "other"] } },
+      orderBy: [{ type: "asc" }, { name: "asc" }],
+    }),
+    loadInstitutionAccountCounts(hidFilter),
+  ]);
 
   return (
     <SettingsInstitutionsClient
-      institutions={institutions.map(i => ({ id: i.id, name: i.name, shortName: i.shortName, type: i.type }))}
+      institutions={withAccountCounts(institutions, accountCounts).map(i => ({ id: i.id, name: i.name, shortName: i.shortName, type: i.type, accountCount: i.accountCount }))}
       updateAction={updateInstitutionRow}
       mode="institution"
     />

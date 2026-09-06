@@ -141,7 +141,6 @@ export function ReportDetailTable({
           categoryOptions={categoryOptions}
           tagOptions={tagOptions}
           investmentProductTypeByAccountId={investmentProductTypeByAccountId}
-          compactRows
           storageKey="mmh_report_detail_table_v1"
           refreshOnGlobalEvent={false}
           toolbarMode="custom"

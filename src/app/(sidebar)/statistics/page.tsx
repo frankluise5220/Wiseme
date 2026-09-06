@@ -7,9 +7,11 @@ import { Suspense } from "react";
 import { ReportSelector } from "@/components/ReportSelector";
 import type { ReportItem } from "@/components/ReportSelector";
 import StatisticsCharts from "@/components/StatisticsCharts";
+import FundPortfolioTrendChart from "@/components/FundPortfolioTrendChart";
+import { loadFundPortfolioTrendData } from "@/lib/server/fund-portfolio-trend";
 import { StatisticsFilterPanel } from "@/components/StatisticsFilterPanel";
 import { getHouseholdScope } from "@/lib/server/household-scope";
-import { loadWealthStatisticSourceEntries } from "@/lib/server/investment-statistic-sources";
+import { loadFundStatisticSourceEntries, loadWealthStatisticSourceEntries } from "@/lib/server/investment-statistic-sources";
 import { isPureInvestmentAccount } from "@/lib/account-kind-utils";
 import {
   normalizeDefaultCategoryHierarchyForHousehold,
@@ -17,9 +19,11 @@ import {
   SYSTEM_INSURANCE_RETURN_CATEGORY,
 } from "@/lib/default-categories";
 import { addStatisticCategoryBucket, buildStatisticCategoryItemsFromBuckets, createStatisticCategoryResolver, getBusinessResultStatisticItems, getIncomeExpenseStatisticAmount, getInvestmentStatisticItems } from "@/lib/transaction-statistics";
-import { isCreditCardRepaymentTransfer } from "@/lib/transaction-semantics";
+import { isCreditCardRepaymentTransfer, isDebtPrincipalTransfer } from "@/lib/transaction-semantics";
 import { getServerT } from "@/lib/server/i18n";
 import { categoryOrderBy } from "@/lib/category-order";
+import { buildStatisticsFundDisplayResolver } from "@/lib/server/statistics-fund-display";
+import { buildStatisticsCurrencyConverter } from "@/lib/server/statistics-currency";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +33,6 @@ type MonthData = {
   expense: number;
   investPnL: number;
   netTotal: number;
-  cumNet: number;
 };
 
 type CategoryItem = { id: string | null; name: string; value: number; pct: number };
@@ -45,12 +48,6 @@ type PnLItem = {
   profit: number;
   profitRate: number;
 };
-
-function buildStatisticsReportHref(year: number) {
-  const query = new URLSearchParams();
-  query.set("year", String(year));
-  return `/statistics?${query.toString()}`;
-}
 
 function buildStatisticsReportMenuItems(year: number, t: (key: string) => string): ReportItem[] {
   const investmentQuery = new URLSearchParams();
@@ -69,7 +66,7 @@ function buildStatisticsReportMenuItems(year: number, t: (key: string) => string
     { value: "investment-profit", label: t("reports.menu.investmentProfit"), href: `/reports?${investmentQuery.toString()}` },
     { value: "stock-holdings", label: t("reports.menu.stockHoldings"), href: `/reports?${stockQuery.toString()}` },
     { value: "fund-holdings", label: t("reports.menu.fundHoldings"), href: `/reports?${fundQuery.toString()}` },
-    { value: "cash-statistics", label: t("reports.menu.cashStatisticsCharts"), href: buildStatisticsReportHref(year) },
+    { value: "cash-statistics", label: t("reports.menu.cashStatisticsCharts"), href: "/statistics" },
   ];
 }
 
@@ -86,9 +83,37 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
   const thisYear = now.getFullYear();
   const selectedYear = typeof params?.year === "string" ? parseInt(params.year, 10) : thisYear;
   const year = Number.isFinite(selectedYear) && selectedYear >= 2000 && selectedYear <= 2100 ? selectedYear : thisYear;
-  const level = params?.level === "month" ? "month" : "year";
+  // Default view (plain /statistics, no period params): rolling last-12-months
+  // window bucketed by month. Any explicit period param (?year= / ?level= /
+  // ?month= / ?startYear= / ?endYear= / ?startMonth= / ?endMonth=) keeps the
+  // historical single-year / custom-range semantics.
+  const hasExplicitPeriod = ["year", "level", "month", "startYear", "endYear", "startMonth", "endMonth"].some(
+    (key) => params?.[key] !== undefined,
+  );
+  const level = params?.level === "month" ? "month" : params?.level === "year" || hasExplicitPeriod ? "year" : "month";
   const selectedMonth = typeof params?.month === "string" ? parseInt(params.month, 10) : 1;
   const month = Number.isFinite(selectedMonth) && selectedMonth >= 1 && selectedMonth <= 12 ? selectedMonth : 1;
+
+  // Parse startYear/endYear for the cross-year aggregation feature.
+  // When startYear != endYear, page aggregates by year and emits one bar per year.
+  // When startYear == endYear, falls back to the historical single-year behavior.
+  const rawStartYear = typeof params?.startYear === "string" ? parseInt(params.startYear, 10) : NaN;
+  const rawEndYear = typeof params?.endYear === "string" ? parseInt(params.endYear, 10) : NaN;
+  const startYear = Number.isFinite(rawStartYear) && rawStartYear >= 2000 && rawStartYear <= 2100 ? rawStartYear : year;
+  const endYear = Number.isFinite(rawEndYear) && rawEndYear >= 2000 && rawEndYear <= 2100 ? rawEndYear : year;
+  // Normalize so a swapped range still works.
+  const rangeStartYear = Math.min(startYear, endYear);
+  const rangeEndYear = Math.max(startYear, endYear);
+  const isCrossYear = rangeStartYear !== rangeEndYear;
+  const isYearly = level === "year";
+
+  // Default rolling window (no explicit period params): the 12 months ending
+  // with the current month, e.g. 2025-10 .. 2026-09.
+  const defaultWinEnd = new Date(Date.UTC(thisYear, now.getMonth(), 1));
+  const defaultWinStart = new Date(Date.UTC(thisYear, now.getMonth() - 11, 1));
+  const fmtYM = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  const defaultStartMonth = fmtYM(defaultWinStart);
+  const defaultEndMonth = fmtYM(defaultWinEnd);
 
   const selectedAccountIds = typeof params?.accounts === "string" && params.accounts.trim()
     ? params.accounts.split(",").map(s => s.trim()).filter(Boolean)
@@ -136,9 +161,38 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
     ? { OR: [{ accountId: { in: scopedAccountIds } }, { toAccountId: { in: scopedAccountIds } }] }
       : {};
 
-  const periodStart = level === "month" ? new Date(Date.UTC(year, month - 1, 1)) : new Date(Date.UTC(year, 0, 1));
-  const periodEnd = level === "month" ? new Date(Date.UTC(year, month, 1)) : new Date(Date.UTC(year + 1, 0, 1));
+  // level=month 时也支持跨年/跨月区间：用 startMonth/endMonth（"YYYY-MM"）决定 periodStart/End
+  const rawStartMonth = typeof params?.startMonth === "string" && /^\d{4}-\d{2}$/.test(params.startMonth) ? params.startMonth : null;
+  const rawEndMonth = typeof params?.endMonth === "string" && /^\d{4}-\d{2}$/.test(params.endMonth) ? params.endMonth : null;
+  // Default view falls back to the rolling last-12-months window.
+  const effectiveStartMonth = level === "month" ? (rawStartMonth ?? defaultStartMonth) : null;
+  const effectiveEndMonth = level === "month" ? (rawEndMonth ?? defaultEndMonth) : null;
+  const parseYM = (ym: string) => new Date(Date.UTC(parseInt(ym.slice(0, 4), 10), parseInt(ym.slice(5, 7), 10) - 1, 1));
+  const periodStart = level === "month" && effectiveStartMonth
+    ? parseYM(effectiveStartMonth)
+    : level === "month"
+      ? new Date(Date.UTC(year, month - 1, 1))
+      : isCrossYear
+        ? new Date(Date.UTC(rangeStartYear, 0, 1))
+        : new Date(Date.UTC(year, 0, 1));
+  const periodEnd = level === "month" && effectiveEndMonth
+    ? new Date(Date.UTC(parseInt(effectiveEndMonth.slice(0, 4), 10), parseInt(effectiveEndMonth.slice(5, 7), 10), 1))
+    : level === "month"
+      ? new Date(Date.UTC(year, month, 1))
+      : isCrossYear
+        ? new Date(Date.UTC(rangeEndYear + 1, 0, 1))
+        : new Date(Date.UTC(year + 1, 0, 1));
   const scopeAccountIds = scopedAccountIds ?? nonInvestAccountIds;
+
+  // ── Available year range for the filter's year selector ──
+  const yearBounds = await prisma.txRecord.aggregate({
+    where: { deletedAt: null, ...hidFilter },
+    _min: { date: true },
+    _max: { date: true },
+  });
+  const firstYear = yearBounds._min.date?.getUTCFullYear() ?? thisYear;
+  const lastYear = yearBounds._max.date?.getUTCFullYear() ?? firstYear;
+  const availableYears = Array.from({ length: lastYear - firstYear + 1 }, (_, i) => firstYear + i);
 
   // Fetch transactions for the selected period (with EntryTag)
   const allEntries = await prisma.txRecord.findMany({
@@ -173,25 +227,38 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
     },
     orderBy: { date: "asc" },
   });
-  const representedInvestmentEntryIds = new Set(
-    allEntries
-      .filter((entry) => entry.type === TransactionType.investment && getInvestmentStatisticItems(entry).length > 0)
-      .map((entry) => entry.id),
-  );
-  const wealthStatisticEntries = await loadWealthStatisticSourceEntries(ctx, {
-    start: periodStart,
-    endExclusive: periodEnd,
-    accountIds: scopedAccountIds,
-    tagIds: selectedTagIds,
-    excludeEntryIds: representedInvestmentEntryIds,
-  });
-
+  const [fundStatisticEntries, wealthStatisticEntries] = await Promise.all([
+    loadFundStatisticSourceEntries(ctx, {
+      start: periodStart,
+      endExclusive: periodEnd,
+      accountIds: scopedAccountIds,
+      tagIds: selectedTagIds,
+    }),
+    loadWealthStatisticSourceEntries(ctx, {
+      start: periodStart,
+      endExclusive: periodEnd,
+      accountIds: scopedAccountIds,
+      tagIds: selectedTagIds,
+    }),
+  ]);
+  const independentStatisticEntryIds = new Set([
+    ...fundStatisticEntries.flatMap((entry) => [entry.id, entry.entryId]),
+    ...wealthStatisticEntries.flatMap((entry) => [entry.id, entry.entryId]),
+  ]);
   // ── Tag filter ──
   const filteredEntries = selectedTagIds
     ? allEntries.filter(e => e.EntryTag.some(et => selectedTagIds.includes(et.tagId)))
     : allEntries;
+  const fx = await buildStatisticsCurrencyConverter(ctx.householdId, [
+    ...filteredEntries, ...fundStatisticEntries, ...wealthStatisticEntries,
+    ...allAccounts.map((account) => ({ accountId: account.id })),
+  ]);
+  const resolvePnlFundDisplay = await buildStatisticsFundDisplayResolver(
+    [...filteredEntries, ...fundStatisticEntries, ...wealthStatisticEntries],
+    ctx.householdId,
+  );
 
-  // ── Monthly aggregation ──
+  // ── Monthly aggregation (or yearly when isCrossYear) ──
   const monthMap = new Map<string, { income: number; expense: number; investPnL: number; investCost: number }>();
   const incomeByCat = new Map<string, { id: string | null; name: string; type: "income"; value: number }>();
   const expenseByCat = new Map<string, { id: string | null; name: string; type: "expense"; value: number }>();
@@ -201,12 +268,20 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
 
   const resolveCategory = createStatisticCategoryResolver(categories);
 
+  // Bucket key: level=year → 年份 key（"2025"）；level=month → "YYYY-MM" key（跨年区间下月份也不会合并）。
+  const bucketKeyForDate = (d: Date): string => {
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    return isYearly ? String(y) : `${y}-${m}`;
+  };
+
   for (const e of filteredEntries) {
     const d = e.date;
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const m = bucketKeyForDate(d);
     if (!monthMap.has(m)) monthMap.set(m, { income: 0, expense: 0, investPnL: 0, investCost: 0 });
     const row = monthMap.get(m)!;
-    const amount = toNumber(e.amount);
+    const amount = fx.convert(e, toNumber(e.amount));
+    if (amount == null) continue;
 
     const isToSelf = e.toAccountId && scopeAccountIds.includes(e.toAccountId);
     const isFromSelf = e.accountId && scopeAccountIds.includes(e.accountId);
@@ -235,22 +310,30 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
           accountKind: accountKindById.get(e.accountId),
           toAccountKind: accountKindById.get(e.toAccountId ?? ""),
       })) continue;
+      // Borrow / lend / repay / collect / scheduled repayments: the principal
+      // itself is a balance-sheet move, not income/expense.  Skip the principal
+      // here; the interest portion is still reported via
+      // getBusinessResultStatisticItems below.
+      const isDebtPrincipal = isDebtPrincipalTransfer(e);
       if (isToSelf && !isFromSelf) {
-        row.income += Math.abs(amount);
-        addStatisticCategoryBucket(incomeByCat, resolveCategory({ type: "income", categoryId: e.categoryId, categoryName: e.categoryName }), Math.abs(amount));
-        for (const et of e.EntryTag) {
-          const existing = incomeByTag.get(et.tagId);
-          incomeByTag.set(et.tagId, { id: et.Tag.id, name: et.Tag.name, color: et.Tag.color ?? "#3B82F6", value: (existing?.value ?? 0) + Math.abs(amount) });
+        if (!isDebtPrincipal) {
+          row.income += Math.abs(amount);
+          addStatisticCategoryBucket(incomeByCat, resolveCategory({ type: "income", categoryId: e.categoryId, categoryName: e.categoryName }), Math.abs(amount));
+          for (const et of e.EntryTag) {
+            const existing = incomeByTag.get(et.tagId);
+            incomeByTag.set(et.tagId, { id: et.Tag.id, name: et.Tag.name, color: et.Tag.color ?? "#3B82F6", value: (existing?.value ?? 0) + Math.abs(amount) });
+          }
         }
       } else if (isFromSelf && !isToSelf) {
-        row.expense += Math.abs(amount);
-        addStatisticCategoryBucket(expenseByCat, resolveCategory({ type: "expense", categoryId: e.categoryId, categoryName: e.categoryName }), Math.abs(amount));
-        for (const et of e.EntryTag) {
-          const existing = expenseByTag.get(et.tagId);
+        if (!isDebtPrincipal) {
+          row.expense += Math.abs(amount);
+          addStatisticCategoryBucket(expenseByCat, resolveCategory({ type: "expense", categoryId: e.categoryId, categoryName: e.categoryName }), Math.abs(amount));
+          for (const et of e.EntryTag) {
+            const existing = expenseByTag.get(et.tagId);
             expenseByTag.set(et.tagId, { id: et.Tag.id, name: et.Tag.name, color: et.Tag.color ?? "#3B82F6", value: (existing?.value ?? 0) + Math.abs(amount) });
           }
         }
-        for (const item of getBusinessResultStatisticItems(e)) {
+        for (const item of fx.convertItems(e, getBusinessResultStatisticItems(e))) {
           if (item.type === "income") {
             row.income += item.amount;
             addStatisticCategoryBucket(incomeByCat, resolveCategory({ type: "income", candidates: item.categoryCandidates, fallbackName: item.categoryName }), item.amount);
@@ -267,7 +350,9 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
             }
           }
         }
+      }
       } else if (e.type === TransactionType.investment) {
+      if (independentStatisticEntryIds.has(e.id)) continue;
       if (e.source === "insurance") {
         const effectiveAmount = Math.abs(amount);
         const isRefund = e.insuranceAction === "refund" || e.fundSubtype === "redeem" || e.fundSubtype === "switch_out";
@@ -288,46 +373,51 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
         }
         continue;
       }
-      for (const item of getInvestmentStatisticItems(e)) {
+      for (const item of fx.convertItems(e, getInvestmentStatisticItems(e))) {
         const signedProfit = item.type === "income" ? item.amount : -item.amount;
-        row.investPnL += signedProfit;
         if (item.type === "income") {
           addStatisticCategoryBucket(incomeByCat, resolveCategory({ type: "income", candidates: item.categoryCandidates, fallbackName: item.categoryName }), item.amount);
         } else {
           addStatisticCategoryBucket(expenseByCat, resolveCategory({ type: "expense", candidates: item.categoryCandidates, fallbackName: item.categoryName }), item.amount);
         }
+        if (item.productKind === "deposit") continue;
+        row.investPnL += signedProfit;
         const costBase = Math.abs(amount);
         const rate = costBase > 0 ? signedProfit / costBase : 0;
+        const fundDisplay = resolvePnlFundDisplay(e);
         pnlItems.push({
-          id: e.id, date: d.toISOString().slice(0, 10), fundCode: e.fundCode ?? "", fundName: e.fundName ?? "",
+          id: e.id, date: d.toISOString().slice(0, 10), fundCode: fundDisplay.fundCode, fundName: fundDisplay.fundName,
           subtype: item.label, amount: item.amount, profit: signedProfit, profitRate: rate,
         });
       }
     }
   }
 
-  for (const e of wealthStatisticEntries) {
+  for (const e of fundStatisticEntries) {
     const d = e.date;
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const m = bucketKeyForDate(d);
     if (!monthMap.has(m)) monthMap.set(m, { income: 0, expense: 0, investPnL: 0, investCost: 0 });
     const row = monthMap.get(m)!;
-    const amount = toNumber(e.amount);
+    const amount = fx.convert(e, toNumber(e.amount));
+    if (amount == null) continue;
 
-    for (const item of getInvestmentStatisticItems(e)) {
+    for (const item of fx.convertItems(e, getInvestmentStatisticItems(e))) {
       const signedProfit = item.type === "income" ? item.amount : -item.amount;
-      row.investPnL += signedProfit;
       if (item.type === "income") {
         addStatisticCategoryBucket(incomeByCat, resolveCategory({ type: "income", candidates: item.categoryCandidates, fallbackName: item.categoryName }), item.amount);
       } else {
         addStatisticCategoryBucket(expenseByCat, resolveCategory({ type: "expense", candidates: item.categoryCandidates, fallbackName: item.categoryName }), item.amount);
       }
+      if (item.productKind === "deposit") continue;
+      row.investPnL += signedProfit;
       const costBase = Math.abs(amount);
       const rate = costBase > 0 ? signedProfit / costBase : 0;
+      const fundDisplay = resolvePnlFundDisplay(e);
       pnlItems.push({
         id: e.id,
         date: d.toISOString().slice(0, 10),
-        fundCode: e.fundCode ?? "",
-        fundName: e.fundName ?? "",
+        fundCode: fundDisplay.fundCode,
+        fundName: fundDisplay.fundName,
         subtype: item.label,
         amount: item.amount,
         profit: signedProfit,
@@ -336,16 +426,52 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
     }
   }
 
-  // ── Build month + cumulative data ──
+  for (const e of wealthStatisticEntries) {
+    const d = e.date;
+    const m = bucketKeyForDate(d);
+    if (!monthMap.has(m)) monthMap.set(m, { income: 0, expense: 0, investPnL: 0, investCost: 0 });
+    const row = monthMap.get(m)!;
+    const amount = fx.convert(e, toNumber(e.amount));
+    if (amount == null) continue;
+
+    for (const item of fx.convertItems(e, getInvestmentStatisticItems(e))) {
+      const signedProfit = item.type === "income" ? item.amount : -item.amount;
+      if (item.type === "income") {
+        addStatisticCategoryBucket(incomeByCat, resolveCategory({ type: "income", candidates: item.categoryCandidates, fallbackName: item.categoryName }), item.amount);
+      } else {
+        addStatisticCategoryBucket(expenseByCat, resolveCategory({ type: "expense", candidates: item.categoryCandidates, fallbackName: item.categoryName }), item.amount);
+      }
+      if (item.productKind === "deposit") continue;
+      row.investPnL += signedProfit;
+      const costBase = Math.abs(amount);
+      const rate = costBase > 0 ? signedProfit / costBase : 0;
+      const fundDisplay = resolvePnlFundDisplay(e);
+      pnlItems.push({
+        id: e.id,
+        date: d.toISOString().slice(0, 10),
+        fundCode: fundDisplay.fundCode,
+        fundName: fundDisplay.fundName,
+        subtype: item.label,
+        amount: item.amount,
+        profit: signedProfit,
+        profitRate: rate,
+      });
+    }
+  }
+
+  // ── Build month data ──
+  // 跨年区间（isCrossYear）按年份输出（每年一条柱，X 轴 = "2015"..）；
+  // 单年区间按月输出（1~12 月，X 轴 = "01".."12"）。
   const monthData: MonthData[] = [];
-  let cumNet = 0;
-  for (let i = 1; i <= 12; i++) {
-    const m = String(i).padStart(2, "0");
-    const row = monthMap.get(m);
+  const sortedKeys = Array.from(monthMap.keys()).sort((a, b) => {
+    if (isCrossYear) return Number(a) - Number(b);
+    return a.localeCompare(b);
+  });
+  for (const key of sortedKeys) {
+    const row = monthMap.get(key);
     if (!row) continue;
     const netTotal = row.income - row.expense + row.investPnL;
-    cumNet += netTotal;
-    monthData.push({ month: m, income: row.income, expense: row.expense, investPnL: row.investPnL, netTotal, cumNet });
+    monthData.push({ month: key, income: row.income, expense: row.expense, investPnL: row.investPnL, netTotal });
   }
 
   // ── Category pie data ──
@@ -372,11 +498,19 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
   const investBalances = selectedInvestIds.length > 0 ? await computeInvestBalances(ctx) : new Map();
   let totalFloatingPnL = 0;
   for (const [id, detail] of investBalances) {
-    if (selectedInvestIds.includes(id)) totalFloatingPnL += detail.floatingPnL;
+    if (selectedInvestIds.includes(id)) totalFloatingPnL += fx.convert({ accountId: id }, detail.floatingPnL) ?? 0;
   }
 
   // ── P&L list sorted by date descending ──
   pnlItems.sort((a, b) => b.date.localeCompare(a.date));
+
+  // 基金持仓趋势（成本/市值、净流入、沪深300基准对照）—— RSC 预取，减少首屏空白。
+  // 模拟始终从最早一笔交易起跑（窗口内成本口径才正确），startMonth/endMonth 仅裁剪展示窗口。
+  const fundTrendData = await loadFundPortfolioTrendData(ctx, {
+    startMonth: effectiveStartMonth ?? undefined,
+    ...(effectiveEndMonth ? { endMonth: effectiveEndMonth } : {}),
+    includeBenchmark: true,
+  });
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
@@ -396,11 +530,26 @@ export default async function StatisticsPage({ searchParams }: { searchParams: P
               allInstitutions={allInstitutions}
               allUsers={allUsers}
               year={year}
+              availableYears={availableYears.length > 0 ? availableYears : [year]}
+              defaultLevel={level}
+              start={level === "month" ? (effectiveStartMonth ?? undefined) : undefined}
+              end={level === "month" ? (effectiveEndMonth ?? undefined) : undefined}
             />
           </Suspense>
         </div>
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto p-6">
+        <div className="mb-4">
+          <FundPortfolioTrendChart initialData={{ ok: true, ...fundTrendData }} />
+        </div>
+        <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+          <span>{t("settings.display.baseCurrency")}: {fx.baseCurrency}</span>
+          {fx.missingFxCurrencies.length > 0 && (
+            <span className="text-amber-700" role="status">
+              {t("overview.missingFxRateDetail", { currencies: fx.missingFxCurrencies.join(", ") })}
+            </span>
+          )}
+        </div>
         <StatisticsCharts
           monthData={monthData}
           incomeCats={incomeCats}

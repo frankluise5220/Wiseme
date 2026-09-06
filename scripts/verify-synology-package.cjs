@@ -176,6 +176,8 @@ function verifyPrivilegeConfig(config, context) {
 
 function verifySourceFiles() {
   const packageJson = read(path.join(root, "package.json"));
+  const nativeSchema = read(path.join(root, "prisma", "schema.native.prisma"));
+  const currencyMigration = read(path.join(root, "prisma", "migrations", "20260903_add_currency_request_tables", "migration.sql"));
   const appBuildScript = read(path.join(root, "scripts", "build-synology-app.cjs"));
   const packageScript = read(path.join(root, "scripts", "build-synology-package.cjs"));
   const releaseWorkflow = read(path.join(root, ".github", "workflows", "synology-release.yml"));
@@ -196,12 +198,16 @@ function verifySourceFiles() {
   expect(/hashFileMd5/.test(packageScript) && /directorySizeKb/.test(packageScript), "Synology package build must calculate checksum and extractsize.");
   expect(/tarOwnerArgs/.test(packageScript), "Synology package build must archive release tarballs with stable numeric root ownership.");
   expect(/"run-as":\s*"package"/.test(packageScript), "Synology privilege config must use run-as=package.");
+  expect(/MMH_SESSION_SECRET/.test(packageScript) && /mmh-session-secret\.txt/.test(packageScript), "Synology start script must persist a strong session secret for signed login cookies.");
+  expect(/chmod -R go-rwx/.test(packageScript), "Synology uninstall backups must remove group and other permissions from copied app data.");
   expect(!/run_as:\s*"package"/.test(packageScript), "Synology privilege config must not use the invalid run_as key.");
   expect(/\$\{appName\}-synology-v\$\{version\}-\$\{target\.assetSuffix\}\.spk/.test(packageScript), "Synology SPK asset names must include version and architecture.");
   expect(!/"-czf",\s*spkPath/.test(packageScript), "Synology SPK outer archive must be uncompressed tar; only package.tgz should be gzip-compressed.");
   expect(sqliteInitIndex !== -1 && pidCheckIndex !== -1 && sqliteInitIndex < pidCheckIndex, "Synology start script must run SQLite init before returning for an already-running process.");
   expect(/release-artifacts\/synology\/\*\.spk/.test(releaseWorkflow), "Synology release workflow must upload SPK assets.");
   expect(/target_arch/.test(releaseWorkflow) && /arm64/.test(releaseWorkflow), "Synology release workflow must build x86_64 and arm64 packages.");
+  expect(/model ApprovedCurrency \{/.test(nativeSchema) && /model CustomCurrencyRequest \{/.test(nativeSchema) && /enum CustomCurrencyRequestStatus \{/.test(nativeSchema), "Synology native schema must contain the currency request models.");
+  expect(/CREATE TABLE IF NOT EXISTS "ApprovedCurrency"/.test(currencyMigration) && /CREATE TABLE IF NOT EXISTS "CustomCurrencyRequest"/.test(currencyMigration), "Synology source must keep the PostgreSQL currency migration alongside the native schema.");
 }
 
 function verifyStagedSource() {
@@ -271,6 +277,7 @@ function verifyBuiltSpk() {
     expect(startScript.status === 0, "Unable to read scripts/start-stop-status from built SPK.");
     expect(/SYNOPKG_PKGVAR/.test(startScript.stdout || ""), "Built start-stop-status must use SYNOPKG_PKGVAR for writable runtime data.");
     expect(!/^VAR_DIR="\$APP_DIR\/var"/m.test(startScript.stdout || ""), "Built start-stop-status must not write runtime data under SYNOPKG_PKGDEST/target.");
+    expect(/MMH_SESSION_SECRET/.test(startScript.stdout || "") && /mmh-session-secret\.txt/.test(startScript.stdout || ""), "Built start-stop-status must persist the signed-session secret.");
     const packageEntries = tarList(packageTgzPath, { gzip: true });
     for (const required of [
       "app/bin/node",

@@ -1,6 +1,6 @@
 import { AccountKind, RegularInvestStatus } from "@prisma/client";
 
-import { toNumber } from "@/lib/date-utils";
+import { formatDateUtc, toNumber } from "@/lib/date-utils";
 import { prisma } from "@/lib/db/prisma";
 import { computeAccountDisplayBalances } from "@/lib/server/account-balance";
 import {
@@ -11,6 +11,7 @@ import {
 } from "@/lib/server/debt-view-data";
 import type { HouseholdContext } from "@/lib/server/household-scope";
 import { listLoanRateAdjustmentsByAccountIds } from "@/lib/server/loan-rate-adjustments";
+import { shouldPreferLoanScheduledPlan } from "@/lib/scheduled-task";
 
 function parseMortgageLprDiscountFromText(value?: string | null) {
   const text = String(value ?? "").trim();
@@ -42,7 +43,7 @@ export async function computeDebtDisplaySummary(
   const debtAccounts = await prisma.account.findMany({
     where: {
       ...ctx.hidFilter,
-      kind: AccountKind.loan,
+      kind: { in: [AccountKind.settlement, AccountKind.loan] },
       isActive: true,
     },
     select: {
@@ -112,7 +113,7 @@ export async function computeDebtDisplaySummary(
   const loanRepaymentPlanByAccountId = new Map<string, (typeof loanRepaymentPlans)[number]>();
   for (const plan of loanRepaymentPlans) {
     const existing = loanRepaymentPlanByAccountId.get(plan.accountId);
-    if (!existing || (existing.status !== RegularInvestStatus.active && plan.status === RegularInvestStatus.active)) {
+    if (shouldPreferLoanScheduledPlan(plan, existing)) {
       loanRepaymentPlanByAccountId.set(plan.accountId, plan);
     }
   }
@@ -127,15 +128,20 @@ export async function computeDebtDisplaySummary(
       source: { in: ["debt_borrow_in", "debt_financed_purchase"] },
       accountId: { in: debtAccountIds },
     },
-    select: { accountId: true, note: true, toNote: true },
+    select: { accountId: true, date: true, note: true, toNote: true },
     orderBy: [{ date: "desc" }, { createdAt: "desc" }],
-    take: debtAccountIds.length * 5,
   });
   const debtBorrowLprDiscountByAccountId = new Map<string, number>();
+  const debtBorrowStartDateByAccountId = new Map<string, string>();
   for (const entry of debtBorrowLprDiscountEntries) {
     const discount = parseMortgageLprDiscountFromText(entry.note) ?? parseMortgageLprDiscountFromText(entry.toNote);
     if (discount != null && !debtBorrowLprDiscountByAccountId.has(entry.accountId)) {
       debtBorrowLprDiscountByAccountId.set(entry.accountId, discount);
+    }
+    const dateKey = formatDateUtc(entry.date);
+    const existingDate = debtBorrowStartDateByAccountId.get(entry.accountId);
+    if (!existingDate || dateKey < existingDate) {
+      debtBorrowStartDateByAccountId.set(entry.accountId, dateKey);
     }
   }
 
@@ -145,6 +151,7 @@ export async function computeDebtDisplaySummary(
     loanRepaymentPlanByAccountId,
     loanRateAdjustmentsByAccountId,
     debtBorrowLprDiscountByAccountId,
+    debtBorrowStartDateByAccountId,
     selectedAccountId: null,
     selectedAccountKind: null,
     debtPersonParam: "",
@@ -197,6 +204,7 @@ export async function computeDebtDisplaySummary(
   let totalPayable = 0;
   let totalReceivable = 0;
   for (const row of debtRows) {
+    if (row.parentKey) continue;
     const value = Number.isFinite(row.remainingTotal) && Math.abs(row.remainingTotal) > 0
       ? row.remainingTotal
       : row.net;

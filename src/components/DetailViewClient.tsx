@@ -34,7 +34,7 @@ import {
 import { parseImportAccountId } from "@/lib/account-import-match";
 import { formatAccountTableLabel, formatAccountTableTitle } from "@/lib/account-display";
 import { systemCategoryLabel } from "@/lib/system-category-labels";
-import { APP_PREFS_EVENT, getDateDisplayFormatPreference, getDetailDateBackgroundPreference, type DateDisplayFormat } from "@/lib/client/appPreferences";
+import { APP_PREFS_EVENT, getAccountLabelFieldsPreference, getDateDisplayFormatPreference, getDetailDateBackgroundPreference, type DateDisplayFormat } from "@/lib/client/appPreferences";
 
 /* Types */
 
@@ -42,6 +42,25 @@ export type DetailEntry = {
   id: string;
   cashEntryId?: string | null;
   businessTransactionId?: string | null;
+  stockTransactionId?: string | null;
+  stockTransaction?: {
+    id: string;
+    stockAccountId: string;
+    cashAccountId?: string | null;
+    securityId?: string | null;
+    market: string;
+    stockCode: string;
+    stockName?: string | null;
+    action: string;
+    tradeDate: string;
+    settleDate?: string | null;
+    grossAmount?: number | null;
+    netAmount?: number | null;
+    quantity?: number | null;
+    price?: number | null;
+    brokerTradeId?: string | null;
+    note?: string | null;
+  } | null;
   date: string;
   postedAt?: string | null;
   createdAt?: string | null;
@@ -245,6 +264,7 @@ type DetailAccountOption = {
   kind?: string | null;
   debtDirection?: string | null;
   numberMasked?: string | null;
+  isSettlementDebt?: boolean | null;
 };
 
 /* Helpers */
@@ -583,8 +603,8 @@ export function DetailViewClient({
   const accountDisplayFallback = useCallback((accountId?: string | null, fallback?: string | null) => {
     const byId = accountId ? accountOptionById.get(accountId) : undefined;
     if (byId) {
-      const label = formatAccountTableLabel(byId);
-      return { label, title: formatAccountTableTitle(byId, label) };
+      const label = formatAccountTableLabel(byId, "", getAccountLabelFieldsPreference());
+      return { label, title: formatAccountTableTitle(byId, label, getAccountLabelFieldsPreference()) };
     }
     const raw = String(fallback ?? "").trim();
     if (!raw) return { label: "", title: "" };
@@ -592,8 +612,8 @@ export function DetailViewClient({
     const directId = encodedId || (/^cm[a-z0-9]{8,}$/i.test(raw) ? raw : "");
     const byFallbackId = directId ? accountOptionById.get(directId) : undefined;
     if (byFallbackId) {
-      const label = formatAccountTableLabel(byFallbackId);
-      return { label, title: formatAccountTableTitle(byFallbackId, label) };
+      const label = formatAccountTableLabel(byFallbackId, "", getAccountLabelFieldsPreference());
+      return { label, title: formatAccountTableTitle(byFallbackId, label, getAccountLabelFieldsPreference()) };
     }
     return { label: raw, title: raw };
   }, [accountOptionById]);
@@ -794,6 +814,36 @@ export function DetailViewClient({
     const dateStr = (e.date ?? "").slice(0, 10);
     const amount = toNumber(e.amount);
     const linkedBusinessLabels = e.businessLinkLabels ?? [];
+    const linkedStockTransaction = e.stockTransaction ?? null;
+    if (linkedStockTransaction || e.stockTransactionId) {
+      if (!linkedStockTransaction) return {};
+      return {
+        customEditEvent: {
+          name: "mmh:stock:edit",
+          detail: {
+            requestId: `edit-${linkedStockTransaction.id}-${Date.now()}`,
+            transaction: {
+              id: linkedStockTransaction.id,
+              stockAccountId: linkedStockTransaction.stockAccountId,
+              cashAccountId: linkedStockTransaction.cashAccountId ?? e.cashAccountId ?? e.accountId ?? null,
+              securityId: linkedStockTransaction.securityId ?? null,
+              market: linkedStockTransaction.market || "CN",
+              stockCode: linkedStockTransaction.stockCode || "",
+              stockName: linkedStockTransaction.stockName ?? null,
+              action: linkedStockTransaction.action || "buy",
+              tradeDate: linkedStockTransaction.tradeDate || dateStr,
+              settleDate: linkedStockTransaction.settleDate ?? null,
+              grossAmount: linkedStockTransaction.grossAmount ?? null,
+              netAmount: linkedStockTransaction.netAmount ?? null,
+              quantity: linkedStockTransaction.quantity ?? null,
+              price: linkedStockTransaction.price ?? null,
+              brokerTradeId: linkedStockTransaction.brokerTradeId ?? null,
+              note: linkedStockTransaction.note ?? e.businessNote ?? e.note ?? null,
+            },
+          },
+        },
+      };
+    }
     const linkedFundProductType = linkedBusinessLabels.includes("理财交易")
       ? "wealth"
       : linkedBusinessLabels.includes("存款交易")
@@ -887,13 +937,19 @@ export function DetailViewClient({
     const isDebtAccountFromSide = debtMode === "borrow_in" || debtMode === "collect_in";
     const debtAccountIdForEdit = isDebtAccountFromSide ? (e.accountId ?? "") : (e.toAccountId ?? "");
     const cashAccountIdForEdit = isDebtAccountFromSide ? (e.toAccountId ?? "") : (e.accountId ?? "");
+    const debtEditDialogType =
+      (e.accountKind === "loan" && !e.accountIsSettlementDebt) ||
+      (e.toAccountKind === "loan" && !e.toAccountIsSettlementDebt)
+        ? "loan"
+        : "debt";
     const debtEditEvent =
       !balanceReconcileEditEvent && isDebtActivity && debtMode
         ? {
-            name: "mmh:debt:create",
+            name: debtEditDialogType === "loan" ? "mmh:loan:create" : "mmh:debt:create",
             detail: {
               editEntryId: e.id,
               mode: debtMode,
+              dialogType: debtEditDialogType,
               defaultDebtAccountId: debtAccountIdForEdit,
               defaultCashAccountId: cashAccountIdForEdit,
               defaultLoanFundingMode: e.source === "debt_financed_purchase" ? "financed_purchase" : "cash_disbursement",
@@ -1186,7 +1242,7 @@ export function DetailViewClient({
       minWidth: 54,
       hideable: true,
       filterText: (e) => entryCurrency(e),
-      render: (e) => <span className="block truncate text-center text-xs font-medium tabular-nums text-slate-500">{entryCurrency(e)}</span>,
+      render: (e) => <span className="block truncate text-center font-medium tabular-nums text-slate-500">{entryCurrency(e)}</span>,
     },
     {
       key: "type",
@@ -1237,7 +1293,7 @@ export function DetailViewClient({
                 {t("detailView.balanceReconcile")}
               </span>
             ) : (
-              <span className="text-xs text-slate-700">{actLabel}</span>
+              <span className="text-slate-700">{actLabel}</span>
             )}
           </>
         );
@@ -1302,7 +1358,7 @@ export function DetailViewClient({
       align: "right" as const,
       hideable: true,
       defaultHidden: runningBalanceDefaultHidden,
-      render: (e: DetailEntry) => <span className="whitespace-nowrap text-xs tabular-nums text-slate-700">{e.runningBalance != null ? formatEntryCurrencyMoney(toNumber(e.runningBalance), e) : ""}</span>,
+      render: (e: DetailEntry) => <span className="whitespace-nowrap tabular-nums text-slate-700">{e.runningBalance != null ? formatEntryCurrencyMoney(toNumber(e.runningBalance), e) : ""}</span>,
     } satisfies AdvancedDataTableColumn<DetailEntry>] : []),
     {
       key: "profit",
@@ -1316,7 +1372,7 @@ export function DetailViewClient({
       sortValue: (e) => e.realizedProfit ?? null,
       render: (e: DetailEntry) => {
         const profit = e.realizedProfit;
-        return <span className={`whitespace-nowrap text-xs tabular-nums ${profit == null ? "text-slate-300" : pnlColor(profit, colorScheme)}`}>{profit == null ? "" : formatEntryCurrencyMoney(profit, e)}</span>;
+        return <span className={`whitespace-nowrap tabular-nums ${profit == null ? "text-slate-300" : pnlColor(profit, colorScheme)}`}>{profit == null ? "" : formatEntryCurrencyMoney(profit, e)}</span>;
       },
     } satisfies AdvancedDataTableColumn<DetailEntry>,
     {

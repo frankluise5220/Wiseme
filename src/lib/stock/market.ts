@@ -1,5 +1,14 @@
+function cnExchangeFromMarketCode(value: string) {
+  const normalized = value.trim().toUpperCase().replace(/[.\s-]/g, "_");
+  if (normalized === "CN_SH" || normalized === "SH" || normalized === "SSE" || normalized === "XSHG") return "SH";
+  if (normalized === "CN_SZ" || normalized === "SZ" || normalized === "SZSE" || normalized === "XSHE") return "SZ";
+  if (normalized === "CN_BJ" || normalized === "BJ" || normalized === "BSE" || normalized === "XBJE") return "BJ";
+  return null;
+}
+
 export function normalizeStockMarket(raw: unknown) {
   const value = String(raw ?? "").trim().toUpperCase();
+  if (cnExchangeFromMarketCode(value)) return "CN";
   return value || "CN";
 }
 
@@ -16,6 +25,8 @@ export function inferStockMarketFromCode(stockCodeRaw: unknown) {
 }
 
 export function inferStockExchangeFromCode(marketRaw: unknown, stockCodeRaw: unknown) {
+  const explicitExchange = cnExchangeFromMarketCode(String(marketRaw ?? ""));
+  if (explicitExchange) return explicitExchange;
   const market = normalizeStockMarket(marketRaw);
   const stockCode = normalizeStockCode(stockCodeRaw);
   if (market !== "CN") return null;
@@ -27,7 +38,7 @@ export function inferStockExchangeFromCode(marketRaw: unknown, stockCodeRaw: unk
 
 export function stockFeeRuleMarketKeys(marketRaw: unknown, stockCodeRaw: unknown) {
   const market = normalizeStockMarket(marketRaw);
-  const exchange = inferStockExchangeFromCode(market, stockCodeRaw);
+  const exchange = inferStockExchangeFromCode(marketRaw, stockCodeRaw);
   const keys = exchange ? [`${market}_${exchange}`, market] : [market];
   return Array.from(new Set(keys.filter(Boolean)));
 }

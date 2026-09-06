@@ -8,6 +8,7 @@ import {
   deleteUnusedSyncedCounterpartiesForInstitution,
   deleteUnusedSyncedInstitutionForCounterparty,
 } from "@/lib/server/counterparty-sync";
+import { counterpartyLinkedAccountsWhere } from "@/lib/server/entity-account-counts";
 import { revalidateAfterSettingsChange } from "@/lib/server/revalidate";
 
 export const runtime = "nodejs";
@@ -57,6 +58,19 @@ export async function POST(req: Request) {
     if (!isAdmin(user) && inst.householdId && inst.householdId !== householdId) return NextResponse.json({ ok: false, code: "FORBIDDEN", error: "越权操作" }, { status: 403 });
     const used = await prisma.account.count({ where: { institutionId: id } });
     if (used > 0) return NextResponse.json({ ok: false, code: "INSTITUTION_IN_USE", error: "已有账户使用该机构，无法删除" }, { status: 409 });
+    // A family member's accounts live under the account group whose name matches the
+    // member's name (same rule as the "关联账户" count in the settings list). Block
+    // deletion while any non-placeholder account is still owned by this member.
+    if (inst.type === "family_member" && inst.name) {
+      const owned = await prisma.account.count({
+        where: {
+          householdId: inst.householdId ?? householdId,
+          isPlaceholder: false,
+          AccountGroup: { is: { name: inst.name } },
+        },
+      });
+      if (owned > 0) return NextResponse.json({ ok: false, code: "INSTITUTION_IN_USE", error: `成员「${inst.name}」名下仍有 ${owned} 个账户，无法删除` }, { status: 409 });
+    }
     await prisma.$transaction(async (tx) => {
       await deleteUnusedSyncedCounterpartiesForInstitution(tx, inst);
       await tx.institution.delete({ where: { id } });
@@ -70,7 +84,9 @@ export async function POST(req: Request) {
     const counterparty = await prisma.counterparty.findUnique({ where: { id } });
     if (!counterparty) return NextResponse.json({ ok: false, code: "COUNTERPARTY_NOT_FOUND", error: "往来对象不存在" }, { status: 404 });
     if (!isAdmin(user) && counterparty.householdId !== householdId) return NextResponse.json({ ok: false, code: "FORBIDDEN", error: "越权操作" }, { status: 403 });
-    const used = await prisma.account.count({ where: { counterpartyId: id } });
+    // Same link rule as the "关联账户" count shown in the settings list: accounts may be
+    // attached directly or through the mirrored institution (Counterparty.sourceInstitutionId).
+    const used = await prisma.account.count({ where: counterpartyLinkedAccountsWhere(counterparty) });
     if (used > 0) return NextResponse.json({ ok: false, code: "COUNTERPARTY_IN_USE", error: "已有往来款使用该往来对象，无法删除" }, { status: 409 });
     await prisma.$transaction(async (tx) => {
       await deleteUnusedSyncedInstitutionForCounterparty(tx, counterparty);

@@ -27,6 +27,7 @@ model Account {
   isActive                                                   Boolean                     @default(true)
   isPlaceholder                                              Boolean                     @default(false)
   isConsumerLoan                                             Boolean                     @default(false)
+  loanType                                                   LoanType?
   investProductType                                          FundProductType?
   fixedAssetType                                            FixedAssetType?
   creditLimit                                                Decimal?                    @db.Decimal(18, 2)
@@ -74,6 +75,7 @@ model Account {
   WealthTransaction                                          WealthTransaction[]         @relation("WealthTransaction_account")
   WealthTransactionCashAccount                               WealthTransaction[]         @relation("WealthTransaction_cashAccount")
   LoanRateAdjustment                                         LoanRateAdjustment[]
+  MortgagedPropertyAssets                                    PropertyAsset[]             @relation("MortgageLoanAccountToPropertyAsset")
   DepositTransaction                                         DepositTransaction[]        @relation("DepositTransaction_account")
   DepositTransactionCashAccount                              DepositTransaction[]        @relation("DepositTransaction_cashAccount")
   PreciousMetalHolding                                       PreciousMetalHolding[]
@@ -413,6 +415,7 @@ model FundProfile {
   custodian       String? // 基金托管人（如「中国银行」）
   manager         String? // 基金经理
   navDateOffset   Int      @default(0) // Binary NAV publication-lag mode: 0=current-day, 1=older latest NAV
+  tradingCalendar TradingCalendar? // Fund-level NAV trading calendar; user setting, refreshed profiles must not overwrite it
   createdAt       DateTime @default(now())
   updatedAt       DateTime @default(now()) @updatedAt
 
@@ -452,6 +455,24 @@ model FundSnapshot {
   @@unique([accountId, snapshotDate])
   @@index([accountId])
   @@index([snapshotDate])
+}
+
+/// Cache for external benchmark NAV series (e.g. 沪深300 = "000300").
+/// Used by the statistics page to overlay market baseline against portfolio performance.
+model BenchmarkCache {
+  id      String   @id @default(cuid())
+  code    String
+  navDate DateTime
+  nav     Decimal  @db.Decimal(20, 6)
+  cumNav  Decimal? @db.Decimal(20, 6)
+  name    String?
+  source  String?  @default("eastmoney")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([code, navDate])
+  @@index([code])
+  @@index([navDate])
 }
 
 model FundTransaction {
@@ -855,6 +876,7 @@ model PropertyAsset {
   id                  String                @id @default(cuid())
   householdId         String
   accountId           String
+  mortgageLoanAccountId String?
   name                String
   assetType           FixedAssetType        @default(property)
   propertyType        String?
@@ -873,10 +895,12 @@ model PropertyAsset {
   updatedAt           DateTime              @default(now()) @updatedAt
   Household           Household             @relation(fields: [householdId], references: [id], onDelete: Cascade)
   Account             Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  MortgageLoanAccount Account?              @relation("MortgageLoanAccountToPropertyAsset", fields: [mortgageLoanAccountId], references: [id], onDelete: SetNull)
   Valuations          PropertyValuation[]
   Transactions        PropertyTransaction[]
 
   @@index([householdId, accountId])
+  @@index([householdId, mortgageLoanAccountId])
   @@index([householdId, status])
   @@index([accountId])
   @@index([deletedAt])
@@ -1228,6 +1252,7 @@ model RegularInvestPlan {
   executedRuns                                     Int                  @default(0)
   fundProductType                                  FundProductType?
   taskType                                         String?
+  planName                                         String?
   targetName                                       String?
   insuranceProductName                             String?
   memo                                             String?
@@ -1609,6 +1634,7 @@ enum AccountKind {
   ewallet
   deposit
   investment
+  settlement
   loan
   other
   insurance
@@ -1617,6 +1643,13 @@ enum AccountKind {
 enum DebtDirection {
   payable
   receivable
+}
+
+enum LoanType {
+  home
+  mortgage
+  consumer
+  other
 }
 
 enum CreditBillMode {
@@ -1648,6 +1681,7 @@ enum FundProductType {
 enum TradingCalendar {
   cn_fund
   hk_fund
+  jp_fund
   us_fund
   generic_weekday
 }
@@ -1698,6 +1732,7 @@ enum PropertyTransactionAction {
   purchase
   improvement
   sale
+  disposal
 }
 
 enum StockTransactionAction {
@@ -1810,4 +1845,42 @@ enum CreditCardInstallmentStatus {
   active
   completed
   cancelled
+}
+
+model ApprovedCurrency {
+  id         String   @id @default(cuid())
+  code       String   @unique // ISO 4217 code, e.g. "KRW", "SGD"
+  nameZh     String   // 中文名称
+  nameEn     String   // English name
+  countryZh  String?  // 中文国家名（用于自动联想）
+  countryEn  String?  // English country name
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+  createdBy  String?  // userId of the approver
+}
+
+model CustomCurrencyRequest {
+  id          String                      @id @default(cuid())
+  code        String                      // ISO 4217 code, e.g. "KRW"
+  nameZh      String                      // 用户填写的中文名称
+  nameEn      String                      // 用户填写的英文名称
+  countryZh   String                      // 用户填写的中文国家名
+  countryEn   String?
+  status      CustomCurrencyRequestStatus @default(pending)
+  requesterId String                      // userId of the requester
+  householdId String?                     // optional household context
+  approverId  String?
+  rejectReason String?
+  createdAt   DateTime                    @default(now())
+  updatedAt   DateTime                    @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([requesterId])
+  @@index([code])
+}
+
+enum CustomCurrencyRequestStatus {
+  pending
+  approved
+  rejected
 }

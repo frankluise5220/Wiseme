@@ -11,9 +11,10 @@ import { revalidateAfterSettingsChange } from "@/lib/server/revalidate";
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   const name = typeof body?.name === "string" ? body.name.trim() : "";
+  const shortName = typeof body?.shortName === "string" ? body.shortName.trim() : "";
 
   if (!name) {
-    return NextResponse.json({ ok: false, code: "GROUP_NAME_REQUIRED", error: "所有人名称不能为空" }, { status: 400 });
+    return NextResponse.json({ ok: false, code: "GROUP_NAME_REQUIRED", error: "Owner name is required." }, { status: 400 });
   }
 
   const { householdId } = await getHouseholdScope();
@@ -29,26 +30,46 @@ export async function POST(req: NextRequest) {
   }).catch(() => null);
 
   if (!created) {
-    return NextResponse.json({ ok: false, code: "CREATE_FAILED", error: "创建失败" }, { status: 500 });
+    return NextResponse.json({ ok: false, code: "CREATE_FAILED", error: "Failed to create owner." }, { status: 500 });
   }
 
   const existingFamilyMember = await prisma.institution.findFirst({
     where: {
       householdId,
       type: "family_member",
-      OR: [{ name: created.name }, { shortName: created.name }],
+      OR: [
+        { name: created.name },
+        { shortName: created.name },
+        ...(shortName ? [{ name: shortName }, { shortName }] : []),
+      ],
     },
     select: { id: true },
   });
+  if (existingFamilyMember && shortName) {
+    try {
+      await assertInstitutionDisplayNamesUnique(prisma, {
+        householdId,
+        name: created.name,
+        shortName,
+        excludeId: existingFamilyMember.id,
+      });
+      await prisma.institution.update({
+        where: { id: existingFamilyMember.id },
+        data: { name: created.name, shortName },
+      });
+    } catch (error) {
+      if (!isInstitutionNameUniqueError(error)) console.warn("[account-group] family member short-name sync failed", error);
+    }
+  }
   if (!existingFamilyMember) {
     try {
-      await assertInstitutionDisplayNamesUnique(prisma, { householdId, name: created.name });
+      await assertInstitutionDisplayNamesUnique(prisma, { householdId, name: created.name, shortName });
       await prisma.institution.create({
         data: {
           householdId,
           type: "family_member",
           name: created.name,
-          shortName: null,
+          shortName: shortName || null,
         },
       });
     } catch (error) {
@@ -65,16 +86,17 @@ export async function PUT(req: NextRequest) {
   const body = await req.json().catch(() => null);
   const id = typeof body?.id === "string" ? body.id.trim() : "";
   const name = typeof body?.name === "string" ? body.name.trim() : "";
+  const shortName = typeof body?.shortName === "string" ? body.shortName.trim() : "";
 
   if (!id || !name) {
-    return NextResponse.json({ ok: false, code: "MISSING_REQUIRED_FIELDS", error: "缺少必填字段" }, { status: 400 });
+    return NextResponse.json({ ok: false, code: "MISSING_REQUIRED_FIELDS", error: "Missing required fields." }, { status: 400 });
   }
 
   const { householdId, user } = await getHouseholdScope();
 
   const group = await prisma.accountGroup.findUnique({ where: { id } });
-  if (!group) return NextResponse.json({ ok: false, code: "GROUP_NOT_FOUND", error: "所有人不存在" }, { status: 404 });
-  if (!isAdmin(user) && group.householdId !== householdId) return NextResponse.json({ ok: false, code: "FORBIDDEN", error: "越权操作" }, { status: 403 });
+  if (!group) return NextResponse.json({ ok: false, code: "GROUP_NOT_FOUND", error: "Owner not found." }, { status: 404 });
+  if (!isAdmin(user) && group.householdId !== householdId) return NextResponse.json({ ok: false, code: "FORBIDDEN", error: "Forbidden." }, { status: 403 });
 
   await prisma.accountGroup.update({ where: { id }, data: { name } });
   const legacyFamilyMember = await prisma.institution.findFirst({
@@ -89,11 +111,12 @@ export async function PUT(req: NextRequest) {
       await assertInstitutionDisplayNamesUnique(prisma, {
         householdId,
         name,
+        shortName,
         excludeId: legacyFamilyMember.id,
       });
       await prisma.institution.update({
         where: { id: legacyFamilyMember.id },
-        data: { name },
+        data: { name, shortName: shortName || null },
       });
     } catch (error) {
       if (!isInstitutionNameUniqueError(error)) console.warn("[account-group] family member rename sync failed", error);
@@ -109,13 +132,13 @@ export async function PUT(req: NextRequest) {
     });
     if (!existingFamilyMember) {
       try {
-        await assertInstitutionDisplayNamesUnique(prisma, { householdId, name });
+        await assertInstitutionDisplayNamesUnique(prisma, { householdId, name, shortName });
         await prisma.institution.create({
           data: {
             householdId,
             type: "family_member",
             name,
-            shortName: null,
+            shortName: shortName || null,
           },
         });
       } catch (error) {

@@ -1,4 +1,4 @@
-const SW_VERSION = "mmh-pwa-v9";
+const SW_VERSION = "mmh-pwa-v10";
 const SHELL_CACHE = `${SW_VERSION}-shell`;
 const SHELL_ASSETS = [
   "/",

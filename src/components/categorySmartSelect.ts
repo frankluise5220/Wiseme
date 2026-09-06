@@ -48,6 +48,92 @@ export function sortCategorySources<T extends CategorySource>(categories: T[]) {
   return [...categories].sort(compareCategoryOrder);
 }
 
+/**
+ * Flattened category tree for a single category type (e.g. all expense
+ * categories). Categories with children become collapsible groups, and every
+ * real category stays selectable.
+ */
+export function buildCategoryTreeOptions(
+  categories: CategorySource[],
+  t: (key: string) => string,
+): CategorySmartSelectOption[] {
+  const childrenByParentId = new Map<string | null, CategorySource[]>();
+  for (const category of categories) {
+    const key = category.parentId ?? null;
+    const list = childrenByParentId.get(key) ?? [];
+    list.push(category);
+    childrenByParentId.set(key, list);
+  }
+  for (const [parentId, list] of childrenByParentId) {
+    childrenByParentId.set(parentId, sortCategorySources(list));
+  }
+
+  const options: CategorySmartSelectOption[] = [];
+  const indent = "\u3000";
+
+  function walk(parentId: string | null, level: number, parentOptionId?: string) {
+    for (const child of childrenByParentId.get(parentId) ?? []) {
+      const rawLabel = child.label ?? child.name ?? "";
+      const rawShortName = rawLabel.includes(".") ? rawLabel.split(".").pop() ?? rawLabel : rawLabel;
+      const shortName = systemCategoryLabel(rawShortName, t);
+      const hasChildren = (childrenByParentId.get(child.id) ?? []).length > 0;
+      options.push({
+        id: child.id,
+        label: `${indent.repeat(level)}${shortName}`,
+        parentId: parentOptionId,
+        isGroup: hasChildren,
+        sourceName: rawLabel,
+      });
+      if (hasChildren) walk(child.id, level + 1, child.id);
+    }
+  }
+
+  walk(null, 0);
+  return options;
+}
+
+/** Indented parent picker used by the compact "new category" form. */
+export function buildCategoryParentOptions(
+  categories: CategorySource[],
+  t: (key: string) => string,
+  type: string,
+) {
+  const childrenByParentId = new Map<string | null, CategorySource[]>();
+  for (const category of categories) {
+    const key = category.parentId ?? null;
+    const list = childrenByParentId.get(key) ?? [];
+    list.push(category);
+    childrenByParentId.set(key, list);
+  }
+  for (const [parentId, list] of childrenByParentId) {
+    childrenByParentId.set(parentId, sortCategorySources(list));
+  }
+
+  const options: Array<{ id: string; name: string; label: string; type: string; depth: number; parentId?: string; isGroup?: boolean }> = [];
+
+  function walk(parentId: string | null, depth: number, pathPrefix: string) {
+    for (const child of childrenByParentId.get(parentId) ?? []) {
+      const rawLabel = child.label ?? child.name ?? "";
+      const rawShortName = rawLabel.includes(".") ? rawLabel.split(".").pop() ?? rawLabel : rawLabel;
+      const shortName = systemCategoryLabel(rawShortName, t);
+      const fullLabel = pathPrefix ? `${pathPrefix}.${shortName}` : shortName;
+      options.push({
+        id: child.id,
+        name: shortName,
+        label: fullLabel,
+        type,
+        depth,
+        parentId: child.parentId ?? undefined,
+        isGroup: (childrenByParentId.get(child.id) ?? []).length > 0,
+      });
+      walk(child.id, depth + 1, fullLabel);
+    }
+  }
+
+  walk(null, 0, "");
+  return options;
+}
+
 export function buildCategorySmartSelectOptions({
   categories,
   types,

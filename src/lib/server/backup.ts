@@ -788,6 +788,7 @@ const SQLITE_PROPERTY_RESTORE_SCHEMA_SQL = [
     "id" TEXT NOT NULL PRIMARY KEY,
     "householdId" TEXT NOT NULL,
     "accountId" TEXT NOT NULL,
+    "mortgageLoanAccountId" TEXT,
     "name" TEXT NOT NULL,
     "propertyType" TEXT,
     "address" TEXT,
@@ -803,7 +804,8 @@ const SQLITE_PROPERTY_RESTORE_SCHEMA_SQL = [
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "property_assets_householdId_fkey" FOREIGN KEY ("householdId") REFERENCES "Household"("id") ON DELETE CASCADE ON UPDATE CASCADE,
-    CONSTRAINT "property_assets_accountId_fkey" FOREIGN KEY ("accountId") REFERENCES "Account"("id") ON DELETE CASCADE ON UPDATE CASCADE
+    CONSTRAINT "property_assets_accountId_fkey" FOREIGN KEY ("accountId") REFERENCES "Account"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "property_assets_mortgageLoanAccountId_fkey" FOREIGN KEY ("mortgageLoanAccountId") REFERENCES "Account"("id") ON DELETE SET NULL ON UPDATE CASCADE
   )`,
   `CREATE TABLE IF NOT EXISTS "property_valuations" (
     "id" TEXT NOT NULL PRIMARY KEY,
@@ -844,6 +846,7 @@ const SQLITE_PROPERTY_RESTORE_SCHEMA_SQL = [
     CONSTRAINT "property_transactions_cashEntryId_fkey" FOREIGN KEY ("cashEntryId") REFERENCES "transactions"("id") ON DELETE SET NULL ON UPDATE CASCADE
   )`,
   `CREATE INDEX IF NOT EXISTS "property_assets_householdId_accountId_idx" ON "property_assets"("householdId", "accountId")`,
+  `CREATE INDEX IF NOT EXISTS "property_assets_householdId_mortgageLoanAccountId_idx" ON "property_assets"("householdId", "mortgageLoanAccountId")`,
   `CREATE INDEX IF NOT EXISTS "property_assets_householdId_status_idx" ON "property_assets"("householdId", "status")`,
   `CREATE INDEX IF NOT EXISTS "property_assets_accountId_idx" ON "property_assets"("accountId")`,
   `CREATE INDEX IF NOT EXISTS "property_assets_deletedAt_idx" ON "property_assets"("deletedAt")`,
@@ -3690,6 +3693,7 @@ export async function restoreHouseholdBackup(
             executedRuns: Number(item.executedRuns ?? 0),
             fundProductType: item.fundProductType == null ? null : (String(item.fundProductType) as never),
             taskType: item.taskType == null ? null : String(item.taskType),
+            planName: item.planName == null ? null : String(item.planName),
             targetName: item.targetName == null ? null : String(item.targetName),
             insuranceProductName: item.insuranceProductName == null ? null : String(item.insuranceProductName),
             memo: item.memo == null ? null : String(item.memo),

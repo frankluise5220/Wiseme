@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import { prisma } from "@/lib/db/prisma";
+import { extractAddress } from "@/lib/mail/address";
 
 type SmtpConfig = {
   host: string;
@@ -18,15 +19,27 @@ function normalizeSmtpError(error: unknown) {
   const lower = message.toLowerCase();
 
   if (code === "EAUTH" || responseCode === 535 || lower.includes("auth") || lower.includes("invalid login")) {
-    return "SMTP 认证失败，请检查邮箱账号、授权码或 SMTP 用户名密码。";
+    return "SMTP authentication failed. Check the email account, authorization code, SMTP username, and password.";
   }
   if (code === "ESOCKET" || code === "ECONNECTION" || code === "ETIMEDOUT" || code === "ENOTFOUND") {
-    return "SMTP 连接失败，请检查服务器地址、端口、TLS/SSL 设置和网络连接。";
+    return "SMTP connection failed. Check the server host, port, TLS/SSL setting, and network connection.";
+  }
+  // MAIL FROM rejected. QQ/163/126 reply "502 Invalid paramenters" when the sender
+  // address is malformed or does not belong to the authenticated account.
+  if (
+    code === "EENVELOPE" ||
+    responseCode === 502 ||
+    responseCode === 501 ||
+    lower.includes("mail command failed") ||
+    lower.includes("invalid paramenters") ||
+    lower.includes("invalid parameters")
+  ) {
+    return "SMTP sender address was rejected. Enter a full sender email address that matches the login account when required by the provider.";
   }
   if (responseCode === 553 || responseCode === 550 || lower.includes("sender address")) {
-    return "SMTP 发件地址被拒绝，请检查发件地址是否与邮箱服务配置一致。";
+    return "SMTP sender address was rejected. Check that the sender address matches the email service configuration.";
   }
-  return message || "SMTP 发信失败";
+  return message || "SMTP send failed";
 }
 
 function parseBool(v: string | undefined, defaultValue: boolean) {
@@ -45,7 +58,7 @@ export function getSmtpConfig(): SmtpConfig | null {
   const pass = (process.env.SMTP_PASS ?? "").trim();
   const from = (process.env.SMTP_FROM ?? user).trim();
   if (!host || !Number.isFinite(port) || port <= 0 || !user || !pass || !from) return null;
-  return { host, port, secure, user, pass, from, sourceLabel: "环境变量 SMTP" };
+  return { host, port, secure, user, pass, from, sourceLabel: "Environment SMTP" };
 }
 
 function smtpConfigKey(config: Pick<SmtpConfig, "host" | "port" | "secure" | "user" | "from">) {
@@ -102,7 +115,7 @@ async function listEmailAccountSmtpConfigs(householdId?: string | null): Promise
         user: account.username,
         pass: account.password,
         from: account.smtpFrom!,
-        sourceLabel: `邮箱账户 ${account.label}`,
+        sourceLabel: `Email account ${account.label}`,
       }));
   } catch {
     return [];
@@ -136,7 +149,7 @@ async function getLegacyUserSettingsSmtpConfig(householdId?: string | null): Pro
         user: settings.smtpUser,
         pass: settings.smtpPass,
         from: settings.smtpFrom,
-        sourceLabel: "旧版用户 SMTP 设置",
+        sourceLabel: "Legacy user SMTP settings",
       };
     }
   } catch {
@@ -177,7 +190,7 @@ export async function sendEmail(params: {
 }) {
   const configs = await resolveSmtpConfigs(params.householdId);
   if (configs.length === 0) {
-    return { ok: false as const, error: "未配置 SMTP 邮件服务" };
+    return { ok: false as const, error: "SMTP email service is not configured" };
   }
 
   const errors: string[] = [];
@@ -189,9 +202,17 @@ export async function sendEmail(params: {
       auth: { user: cfg.user, pass: cfg.pass },
     });
 
+    // A malformed stored sender (e.g. a stray "f") makes the server reject MAIL FROM
+    // with 502. Fall back to the authenticated address, and always pin the SMTP
+    // envelope sender so the command carries a real address.
+    const fromAddress = extractAddress(cfg.from);
+    const from = fromAddress ? cfg.from : cfg.user;
+    const envelopeFrom = fromAddress ?? extractAddress(cfg.user) ?? cfg.user;
+
     try {
       await transporter.sendMail({
-        from: cfg.from,
+        from,
+        envelope: { from: envelopeFrom, to: params.to },
         to: params.to,
         subject: params.subject,
         text: params.text,
@@ -200,10 +221,10 @@ export async function sendEmail(params: {
 
       return { ok: true as const };
     } catch (error) {
-      const prefix = cfg.sourceLabel ? `${cfg.sourceLabel}：` : "";
+      const prefix = cfg.sourceLabel ? `${cfg.sourceLabel}: ` : "";
       errors.push(`${prefix}${normalizeSmtpError(error)}`);
     }
   }
 
-  return { ok: false as const, error: errors[0] ?? "SMTP 发信失败" };
+  return { ok: false as const, error: errors[0] ?? "SMTP send failed" };
 }

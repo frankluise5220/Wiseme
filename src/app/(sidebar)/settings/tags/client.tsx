@@ -1,33 +1,20 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 import { useRouter } from "next/navigation";
-import {
-  SettingsActionButton,
-  SettingsEmptyRow,
-  SettingsPageHeader,
-  SettingsPrimaryAddButton,
-  SettingsRowActions,
-  SettingsSection,
-  SettingsTable,
-  SettingsTd,
-  SettingsTh,
-} from "@/components/settings/SettingsPageScaffold";
+import { AdvancedDataTable, type AdvancedDataTableColumn } from "@/components/AdvancedDataTable";
+import { SettingsActionButton, SettingsPrimaryAddButton } from "@/components/settings/SettingsPageScaffold";
+import { BasicDataSubmenuHeader } from "@/components/settings/BasicDataImportExport";
 import { fetchSettingsTags, getCachedSettingsTags, notifySettingsDataChanged, setSettingsTags } from "@/lib/client/settingsCache";
 import { useI18n } from "@/lib/i18n";
+import { TAG_COLORS } from "@/lib/tag-colors";
 
 type Tag = {
   id: string;
   name: string;
   color: string | null;
 };
-
-const COLORS = [
-  "#EF4444", "#F97316", "#F59E0B", "#EAB308", "#22C55E",
-  "#14B8A6", "#3B82F6", "#6366F1", "#8B5CF6", "#EC4899",
-  "#64748B", "#0EA5E9",
-];
 
 export default function SettingsTagsClient({
   initialTags,
@@ -51,15 +38,15 @@ export default function SettingsTagsClient({
       setTags(cached);
       return;
     }
-    fetchTags();
+    void fetchTags();
   }, [initialLoaded, initialTags]);
 
-  async function fetchTags() {
-    const next = await fetchSettingsTags().catch(() => null);
+  async function fetchTags(options?: { force?: boolean }) {
+    const next = await fetchSettingsTags(options).catch(() => null);
     if (next) setTags(next);
   }
 
-  async function handleDelete(id: string) {
+  const handleDelete = useCallback(async (id: string) => {
     const res = await fetch(`/api/v1/tags?id=${encodeURIComponent(id)}`, { method: "DELETE" });
     const data = await res.json();
     if (data.ok) {
@@ -71,7 +58,7 @@ export default function SettingsTagsClient({
       void notifySettingsDataChanged({ scope: "tags", reason: "tag:delete", prefetch: true });
     }
     else window.alert(data.error || t("settings.tags.deleteFailed"));
-  }
+  }, [t]);
 
   async function handleSaveTag(input: { id?: string; name: string; color: string }) {
     const res = await fetch("/api/v1/tags", {
@@ -93,69 +80,74 @@ export default function SettingsTagsClient({
     void notifySettingsDataChanged({ scope: "tags", reason: input.id ? "tag:update" : "tag:create", prefetch: true });
   }
 
+  // Columns must be memoized: AdvancedDataTable re-derives hideable-column keys from the
+  // columns identity, and a fresh array each render would retrigger its hidden-keys effect.
+  const columns: AdvancedDataTableColumn<Tag>[] = useMemo(() => [
+    {
+      key: "name",
+      label: t("settings.tags.tag"),
+      width: 220,
+      sortValue: (row) => row.name,
+      render: (row) => <span className="font-medium text-slate-800">{row.name}</span>,
+    },
+    {
+      key: "color",
+      label: t("settings.tags.color"),
+      width: 160,
+      sortValue: (row) => row.color ?? "",
+      render: (row) => (
+        <div className="flex items-center gap-2">
+          <span className="h-3 w-3 rounded-full" style={{ backgroundColor: row.color || "#64748B" }} />
+          <span className="font-mono text-[11px] text-slate-500">{row.color || "#64748B"}</span>
+        </div>
+      ),
+    },
+    {
+      key: "actions",
+      label: t("settings.tags.actions"),
+      width: 100,
+      align: "right",
+      render: (row) => (
+        <div className="flex items-center justify-end gap-1">
+          <SettingsActionButton
+            label={t("settings.tags.edit")}
+            variant="edit"
+            onClick={() => setEditing(row)}
+          />
+          <SettingsActionButton
+            label={t("settings.tags.delete")}
+            variant="delete"
+            onClick={() => handleDelete(row.id)}
+          />
+        </div>
+      ),
+    },
+  ], [t, handleDelete]);
+
   return (
     <div className="space-y-4">
-      <SettingsPageHeader
-        title={t("settings.tags.title")}
-        description={t("settings.tags.description")}
-        count={tags.length}
-      />
+      <BasicDataSubmenuHeader onImported={() => void fetchTags({ force: true })} />
 
-      <SettingsSection
-        title={t("settings.tags.listTitle")}
-        count={tags.length}
-        actions={<SettingsPrimaryAddButton onClick={() => setEditing({ id: "", name: "", color: COLORS[6] })}>{t("settings.tags.add")}</SettingsPrimaryAddButton>}
-      >
-        <SettingsTable minWidth={640}>
-          <thead className="sticky top-0 z-10">
-            <tr>
-              <SettingsTh>{t("settings.tags.tag")}</SettingsTh>
-              <SettingsTh>{t("settings.tags.color")}</SettingsTh>
-              <SettingsTh align="right">{t("settings.tags.actions")}</SettingsTh>
-            </tr>
-          </thead>
-          <tbody className="text-sm">
-            {tags.length ? tags.map((tag) => (
-              <tr
-                key={tag.id}
-                className="cursor-pointer hover:bg-slate-50"
-                onDoubleClick={() => {
-                  const params = new URLSearchParams({
-                    view: "detail",
-                    tagId: tag.id,
-                    detailAll: "1",
-                  });
-                  router.push(`/?${params.toString()}`);
-                }}
-              >
-                <SettingsTd className="text-sm font-medium text-slate-800">{tag.name}</SettingsTd>
-                <SettingsTd>
-                  <div className="flex items-center gap-2">
-                    <span className="h-3 w-3 rounded-full" style={{ backgroundColor: tag.color || "#64748B" }} />
-                    <span className="font-mono text-[11px] text-slate-500">{tag.color || "#64748B"}</span>
-                  </div>
-                </SettingsTd>
-                <SettingsTd align="right" onDoubleClick={(event) => event.stopPropagation()}>
-                  <SettingsRowActions>
-                    <SettingsActionButton
-                      label={t("settings.tags.edit")}
-                      variant="edit"
-                      onClick={() => setEditing(tag)}
-                    />
-                    <SettingsActionButton
-                      label={t("settings.tags.delete")}
-                      variant="delete"
-                      onClick={() => handleDelete(tag.id)}
-                    />
-                  </SettingsRowActions>
-                </SettingsTd>
-              </tr>
-            )) : (
-              <SettingsEmptyRow colSpan={3}>{t("settings.tags.empty")}</SettingsEmptyRow>
-            )}
-          </tbody>
-        </SettingsTable>
-      </SettingsSection>
+      <AdvancedDataTable
+        storageKey="mmh_settings_tags_table_v1"
+        columns={columns}
+        rows={tags}
+        rowKey={(row) => row.id}
+        emptyText={t("settings.tags.empty")}
+        minTableWidth={640}
+        showFilters={false}
+        onRowDoubleClick={(row) => {
+          const params = new URLSearchParams({
+            view: "detail",
+            tagId: row.id,
+            detailAll: "1",
+          });
+          router.push(`/?${params.toString()}`);
+        }}
+        toolbarRightContent={(
+          <SettingsPrimaryAddButton onClick={() => setEditing({ id: "", name: "", color: TAG_COLORS[6] })}>{t("settings.tags.add")}</SettingsPrimaryAddButton>
+        )}
+      />
 
       {editing ? (
         <TagEditModal
@@ -182,7 +174,7 @@ function TagEditModal({
 }) {
   const { t } = useI18n();
   const [name, setName] = useState(tag?.name ?? "");
-  const [color, setColor] = useState(tag?.color || COLORS[6]);
+  const [color, setColor] = useState(tag?.color || TAG_COLORS[6]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -224,7 +216,7 @@ function TagEditModal({
           <div className="space-y-2">
             <div className="form-label">{t("settings.tags.color")}</div>
             <div className="grid grid-cols-6 gap-2">
-              {COLORS.map((item) => (
+              {TAG_COLORS.map((item) => (
                 <button
                   key={item}
                   type="button"

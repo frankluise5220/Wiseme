@@ -12,11 +12,16 @@ import { creditCardDisplayBalanceFromCurrentCycle } from "@/lib/credit/billing";
 import { computeAccountDisplayBalances } from "@/lib/server/account-balance";
 import { createDebtTransaction } from "@/lib/server/sidebar-actions/debt-actions";
 import { getHouseholdScope } from "@/lib/server/household-scope";
+import { ACCOUNT_LABEL_FIELDS_COOKIE, accountLabelFieldsFromCookieValue } from "@/lib/server/account-label-fields";
+import {
+  ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE,
+  accountDropdownRestrictTypeFromCookieValue,
+} from "@/lib/server/account-dropdown-restrict";
 import { getServerT } from "@/lib/server/i18n";
 
 export const dynamic = "force-dynamic";
 
-const DEBT_KINDS: AccountKind[] = [AccountKind.bank_credit, AccountKind.loan];
+const DEBT_KINDS: AccountKind[] = [AccountKind.bank_credit, AccountKind.settlement, AccountKind.loan];
 
 function yuan(value: number) {
   return `¥${formatMoney(value)}`;
@@ -36,6 +41,7 @@ function directionOf(kind: AccountKind, balance: number): "payable" | "receivabl
 
 function kindLabel(kind: AccountKind, t: (key: string) => string) {
   if (kind === AccountKind.bank_credit) return t("account.kind.bank_credit");
+  if (kind === AccountKind.settlement) return t("account.kind.settlement");
   if (kind === AccountKind.loan) return t("account.kind.loan");
   return t("liabilities.debtAccount");
 }
@@ -79,6 +85,12 @@ export default async function LiabilitiesPage({
   const guideMode = params.guide === "settlements";
   const t = await getServerT();
   const cookieStore = await cookies();
+  const accountLabelFields = accountLabelFieldsFromCookieValue(cookieStore.get(ACCOUNT_LABEL_FIELDS_COOKIE)?.value);
+  const restrictAccountDropdownTypes = accountDropdownRestrictTypeFromCookieValue(
+    cookieStore.get(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE)?.value,
+  );
+  const restrictAccountList = <T extends { kind?: string | null }>(items: T[], predicate: (a: T) => boolean) =>
+    restrictAccountDropdownTypes ? items.filter(predicate) : items;
   const creditCardLabelMode = cookieStore.get("mmh_credit_card_label_mode")?.value === "full_name" ? "full_name" : "short_last4";
   const creditCardLabelTemplate = normalizeCreditCardLabelTemplate(
     cookieStore.get("mmh_credit_card_label_template")?.value,
@@ -115,12 +127,15 @@ export default async function LiabilitiesPage({
       investProductType: account.investProductType,
       Institution: account.Institution,
       AccountGroup: account.AccountGroup,
-    }, creditCardLabelTemplate);
+    }, creditCardLabelTemplate, { fields: accountLabelFields });
     return {
       id: account.id,
       name: account.name,
       kind: account.kind,
       label: display.selectorLabel,
+      // Table cells render `listLabel`, which follows the configured display
+      // fields; `label` stays the dropdown-shaped label.
+      listLabel: display.listLabel,
       title: display.hoverTitle,
       hoverTitle: display.hoverTitle,
       groupId: display.groupId,
@@ -136,7 +151,7 @@ export default async function LiabilitiesPage({
   });
 
   function buildAccountSSOptions(filter?: (account: typeof accountOptions[number]) => boolean): SmartSelectOptionLike[] {
-    const filtered = filter ? accountOptions.filter(filter) : accountOptions;
+    const filtered = filter && restrictAccountDropdownTypes ? accountOptions.filter(filter) : accountOptions;
     const grouped = filtered.filter((account) => account.groupId);
     const ungrouped = filtered.filter((account) => !account.groupId);
     const excludedGroupIds = new Set(groups.filter((group) => group.name === "未指定").map((group) => group.id));
@@ -174,7 +189,7 @@ export default async function LiabilitiesPage({
 
   const loanDisplayBalanceByAccountId = await computeAccountDisplayBalances(
     accounts
-      .filter((account) => account.kind === AccountKind.loan)
+      .filter((account) => account.kind === AccountKind.loan || account.kind === AccountKind.settlement)
       .map((account) => ({
         id: account.id,
         kind: account.kind,
@@ -228,13 +243,15 @@ export default async function LiabilitiesPage({
     account.kind === AccountKind.ewallet ||
     account.kind === AccountKind.bank_credit
   ));
-  const debtTransferAccountList = accountOptions
-    .filter((account) => (
+  const debtTransferAccountList = restrictAccountList(
+    accountOptions,
+    (account) => (
       account.kind === AccountKind.bank_debit ||
       account.kind === AccountKind.cash ||
       account.kind === AccountKind.ewallet ||
       account.kind === AccountKind.bank_credit
-    ))
+    ),
+  )
     .map((account) => ({
       id: account.id,
       label: account.label,
@@ -243,8 +260,10 @@ export default async function LiabilitiesPage({
       institutionId: account.institutionId || null,
       institutionType: account.institutionType || null,
     }));
-  const debtAccountOptions = allAccounts
-    .filter((account) => account.kind === AccountKind.loan && account.isActive)
+  const debtAccountOptions = restrictAccountList(
+    allAccounts,
+    (account) => (account.kind === AccountKind.loan || account.kind === AccountKind.settlement) && account.isActive,
+  )
     .map((account) => {
       const display = buildAccountDisplayOption({
         id: account.id,
@@ -254,7 +273,7 @@ export default async function LiabilitiesPage({
         groupId: account.groupId,
         Institution: account.Institution,
         AccountGroup: account.AccountGroup,
-      }, creditCardLabelTemplate);
+      }, creditCardLabelTemplate, { fields: accountLabelFields });
       return {
         id: account.id,
         label: display.label,
@@ -267,7 +286,7 @@ export default async function LiabilitiesPage({
       };
     });
   const counterpartyGuideRows = counterparties.map((counterparty) => {
-    const relatedAccounts = allAccounts.filter((account) => account.kind === AccountKind.loan && account.counterpartyId === counterparty.id);
+    const relatedAccounts = allAccounts.filter((account) => (account.kind === AccountKind.loan || account.kind === AccountKind.settlement) && account.counterpartyId === counterparty.id);
     const totals = relatedAccounts.reduce((acc, account) => {
       const balance = loanDisplayBalanceByAccountId.get(account.id) ?? toNumber(account.balance);
       if (balance >= 0) acc.receivable += Math.abs(balance);
@@ -323,7 +342,7 @@ export default async function LiabilitiesPage({
       groupId: account.groupId,
       Institution: account.Institution,
       AccountGroup: account.AccountGroup,
-    }, creditCardLabelTemplate);
+    }, creditCardLabelTemplate, { fields: accountLabelFields });
     const institutionName = display.institutionName || t("liabilities.noCounterparty");
     const debtPersonKey = institutionName
       ? `institution:${account.institutionId ?? institutionName}`
@@ -437,7 +456,7 @@ export default async function LiabilitiesPage({
               {rows.length > 0 ? (
                 rows.map((row) => {
                   const Icon = row.kind === AccountKind.bank_credit ? CreditCard : HandCoins;
-                  const href = row.kind === AccountKind.loan
+                  const href = row.kind === AccountKind.loan || row.kind === AccountKind.settlement
                     ? `/?view=debt&debtPerson=${encodeURIComponent(row.debtPersonKey)}`
                     : `/?accountId=${row.id}&view=bill`;
                   return (

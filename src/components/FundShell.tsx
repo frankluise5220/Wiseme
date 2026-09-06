@@ -2,7 +2,7 @@
 
 
 
-import { useState, useMemo, useRef, useEffect, useCallback, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 
 import { startTransition } from "react";
 
@@ -11,15 +11,13 @@ import { CartesianGrid, Line, LineChart as RechartsLineChart, ResponsiveContaine
 import { formatMoney, formatPercent } from "@/lib/format";
 import { formatDateLocal } from "@/lib/date-utils";
 import { pnlClassFromRedUp } from "@/lib/client/colors";
-import { showConfirmDialog } from "@/lib/client/confirm-dialog";
-
+import { useOutsideClose } from "@/lib/client/useOutsideClose";
 import { toNumber } from "@/lib/date-utils";
 import { deleteEntriesWithLinkedPrompt, getDeleteRefreshAccountIds, getDeleteRefreshEntryIds } from "@/lib/api/entries-delete";
 import { dispatchFinanceDataChanged, FINANCE_DATA_CHANGED_EVENT } from "@/lib/client/refresh";
 
-import { CalendarDays, CalendarSync, ChartLine, Download, Pause, Pencil, Play, Settings2, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { ChartLine, Download, Pencil, Settings2, SlidersHorizontal, Trash2, X } from "lucide-react";
 
-import { FundConfirmDaysModal } from "@/components/FundConfirmDaysModal";
 import { FundProfileSettingsModal } from "@/components/FundProfileSettingsModal";
 import type { FundProfileNavigationItem } from "@/components/FundProfileSettingsClient";
 import { InvestmentFormModal } from "@/components/InvestmentFormModal";
@@ -34,28 +32,23 @@ import { FundUnitsReconcileButton } from "@/components/FundUnitsReconcileButton"
 
 import { BatchReplacePopoverButton, type BatchReplaceFieldConfig } from "@/components/BatchReplacePopoverButton";
 
-import { RegularInvestForm } from "@/components/RegularInvestForm";
-
 import { ResizableVerticalSplit } from "@/components/ResizableVerticalSplit";
 
 import { RefreshNavButton } from "@/components/RefreshNavButton";
 
 import { AddNavButton } from "@/components/AddNavButton";
 
-import { AdvancedDataTable, type AdvancedDataTableColumn } from "@/components/AdvancedDataTable";
+import { AdvancedDataTable, type AdvancedDataTableColumn, type AdvancedDataTableSummaryRow } from "@/components/AdvancedDataTable";
 import { DetailTablePaginationControls } from "@/components/DetailTablePaginationControls";
 import { ViewExcelImportMenuButton, exportRowsToXlsx } from "@/components/ViewExcelImportMenuButton";
 
 
 
 import { subtypeDisplay } from "@/lib/investment-config";
+import { isFundLikeInvestmentAccount } from "@/lib/account-kind-utils";
 import { TRANSACTION_SOURCE_FUND_UNITS_RECONCILE, isFundUnitsReconcileEntry } from "@/lib/transaction-semantics";
-import { decodeScheduledTaskMemo, normalizeScheduledTaskType } from "@/lib/scheduled-task";
-
 import { useI18n } from "@/lib/i18n";
-import { useOutsideClose } from "@/lib/client/useOutsideClose";
-
-
+ 
 
 function fundSubtypeLabel(t: (key: string) => string, subtype: string | null | undefined, source: string | null | undefined) {
   if (source === TRANSACTION_SOURCE_FUND_UNITS_RECONCILE) return t("fundShell.subtype.unitsReconcile");
@@ -143,7 +136,6 @@ function FundMobileDetailItem({
 type Props = any;
 
 type FundTableKey = "positions" | "cleared" | "details";
-type FundTableViewportKey = "summary" | "details";
 type FundColumnSpec = readonly [string, number];
 
 const FUND_TABLE_WIDTHS_KEY = "mmh_fund_shell_column_widths_v1";
@@ -207,6 +199,7 @@ const DETAIL_COLS = [
   ["amount", 76],
   ["profit", 76],
   ["status", 72],
+  ["tags", 110],
   ["note", 160],
   ["actions", 112],
 ] as const;
@@ -214,8 +207,8 @@ const DETAIL_COLS = [
 type DetailColumnKey = typeof DETAIL_COLS[number][0];
 
 const FIXED_DETAIL_COLUMNS = new Set<DetailColumnKey>(["select", "actions"]);
-const DEFAULT_HIDDEN_DETAIL_COLUMNS = new Set<DetailColumnKey>(["confirmDate", "note"]);
-const FUND_DETAIL_HIDDEN_COLUMNS_DEFAULTS_KEY = `${FUND_DETAIL_HIDDEN_COLUMNS_KEY}:defaults_v2`;
+const DEFAULT_HIDDEN_DETAIL_COLUMNS = new Set<DetailColumnKey>(["confirmDate", "note", "tags"]);
+const FUND_DETAIL_HIDDEN_COLUMNS_DEFAULTS_KEY = `${FUND_DETAIL_HIDDEN_COLUMNS_KEY}:defaults_v3`;
 const DETAIL_COLUMN_LABEL_KEYS: Record<DetailColumnKey, string> = {
   select: "",
   date: "fundShell.col.applyDate",
@@ -230,6 +223,7 @@ const DETAIL_COLUMN_LABEL_KEYS: Record<DetailColumnKey, string> = {
   amount: "txForm.amount",
   profit: "overview.profit",
   status: "fundShell.col.status",
+  tags: "detail.column.tags",
   note: "detail.column.remark",
   actions: "",
 };
@@ -249,7 +243,15 @@ const FUND_COL_MIN_WIDTHS: Record<FundTableKey, Record<string, number>> = {
     historical: 78,
     actions: 88,
   },
-  cleared: {},
+  cleared: {
+    fund: 150,
+    firstBuy: 78,
+    clearedDate: 78,
+    buyAmount: 82,
+    redeemAmount: 82,
+    historical: 82,
+    returnRate: 62,
+  },
   details: {
     nav: 76,
   },
@@ -656,6 +658,7 @@ export function FundShell(props: Props) {
   const noClearedText = isWealthAccount ? t("fundShell.empty.cleared.wealth") : t("fundShell.empty.cleared.fund");
   const chooseHoldingText = isWealthAccount ? t("fundShell.selectHoldingFirst.wealth") : t("fundShell.selectHoldingFirst.fund");
   const investmentAccountLabel = isWealthAccount ? t("fundShell.account.wealth") : t("viewImport.fundAccount");
+  const fundAccountOptions = useMemo(() => investmentAccounts.filter((account: any) => isFundLikeInvestmentAccount(account)), [investmentAccounts]);
   const detailNameLabel = isWealthAccount ? t("fundShell.wealthProduct") : t("txForm.fund");
   const navColumnLabel = isMetalAccount ? t("fundShell.nav.unitPrice") : isWealthAccount ? t("fundShell.nav.wealth") : t("viewImport.nav");
   const detailAmountColumnLabel = isWealthAccount ? t("fundShell.amount.wealth") : t("txForm.amount");
@@ -677,23 +680,19 @@ export function FundShell(props: Props) {
   const [fundCode, setFundCode] = useState(initialFundCode);
   const [fundChartOpen, setFundChartOpen] = useState(false);
   const showAllRecords = false;
-  const [confirmDaysModalOpen, setConfirmDaysModalOpen] = useState(false);
-  const [confirmDaysModalFundCode, setConfirmDaysModalFundCode] = useState<string | null>(null);
-  const [confirmDaysModalFundName, setConfirmDaysModalFundName] = useState<string | null>(null);
-  const [confirmDaysModalTab, setConfirmDaysModalTab] = useState<"confirm" | "fee">("confirm");
-  const openConfirmDaysModal = useCallback((fundCode?: string | null, fundName?: string | null, initialTab: "confirm" | "fee" = "confirm") => {
-    setConfirmDaysModalFundCode(fundCode ?? null);
-    setConfirmDaysModalFundName(fundName ?? null);
-    setConfirmDaysModalTab(initialTab);
-    setConfirmDaysModalOpen(true);
-  }, []);
   const [fundSettingsCode, setFundSettingsCode] = useState<string | null>(null);
   const [fundSettingsName, setFundSettingsName] = useState<string | null>(null);
+  const [positionDisplayRows, setPositionDisplayRows] = useState<any[]>([]);
+  const handlePositionDisplayRowsChange = useCallback((rows: any[]) => setPositionDisplayRows(rows), []);
   const openFundSettings = useCallback((code: string | null | undefined, name?: string | null) => {
     const normalizedCode = String(code ?? "").trim();
     if (!/^\d{6}$/.test(normalizedCode)) return;
     setFundSettingsCode(normalizedCode);
     setFundSettingsName(name?.trim() || null);
+  }, []);
+  const handleFundSettingsChange = useCallback((item: FundProfileNavigationItem) => {
+    setFundSettingsCode(item.fundCode);
+    setFundSettingsName(item.fundName?.trim() || null);
   }, []);
 
   const [showCleared, setShowCleared] = useState(initialShowCleared);
@@ -703,14 +702,6 @@ export function FundShell(props: Props) {
   const [fundPageSize, setFundPageSize] = useState(20);
   const [fundDetailAll, setFundDetailAll] = useState(false);
   const [detailTableRowCount, setDetailTableRowCount] = useState(0);
-
-  const [sortKey, setSortKey] = useState("marketValue");
-
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-
-  const [clearedSortKey, setClearedSortKey] = useState("clearedDate");
-
-  const [clearedSortDir, setClearedSortDir] = useState<"asc" | "desc">("desc");
 
   const [showExportMenu, setShowExportMenu] = useState(false);
 
@@ -731,14 +722,6 @@ export function FundShell(props: Props) {
     feeRateMap,
   });
   const [fetchedFundNames, setFetchedFundNames] = useState<Record<string, string>>({});
-  const [regularPlans, setRegularPlans] = useState<any[]>([]);
-  const [editingRegularPlan, setEditingRegularPlan] = useState<any | null>(null);
-  const [positionSettingsMenu, setPositionSettingsMenu] = useState<string | null>(null);
-  const positionSettingsMenuRef = useRef<HTMLDivElement>(null);
-  const closePositionSettingsMenu = useCallback(() => setPositionSettingsMenu(null), []);
-  useOutsideClose(positionSettingsMenuRef, positionSettingsMenu !== null, closePositionSettingsMenu);
-  const [regularPlanActionBusy, setRegularPlanActionBusy] = useState(false);
-  const [regularPlanBusyId, setRegularPlanBusyId] = useState<string | null>(null);
   const [positionEntryDefaults, setPositionEntryDefaults] = useState<any | null>(null);
   const positionEntryDefaultsRef = useRef<any | null>(null);
   const [positionEntryOpenSignal, setPositionEntryOpenSignal] = useState(0);
@@ -747,14 +730,8 @@ export function FundShell(props: Props) {
     setDetailEditSignal({ id: entryId, value: Date.now() });
   }, []);
   const [columnWidths, setColumnWidths] = useState<Record<string, Record<string, number>>>({});
-  const summaryTableViewportRef = useRef<HTMLDivElement>(null);
-  const detailTableViewportRef = useRef<HTMLDivElement>(null);
   const positionColumnMenuRef = useRef<HTMLDivElement>(null);
   const detailColumnMenuRef = useRef<HTMLDivElement>(null);
-  const [tableViewportWidths, setTableViewportWidths] = useState<Record<FundTableViewportKey, number>>({
-    summary: 0,
-    details: 0,
-  });
   const [positionColumnMenuOpen, setPositionColumnMenuOpen] = useState(false);
   const [hiddenPositionColumns, setHiddenPositionColumns] = useState<Set<PositionColumnKey>>(new Set());
   const [detailColumnMenuOpen, setDetailColumnMenuOpen] = useState(false);
@@ -776,20 +753,6 @@ export function FundShell(props: Props) {
 
   // Shadow props with reactive local state
   const d = localData;
-
-  const fundSettingsFunds = useMemo<FundProfileNavigationItem[]>(() => {
-    const map = new Map<string, FundProfileNavigationItem>();
-    for (const position of [...(d.positions || []), ...(d.clearedPositions || [])] as any[]) {
-      const code = String(position?.fundCode ?? "").trim();
-      if (!/^\d{6}$/.test(code) || map.has(code)) continue;
-      const name = String(position?.name ?? position?.fundName ?? "").trim();
-      map.set(code, { fundCode: code, fundName: name && name !== code ? name : null });
-    }
-    if (fundSettingsCode && !map.has(fundSettingsCode)) {
-      map.set(fundSettingsCode, { fundCode: fundSettingsCode, fundName: fundSettingsName });
-    }
-    return Array.from(map.values()).sort((a, b) => a.fundCode.localeCompare(b.fundCode));
-  }, [d.clearedPositions, d.positions, fundSettingsCode, fundSettingsName]);
 
   useEffect(() => {
     if (!detailEditSignal) return;
@@ -903,7 +866,7 @@ export function FundShell(props: Props) {
 
 
 
-  type FundBatchField = "cashAccountId" | "fundAccountId" | "amount" | "fundConfirmDate" | "fundArrivalDate" | "remark";
+  type FundBatchField = "cashAccountId" | "fundAccountId" | "amount" | "fundFee" | "feeRate" | "fundConfirmDate" | "fundArrivalDate" | "remark";
 
 
 
@@ -913,6 +876,7 @@ export function FundShell(props: Props) {
 
   const pnl = useCallback((n: number) => pnlClassFromRedUp(n, isRedUp), [isRedUp]);
   const positionDefaultSort = useMemo(() => ({ key: "marketValue", direction: "desc" as const }), []);
+  const clearedDefaultSort = useMemo(() => ({ key: "clearedDate", direction: "desc" as const }), []);
 
   useEffect(() => {
     try {
@@ -1004,110 +968,6 @@ export function FundShell(props: Props) {
     [hiddenDetailColumns, hideRemainingUnitsDetailColumn, isSingleNormalFundScope, isWealthAccount],
   );
 
-  useEffect(() => {
-    const targets: Array<[FundTableViewportKey, RefObject<HTMLDivElement | null>]> = [
-      ["summary", summaryTableViewportRef],
-      ["details", detailTableViewportRef],
-    ];
-
-    const updateWidth = (key: FundTableViewportKey, node: HTMLDivElement | null) => {
-      if (!node) return;
-      const width = Math.floor(node.clientWidth);
-      setTableViewportWidths((prev) => (prev[key] === width ? prev : { ...prev, [key]: width }));
-    };
-
-    targets.forEach(([key, ref]) => updateWidth(key, ref.current));
-
-    if (typeof ResizeObserver === "undefined") {
-      const onResize = () => targets.forEach(([key, ref]) => updateWidth(key, ref.current));
-      window.addEventListener("resize", onResize);
-      return () => window.removeEventListener("resize", onResize);
-    }
-
-    const observers = targets.map(([key, ref]) => {
-      if (!ref.current) return null;
-      const observer = new ResizeObserver(() => updateWidth(key, ref.current));
-      observer.observe(ref.current);
-      return observer;
-    });
-
-    return () => observers.forEach((observer) => observer?.disconnect());
-  }, []);
-
-  const tableLayout = useCallback((
-    table: FundTableKey,
-    cols: readonly (readonly [string, number])[],
-    minTableWidth: number,
-    viewportWidth: number,
-  ) => {
-    const baseWidths = cols.map(([key, fallback]) => [key, colWidth(table, key, fallback)] as const);
-    const baseTotal = baseWidths.reduce((sum, [, width]) => sum + width, 0);
-    const minTotal = cols.reduce((sum, [key]) => sum + minFundColWidth(table, key), 0);
-    const preferredTotal = Math.max(minTableWidth, baseTotal);
-    const availableWidth = viewportWidth || preferredTotal;
-    const hasManualWidths = Object.keys(columnWidths[table] ?? {}).length > 0;
-
-    if (hasManualWidths) {
-      return {
-        tableWidth: Math.max(minTableWidth, baseTotal),
-        colWidths: Object.fromEntries(baseWidths.map(([key, width]) => [key, width])),
-      };
-    }
-
-    if (availableWidth >= baseTotal) {
-      const scale = baseTotal > 0 ? availableWidth / baseTotal : 1;
-      return {
-        tableWidth: availableWidth,
-        colWidths: Object.fromEntries(baseWidths.map(([key, width]) => [
-          key,
-          Math.max(minFundColWidth(table, key), width * scale),
-        ])),
-      };
-    }
-
-    if (availableWidth >= minTotal) {
-      const shrinkNeeded = baseTotal - availableWidth;
-      const shrinkCapacity = baseWidths.reduce(
-        (sum, [key, width]) => sum + Math.max(0, width - minFundColWidth(table, key)),
-        0,
-      );
-      return {
-        tableWidth: availableWidth,
-        colWidths: Object.fromEntries(baseWidths.map(([key, width]) => {
-          if (shrinkCapacity <= 0) return [key, minFundColWidth(table, key)];
-          const minWidth = minFundColWidth(table, key);
-          const capacity = Math.max(0, width - minWidth);
-          return [key, width - shrinkNeeded * (capacity / shrinkCapacity)];
-        })),
-      };
-    }
-
-    return {
-      tableWidth: minTotal,
-      colWidths: Object.fromEntries(baseWidths.map(([key]) => [key, minFundColWidth(table, key)])),
-    };
-  }, [columnWidths, colWidth]);
-
-  const clearedLayout = useMemo(
-    () => tableLayout("cleared", CLEARED_COLS, 820, tableViewportWidths.summary),
-    [tableLayout, tableViewportWidths.summary],
-  );
-  const setColWidth = useCallback((table: FundTableKey, key: string, width: number) => {
-    setColumnWidths((prev) => {
-      const next = {
-        ...prev,
-        [table]: {
-          ...(prev[table] ?? {}),
-          [key]: Math.max(minFundColWidth(table, key), Math.round(width)),
-        },
-      };
-      try {
-        window.localStorage.setItem(FUND_TABLE_WIDTHS_KEY, JSON.stringify(next));
-      } catch {}
-      return next;
-    });
-  }, []);
-
   const toggleDetailColumnVisibility = useCallback((key: DetailColumnKey) => {
     if (isWealthAccount && key === "status") return;
     if (hideRemainingUnitsDetailColumn && key === "remainingUnits") return;
@@ -1131,38 +991,6 @@ export function FundShell(props: Props) {
       return next;
     });
   }, [hideRemainingUnitsDetailColumn, isWealthAccount]);
-
-  const beginColumnResize = useCallback((event: ReactMouseEvent, table: FundTableKey, key: string, currentWidth: number, minWidth = 48) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const startX = event.clientX;
-    const startWidth = currentWidth;
-
-    const onMove = (moveEvent: MouseEvent) => {
-      setColWidth(table, key, Math.max(minWidth, startWidth + moveEvent.clientX - startX));
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [setColWidth]);
-
-  const ResizeGrip = ({ table, colKey, width, minWidth = 48 }: { table: FundTableKey; colKey: string; width: number; minWidth?: number }) => (
-    <span
-      role="separator"
-      aria-orientation="vertical"
-      onMouseDown={(event) => beginColumnResize(event, table, colKey, width, minWidth)}
-      className="absolute right-[-3px] top-0 z-20 h-full w-2 cursor-col-resize touch-none select-none hover:bg-blue-300/40"
-      title={t("table.resizeColumn")}
-    />
-  );
 
   const fundNameByCode = useMemo(() => {
     const map = new Map<string, string>();
@@ -1318,131 +1146,51 @@ export function FundShell(props: Props) {
 
   const sortedPositions = useMemo(() => {
 
-    const dir = sortDir === "asc" ? 1 : -1;
-
     return [...d.positions].sort((a: any, b: any) => {
 
-      let v = 0;
-
-      switch (sortKey) {
-
-        case "fundCode": v = a.fundCode.localeCompare(b.fundCode); break;
-
-        case "holdingDate": v = String(a.holdingDate ?? "").localeCompare(String(b.holdingDate ?? "")); break;
-
-        case "cost": v = a.cost - b.cost; break;
-
-        case "floatingPnL": v = a.floatingPnL - b.floatingPnL; break;
-
-        case "floatingPnLRate": v = a.floatingPnLRate - b.floatingPnLRate; break;
-
-        case "historicalProfit": v = a.historicalProfit - b.historicalProfit; break;
-
-        case "marketValue": default: v = a.marketValue - b.marketValue; break;
-
-      }
-
-      return v * dir;
+      const marketValueDiff = toNumber(b.marketValue) - toNumber(a.marketValue);
+      if (marketValueDiff !== 0) return marketValueDiff;
+      return String(a.fundCode ?? a.name ?? "").localeCompare(String(b.fundCode ?? b.name ?? ""));
 
     });
 
-  }, [d.positions, sortKey, sortDir]);
+  }, [d.positions]);
 
 
 
   const sortedClearedPositions = useMemo(() => {
 
-    const dir = clearedSortDir === "asc" ? 1 : -1;
-
     return [...d.clearedPositions].sort((a: any, b: any) => {
 
-      let v = 0;
-
-      switch (clearedSortKey) {
-
-        case "fundCode": v = a.fundCode.localeCompare(b.fundCode); break;
-
-        case "clearedDate": v = a.clearedDate.localeCompare(b.clearedDate); break;
-
-        case "historicalProfit": v = a.historicalProfit - b.historicalProfit; break;
-
-        default: v = a.clearedDate.localeCompare(b.clearedDate); break;
-
-      }
-
-      return v * dir;
+      const clearedDateDiff = String(b.clearedDate ?? "").localeCompare(String(a.clearedDate ?? ""));
+      if (clearedDateDiff !== 0) return clearedDateDiff;
+      return String(a.fundCode ?? a.name ?? "").localeCompare(String(b.fundCode ?? b.name ?? ""));
 
     });
 
-  }, [d.clearedPositions, clearedSortKey, clearedSortDir]);
+  }, [d.clearedPositions]);
 
-
-
-  function toggleSort(key: string) {
-
-    if (sortKey === key) setSortDir(sortDir === "desc" ? "asc" : "desc");
-
-    else { setSortKey(key); setSortDir("desc"); }
-
-  }
-
-
-
-  function toggleClearedSort(key: string) {
-
-    if (clearedSortKey === key) setClearedSortDir(clearedSortDir === "desc" ? "asc" : "desc");
-
-    else { setClearedSortKey(key); setClearedSortDir("desc"); }
-
-  }
-
-
-
-  function SortHead({
-    sk,
-    label,
-    cls,
-    sortType,
-    table,
-    colKey,
-    width,
-    minWidth,
-  }: {
-    sk: string;
-    label: string;
-    cls: string;
-    sortType?: "position" | "cleared";
-    table?: FundTableKey;
-    colKey?: string;
-    width?: number;
-    minWidth?: number;
-  }) {
-
-    const isCleared = sortType === "cleared";
-
-    const active = isCleared ? clearedSortKey === sk : sortKey === sk;
-
-    const dir = isCleared ? clearedSortDir : sortDir;
-
-    const toggle = isCleared ? toggleClearedSort : toggleSort;
-
-    return (
-
-      <th className={`${cls} relative select-none`} onClick={() => toggle(sk)} style={{ cursor: "pointer" }}>
-
-        <span className={`inline-flex items-center gap-0.5 hover:text-blue-700 ${active ? "text-blue-700" : ""}`}>
-
-          {label} {active ? <span className="text-[10px]">{dir === "asc" ? "↑" : "↓"}</span> : <span className="text-[10px] text-slate-300">↕</span>}
-
-        </span>
-
-        {table && colKey && width ? <ResizeGrip table={table} colKey={colKey} width={width} minWidth={minWidth} /> : null}
-
-      </th>
-
+  const fundSettingsFunds = useMemo<FundProfileNavigationItem[]>(() => {
+    const activeFundCodes = new Set(
+      (d.positions || [])
+        .map((position: any) => String(position?.fundCode ?? "").trim())
+        .filter((code: string) => /^\d{6}$/.test(code)),
     );
-
-  }
+    const displayedRows = (positionDisplayRows.length > 0 ? positionDisplayRows : sortedPositions)
+      .filter((position: any) => activeFundCodes.has(String(position?.fundCode ?? "").trim()));
+    const sourceRows = displayedRows.length > 0 ? displayedRows : sortedPositions;
+    const map = new Map<string, FundProfileNavigationItem>();
+    for (const position of sourceRows as any[]) {
+      const code = String(position?.fundCode ?? "").trim();
+      if (!/^\d{6}$/.test(code) || map.has(code)) continue;
+      const name = String(position?.name ?? position?.fundName ?? "").trim();
+      map.set(code, { fundCode: code, fundName: name && name !== code ? name : null });
+    }
+    if (fundSettingsCode && !map.has(fundSettingsCode)) {
+      map.set(fundSettingsCode, { fundCode: fundSettingsCode, fundName: fundSettingsName });
+    }
+    return Array.from(map.values());
+  }, [d.positions, fundSettingsCode, fundSettingsName, positionDisplayRows, sortedPositions]);
 
 
 
@@ -1778,78 +1526,6 @@ export function FundShell(props: Props) {
     return () => controller.abort();
   }, [fundCode, selectedFundChartStartDate, showSelectedFundChart, t]);
 
-  const loadRegularPlans = useCallback(async () => {
-    if (!accountId) {
-      setRegularPlans([]);
-      return;
-    }
-    try {
-      const res = await fetch(`/api/v1/regular-invest?accountId=${encodeURIComponent(accountId)}`, { cache: "no-store" });
-      const data = await res.json().catch(() => null);
-      if (!data?.ok || !Array.isArray(data.plans)) return;
-      setRegularPlans(data.plans.filter((plan: any) => plan.status !== "stopped" && plan.status !== "completed"));
-    } catch {}
-  }, [accountId]);
-
-  useEffect(() => {
-    void loadRegularPlans();
-  }, [loadRegularPlans]);
-
-  useEffect(() => {
-    const onFundChanged = (event: Event) => {
-      const detail = (event as CustomEvent<{ balanceChanged?: boolean }>).detail;
-      if (detail?.balanceChanged === false) return;
-      void loadRegularPlans();
-    };
-    window.addEventListener(FINANCE_DATA_CHANGED_EVENT, onFundChanged);
-    return () => window.removeEventListener(FINANCE_DATA_CHANGED_EVENT, onFundChanged);
-  }, [loadRegularPlans]);
-
-  const updateRegularPlanStatus = useCallback(async (plan: any, action: "pause" | "resume" | "stop") => {
-    if (!plan?.id || regularPlanActionBusy) return;
-    const actionLabel = action === "pause" ? t("fundShell.plan.pause") : action === "resume" ? t("fundShell.plan.resume") : t("fundShell.plan.stop");
-    if (action === "stop") {
-      const confirmed = await showConfirmDialog({
-        title: t("fundShell.plan.stopTitle"),
-        message: t("fundShell.plan.stopConfirm", { code: plan.fundCode }),
-        tone: "danger",
-      });
-      if (!confirmed) return;
-    }
-    setRegularPlanActionBusy(true);
-    setRegularPlanBusyId(String(plan.id));
-    try {
-      const res = await fetch("/api/v1/regular-invest", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: plan.id, action }),
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.ok) {
-        window.alert(data?.error || t("fundShell.plan.actionFailed", { action: actionLabel }));
-        return;
-      }
-      setPositionSettingsMenu(null);
-      await loadRegularPlans();
-      dispatchFinanceDataChanged({ reason: "regular-invest-plan-status" });
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : t("fundShell.plan.actionFailed", { action: actionLabel }));
-    } finally {
-      setRegularPlanActionBusy(false);
-      setRegularPlanBusyId(null);
-    }
-  }, [loadRegularPlans, regularPlanActionBusy, t]);
-
-  const regularPlanByFundCode = useMemo(() => {
-    const map = new Map<string, any>();
-    for (const plan of regularPlans) {
-      const code = String(plan?.fundCode ?? "").trim();
-      if (!code || map.has(code)) continue;
-      map.set(code, { ...plan, secondaryExecutionDay: plan.secondaryExecutionDay ?? null });
-    }
-    return map;
-  }, [regularPlans]);
-
   useEffect(() => {
     const candidates = new Map<string, string>();
     for (const e of filtered as any[]) {
@@ -1965,9 +1641,6 @@ export function FundShell(props: Props) {
   const renderPositionActions = useCallback((p: any) => {
     const positionKey = positionAssetKey(p);
     const active = positionKey === fundCode;
-    const plan = regularPlanByFundCode.get(p.fundCode);
-    const settingsKey = positionKey || p.fundCode;
-    const menuOpen = positionSettingsMenu === settingsKey;
     return (
       <div
         data-row-double-click-ignore
@@ -1988,70 +1661,9 @@ export function FundShell(props: Props) {
               className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
               title={t("fundSettings.title")}
               aria-label={t("fundSettings.title")}
-            >
+              >
               <Settings2 className="h-3.5 w-3.5" />
             </button> : null}
-            {plan ? <div ref={menuOpen ? positionSettingsMenuRef : null} className="relative">
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setPositionSettingsMenu(menuOpen ? null : settingsKey);
-                }}
-                className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                title={t("detailView.fundRegularInvest")}
-                aria-label={t("detailView.fundRegularInvest")}
-                aria-haspopup="menu"
-                aria-expanded={menuOpen}
-              >
-                <CalendarSync className="h-3.5 w-3.5" />
-              </button>
-              {menuOpen ? (
-                <div
-                  className="absolute right-0 top-7 z-50 w-36 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 text-left shadow-lg"
-                  role="menu"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <div className="flex h-7 items-center gap-1.5 px-3 text-[11px] font-medium text-slate-500">
-                    <CalendarSync className={`h-3.5 w-3.5 ${plan.status === "paused" ? "text-amber-600" : "text-blue-600"}`} />
-                    {t("detailView.fundRegularInvest")}
-                  </div>
-                  {plan.status === "active" ? (
-                        <button
-                          type="button"
-                          disabled={regularPlanActionBusy || regularPlanBusyId === plan.id}
-                          onClick={() => updateRegularPlanStatus(plan, "pause")}
-                          className="flex h-8 w-full items-center gap-1.5 px-3 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-50"
-                          role="menuitem"
-                        >
-                          <Pause className="h-3.5 w-3.5" />{t("fundShell.plan.pause")}
-                        </button>
-                  ) : (
-                        <button
-                          type="button"
-                          disabled={regularPlanActionBusy || regularPlanBusyId === plan.id}
-                          onClick={() => updateRegularPlanStatus(plan, "resume")}
-                          className="flex h-8 w-full items-center gap-1.5 px-3 text-xs text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
-                          role="menuitem"
-                        >
-                          <Play className="h-3.5 w-3.5" />{t("fundShell.plan.continue")}
-                        </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingRegularPlan(plan);
-                      setPositionSettingsMenu(null);
-                    }}
-                    className="flex h-8 w-full items-center gap-1.5 px-3 text-xs text-blue-700 hover:bg-blue-50"
-                    role="menuitem"
-                  >
-                    <Pencil className="h-3.5 w-3.5" />{t("common.edit")}
-                  </button>
-                </div>
-              ) : null}
-            </div> : null}
             {!isWealthAccount ? (
               <button
                 type="button"
@@ -2084,12 +1696,7 @@ export function FundShell(props: Props) {
     isWealthAccount,
     openFundSettings,
     positionAssetKey,
-    regularPlanActionBusy,
-    regularPlanBusyId,
-    regularPlanByFundCode,
-    positionSettingsMenu,
     switchFund,
-    updateRegularPlanStatus,
     t,
   ]);
 
@@ -2109,7 +1716,7 @@ export function FundShell(props: Props) {
           const { displayPnL } = positionDisplayMetrics(p);
           return (
             <span
-              className={`block truncate text-xs font-medium ${active ? "text-blue-700" : "text-slate-700"}`}
+              className={`block truncate font-medium ${active ? "text-blue-700" : "text-slate-700"}`}
               title={isWealthAccount ? p.name : `${p.name} ${p.fundCode}`}
             >
               {p.name}
@@ -2300,6 +1907,119 @@ export function FundShell(props: Props) {
     };
   }, [d.positions.length, d.totalCost, d.totalMarketValue, d.positionHistoricalProfit, pnl, t]);
 
+  const clearedAdvancedColumns = useMemo<AdvancedDataTableColumn<any>[]>(() => [
+    {
+      key: "fund",
+      label: t("fundShell.clearedNameHeader", { label: assetNameLabel }),
+      width: colWidth("cleared", "fund", 220),
+      minWidth: minFundColWidth("cleared", "fund"),
+      headerClassName: "text-left",
+      className: "px-4",
+      filterText: (c) => [c.name, c.fundCode].filter(Boolean).join(" "),
+      sortValue: (c) => String(isWealthAccount ? c.name ?? "" : c.fundCode ?? c.name ?? ""),
+      render: (c) => {
+        const clearedKey = positionAssetKey(c);
+        const active = clearedKey === fundCode;
+        return (
+          <span
+            className={`block truncate font-medium ${active ? "text-blue-700" : "text-slate-700"}`}
+            title={isWealthAccount ? c.name : `${c.name} ${c.fundCode}`}
+          >
+            {c.name}
+            {!isWealthAccount && c.fundCode ? <span className="ml-1 text-slate-400">{c.fundCode}</span> : null}
+          </span>
+        );
+      },
+    },
+    {
+      key: "firstBuy",
+      label: t("fundShell.col.firstBuy"),
+      width: colWidth("cleared", "firstBuy", 108),
+      minWidth: minFundColWidth("cleared", "firstBuy"),
+      headerClassName: "text-left",
+      className: "tabular-nums text-slate-600",
+      filterText: (c) => String(c.firstBuyDate ?? ""),
+      sortValue: (c) => String(c.firstBuyDate ?? ""),
+      render: (c) => c.firstBuyDate || "-",
+    },
+    {
+      key: "clearedDate",
+      label: t("fundShell.col.clearedDate"),
+      width: colWidth("cleared", "clearedDate", 108),
+      minWidth: minFundColWidth("cleared", "clearedDate"),
+      headerClassName: "text-left",
+      className: "tabular-nums text-slate-600",
+      filterText: (c) => String(c.clearedDate ?? ""),
+      sortValue: (c) => String(c.clearedDate ?? ""),
+      render: (c) => c.clearedDate || "-",
+    },
+    {
+      key: "buyAmount",
+      label: t("fundShell.col.buyAmount"),
+      width: colWidth("cleared", "buyAmount", 112),
+      minWidth: minFundColWidth("cleared", "buyAmount"),
+      align: "right",
+      className: "tabular-nums",
+      filterText: (c) => String(c.totalBuyAmount ?? 0),
+      sortValue: (c) => toNumber(c.totalBuyAmount),
+      render: (c) => formatMoney(c.totalBuyAmount),
+    },
+    {
+      key: "redeemAmount",
+      label: t("fundShell.col.redeemAmount"),
+      width: colWidth("cleared", "redeemAmount", 112),
+      minWidth: minFundColWidth("cleared", "redeemAmount"),
+      align: "right",
+      className: "tabular-nums",
+      filterText: (c) => String(c.totalRedeemAmount ?? 0),
+      sortValue: (c) => toNumber(c.totalRedeemAmount),
+      render: (c) => formatMoney(c.totalRedeemAmount),
+    },
+    {
+      key: "historical",
+      label: t("fundShell.col.clearedProfit"),
+      width: colWidth("cleared", "historical", 112),
+      minWidth: minFundColWidth("cleared", "historical"),
+      align: "right",
+      className: "tabular-nums",
+      filterText: (c) => String(c.historicalProfit ?? 0),
+      sortValue: (c) => toNumber(c.historicalProfit),
+      render: (c) => <span className={pnl(toNumber(c.historicalProfit))}>{formatMoney(c.historicalProfit)}</span>,
+    },
+    {
+      key: "returnRate",
+      label: t("stats.rate"),
+      width: colWidth("cleared", "returnRate", 80),
+      minWidth: minFundColWidth("cleared", "returnRate"),
+      align: "right",
+      className: "tabular-nums",
+      filterText: (c) => String(c.returnRate ?? 0),
+      sortValue: (c) => toNumber(c.returnRate),
+      render: (c) => {
+        const value = toNumber(c.returnRate);
+        return <span className={pnl(value)}>{Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : "-"}</span>;
+      },
+    },
+  ], [assetNameLabel, colWidth, fundCode, isWealthAccount, pnl, positionAssetKey, t]);
+
+  const clearedSummaryRow = useMemo<AdvancedDataTableSummaryRow | undefined>(() => {
+    if (d.clearedPositions.length === 0) return undefined;
+    const totalBuyAmt = d.clearedPositions.reduce((sum: number, c: any) => sum + toNumber(c.totalBuyAmount), 0);
+    const totalRedeemAmt = d.clearedPositions.reduce((sum: number, c: any) => sum + toNumber(c.totalRedeemAmount), 0);
+    const totalReturnRate = totalBuyAmt > 0 ? d.clearedHistoricalProfit / totalBuyAmt : 0;
+    return {
+      cells: {
+        fund: <span className="text-xs font-semibold text-slate-700">{t("debtShell.summaryRow")}</span>,
+        buyAmount: <span className="tabular-nums text-xs text-slate-800">{formatMoney(totalBuyAmt)}</span>,
+        redeemAmount: <span className="tabular-nums text-xs text-slate-800">{formatMoney(totalRedeemAmt)}</span>,
+        historical: <span className={`tabular-nums text-xs ${pnl(d.clearedHistoricalProfit)}`}>{formatMoney(d.clearedHistoricalProfit)}</span>,
+        returnRate: <span className={`tabular-nums text-xs ${pnl(totalReturnRate)}`}>{totalBuyAmt > 0 ? formatPercent(totalReturnRate) : "-"}</span>,
+      },
+      rowClassName: "bg-slate-50/95",
+      cellClassName: "text-xs",
+    };
+  }, [d.clearedHistoricalProfit, d.clearedPositions, pnl, t]);
+
 
   const cashAccountInfoOf = useCallback((e: any) => {
 
@@ -2344,6 +2064,12 @@ export function FundShell(props: Props) {
     const units = displayUnitsOf(e);
     return units != null && units > 0 ? "confirmed" : "pending";
   }, [detailAmountOf, displayUnitsOf, refundAmountOf]);
+
+  const entryTagsOf = useCallback((e: any): Array<{ tagId?: string; Tag?: { name?: string | null; color?: string | null } | null; name?: string; color?: string | null }> => {
+    if (Array.isArray(e?.entryTags)) return e.entryTags;
+    if (Array.isArray(e?.tags)) return e.tags;
+    return [];
+  }, []);
 
   const filteredByColumns = filtered;
 
@@ -2434,19 +2160,37 @@ export function FundShell(props: Props) {
 
       kind: "select",
 
-      options: [{ value: "", label: t("fundShell.selectAccount") }, ...investmentAccounts.map((a: any) => ({ value: a.id, label: a.label }))],
+      options: [{ value: "", label: t("fundShell.selectAccount") }, ...fundAccountOptions.map((a: any) => ({ value: a.id, label: a.label }))],
 
     },
 
     { value: "amount", label: t("txForm.amount"), kind: "number", placeholder: t("fundShell.batch.amountPlaceholder") },
 
-    { value: "fundConfirmDate", label: t("fundShell.col.confirmDate"), kind: "date", allowEmpty: true },
+    { value: "fundFee", label: t("investForm.feeAmount"), kind: "number", placeholder: "0.00", allowEmpty: true },
 
-    { value: "fundArrivalDate", label: t("fundShell.col.arrivalDate"), kind: "date", allowEmpty: true },
+    { value: "feeRate", label: t("investForm.feeRatePercent"), kind: "number", placeholder: "0" },
+
+    {
+      value: "fundConfirmDate",
+      label: t("batchImport.fundPreview.confirmDateOffset"),
+      kind: "number",
+      placeholder: t("batchImport.fundPreview.dateOffsetPlaceholder"),
+      allowEmpty: true,
+      precision: 0,
+    },
+
+    {
+      value: "fundArrivalDate",
+      label: t("batchImport.fundPreview.arrivalDateOffset"),
+      kind: "number",
+      placeholder: t("batchImport.fundPreview.dateOffsetPlaceholder"),
+      allowEmpty: true,
+      precision: 0,
+    },
 
     { value: "remark", label: t("detail.column.remark"), kind: "text", placeholder: t("stockPanel.batchNotePlaceholder"), allowEmpty: true },
 
-  ], [cashAccounts, investmentAccountLabel, investmentAccounts, t]);
+  ], [cashAccounts, fundAccountOptions, investmentAccountLabel, t]);
 
 
 
@@ -2465,6 +2209,10 @@ export function FundShell(props: Props) {
       if (field === "fundConfirmDate") return { id, fundConfirmDate: value };
 
       if (field === "fundArrivalDate") return { id, fundArrivalDate: value };
+
+      if (field === "fundFee") return { id, fundFee: value };
+
+      if (field === "feeRate") return { id, feeRate: value };
 
       if (field === "cashAccountId") return { id, cashAccountId: value };
 
@@ -2502,7 +2250,8 @@ export function FundShell(props: Props) {
 
     });
 
-    dispatchFinanceDataChanged({ reason: "fund-batch-note-update" }); return t("stockPanel.updatedCount", { count: data.updatedCount ?? 0 });
+    dispatchFinanceDataChanged({ reason: "fund-batch-update" });
+    return t("stockPanel.updatedCount", { count: data.updatedCount ?? 0 });
 
   }
 
@@ -2676,7 +2425,7 @@ export function FundShell(props: Props) {
           filterKind: "dateRange",
           filterText: (e: any) => fundApplyDateOf(e) || "",
           sortValue: (e: any) => fundApplyDateOf(e) || null,
-          render: (e: any) => <span className="tabular-nums text-xs text-slate-600">{fundApplyDateOf(e)}</span>,
+          render: (e: any) => <span className="tabular-nums text-slate-600">{fundApplyDateOf(e)}</span>,
         } satisfies AdvancedDataTableColumn<any>;
       }
 
@@ -2689,7 +2438,7 @@ export function FundShell(props: Props) {
           filterText: (e: any) => fmtDate(e.fundConfirmDate) || "",
           sortValue: (e: any) => fmtDate(e.fundConfirmDate) || null,
           render: (e: any) => (
-            <span className="tabular-nums text-xs text-slate-500">
+            <span className="tabular-nums text-slate-500">
               {e.fundConfirmDate ? fmtDate(e.fundConfirmDate) : <span className="text-slate-300">-</span>}
             </span>
           ),
@@ -2705,7 +2454,7 @@ export function FundShell(props: Props) {
           filterText: (e: any) => fmtDate(e.fundArrivalDate) || "",
           sortValue: (e: any) => fmtDate(e.fundArrivalDate) || null,
           render: (e: any) => (
-            <span className="tabular-nums text-xs text-slate-500">
+            <span className="tabular-nums text-slate-500">
               {e.fundArrivalDate ? fmtDate(e.fundArrivalDate) : <span className="text-slate-300">-</span>}
             </span>
           ),
@@ -2745,7 +2494,7 @@ export function FundShell(props: Props) {
           filterTitle: fundSearchTextOf,
           sortValue: fundLabelOf,
           render: (e: any) => (
-            <div className="truncate text-xs text-slate-700" title={isWealthAccount ? displayFundName(e) : `${displayFundName(e)} ${e.fundCode || ""}`}>
+            <div className="truncate text-slate-700" title={isWealthAccount ? displayFundName(e) : `${displayFundName(e)} ${e.fundCode || ""}`}>
               {displayFundName(e)}
               {!isWealthAccount && e.fundCode && displayFundName(e) !== e.fundCode && <span className="ml-1 text-slate-400">{e.fundCode}</span>}
             </div>
@@ -2765,7 +2514,7 @@ export function FundShell(props: Props) {
           sortValue: navValueOf,
           render: (e: any) => {
             const nav = navValueOf(e);
-            return <span className="whitespace-nowrap tabular-nums text-xs text-slate-700">{nav != null ? nav.toFixed(4) : <span className="text-slate-300">-</span>}</span>;
+            return <span className="whitespace-nowrap tabular-nums text-slate-700">{nav != null ? nav.toFixed(4) : <span className="text-slate-300">-</span>}</span>;
           },
         } satisfies AdvancedDataTableColumn<any>;
       }
@@ -2782,7 +2531,7 @@ export function FundShell(props: Props) {
           sortValue: displayUnitsOf,
           render: (e: any) => {
             const units = displayUnitsOf(e);
-            return <span className="whitespace-nowrap tabular-nums text-xs text-slate-700">{units != null ? formatFundUnits(units) : <span className="text-slate-300">-</span>}</span>;
+            return <span className="whitespace-nowrap tabular-nums text-slate-700">{units != null ? formatFundUnits(units) : <span className="text-slate-300">-</span>}</span>;
           },
         } satisfies AdvancedDataTableColumn<any>;
       }
@@ -2798,7 +2547,7 @@ export function FundShell(props: Props) {
           filterNumber: remainingUnitsValueOf,
           sortValue: remainingUnitsValueOf,
           render: (e: any) => (
-            <span className="whitespace-nowrap tabular-nums text-xs text-slate-600">
+            <span className="whitespace-nowrap tabular-nums text-slate-600">
               {remainingUnitsValueOf(e) != null ? formatFundUnits(remainingUnitsValueOf(e) ?? 0) : <span className="text-slate-300">-</span>}
             </span>
           ),
@@ -2850,7 +2599,7 @@ export function FundShell(props: Props) {
               : entryStatus === "buy_refund"
                 ? "text-emerald-700"
               : displayAmount < 0 ? downCls : "text-slate-700";
-            return <span className={`tabular-nums text-xs ${amountClass}`}>{displayText}</span>;
+            return <span className={`tabular-nums ${amountClass}`}>{displayText}</span>;
           },
         } satisfies AdvancedDataTableColumn<any>;
       }
@@ -2877,7 +2626,7 @@ export function FundShell(props: Props) {
           render: (e: any) => {
             const profit = e.realizedProfit != null ? toNumber(e.realizedProfit) : null;
             return (
-              <span className={`tabular-nums text-xs ${pnl(profit ?? 0)}`}>
+              <span className={`tabular-nums ${pnl(profit ?? 0)}`}>
                 {profit != null && (e.fundSubtype === "redeem" || e.fundSubtype === "dividend_cash") ? formatMoney(profit) : <span className="text-slate-300">-</span>}
               </span>
             );
@@ -2903,6 +2652,36 @@ export function FundShell(props: Props) {
         } satisfies AdvancedDataTableColumn<any>;
       }
 
+      if (key === "tags") {
+        return {
+          key,
+          label: t(DETAIL_COLUMN_LABEL_KEYS[key]),
+          ...common,
+          filterText: (e: any) => entryTagsOf(e).map((et: any) => et.Tag?.name ?? et.name ?? "").join(" "),
+          render: (e: any) => {
+            const tags = entryTagsOf(e);
+            if (tags.length === 0) return <span className="text-slate-300">-</span>;
+            return (
+              <span className="inline-flex flex-wrap gap-0.5">
+                {tags.map((et: any, idx: number) => {
+                  const c = et.Tag?.color || et.color || "#3B82F6";
+                  const name = et.Tag?.name || et.name || "";
+                  return (
+                    <span
+                      key={et.tagId ?? `${idx}-${name}`}
+                      className="rounded-full border px-1 py-0.5 text-[10px] leading-none"
+                      style={{ backgroundColor: c + "18", color: c, borderColor: c + "60" }}
+                    >
+                      {name}
+                    </span>
+                  );
+                })}
+              </span>
+            );
+          },
+        } satisfies AdvancedDataTableColumn<any>;
+      }
+
       if (key === "note") {
         return {
           key,
@@ -2914,7 +2693,7 @@ export function FundShell(props: Props) {
           cellTitle: (e: any) => String(e.note ?? "").trim(),
           render: (e: any) => {
             const note = String(e.note ?? "").trim();
-            return note ? <span className="text-xs text-slate-600">{note}</span> : <span className="text-slate-300">-</span>;
+            return note ? <span className="text-slate-600">{note}</span> : <span className="text-slate-300">-</span>;
           },
         } satisfies AdvancedDataTableColumn<any>;
       }
@@ -2934,6 +2713,7 @@ export function FundShell(props: Props) {
     detailNameLabel,
     displayFundName,
     displayUnitsOf,
+    entryTagsOf,
     formatFundUnits,
     fundApplyDateOf,
     isSingleNormalFundScope,
@@ -3246,18 +3026,6 @@ export function FundShell(props: Props) {
               <RefreshNavButton accountId={accountId} symbols={d.positions.map((p: any) => p.fundCode).filter(Boolean)} />
             ) : null}
 
-            {!isMetalAccount ? (
-              <button
-                type="button"
-                onClick={() => openConfirmDaysModal()}
-                className="inline-flex h-6 items-center gap-1 rounded border border-slate-200 bg-white px-2 text-xs text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                title={t("fundRules.title")}
-              >
-                <CalendarDays className="h-3.5 w-3.5" />
-                {t("fundRules.title")}
-              </button>
-            ) : null}
-
             {!isMetalAccount && !isWealthAccount ? (
               <ViewExcelImportMenuButton
                 kind="fund"
@@ -3313,7 +3081,7 @@ export function FundShell(props: Props) {
 
         </div>
 
-        <div ref={summaryTableViewportRef} className="flex-1 min-h-0 overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-hidden">
           <div className="block h-full overflow-y-auto overscroll-contain px-3 pb-4 pt-2 md:hidden">
             {!showCleared ? (
               sortedPositions.length === 0 ? (
@@ -3430,139 +3198,36 @@ export function FundShell(props: Props) {
               }}
               showFilters={false}
               fillHeight
-              compactRows
               toolbarMode="none"
               draggableRows={false}
               defaultSort={positionDefaultSort}
+              onDisplayRowsChange={handlePositionDisplayRowsChange}
               summaryRow={positionSummaryRow}
             />
 
 
           ) : (
 
-            <table
-              className="table-fixed border-separate border-spacing-0 [&_td]:border-r [&_td]:border-slate-100 [&_th]:border-r [&_th]:border-slate-200"
-              style={{ width: clearedLayout.tableWidth }}
-            >
-              <colgroup>
-                {CLEARED_COLS.map(([key, fallback]) => (
-                  <col key={key} style={{ width: clearedLayout.colWidths[key] ?? colWidth("cleared", key, fallback) }} />
-                ))}
-              </colgroup>
-
-              <thead className="sticky top-0 z-10 bg-white">
-
-                <tr>
-
-                  <SortHead sk="fundCode" label={t("fundShell.clearedNameHeader", { label: assetNameLabel })} cls="text-left text-xs font-semibold text-slate-600 px-4 py-2 border-b border-slate-200" sortType="cleared" table="cleared" colKey="fund" width={colWidth("cleared", "fund", 220)} minWidth={150} />
-
-                  <th className="relative select-none text-left text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">
-                    {t("fundShell.col.firstBuy")}
-                    <ResizeGrip table="cleared" colKey="firstBuy" width={colWidth("cleared", "firstBuy", 108)} minWidth={78} />
-                  </th>
-
-                  <SortHead sk="clearedDate" label={t("fundShell.col.clearedDate")} cls="text-left text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200" sortType="cleared" table="cleared" colKey="clearedDate" width={colWidth("cleared", "clearedDate", 108)} minWidth={78} />
-
-                  <th className="relative select-none text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">
-                    {t("fundShell.col.buyAmount")}
-                    <ResizeGrip table="cleared" colKey="buyAmount" width={colWidth("cleared", "buyAmount", 112)} minWidth={82} />
-                  </th>
-
-                  <th className="relative select-none text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">
-                    {t("fundShell.col.redeemAmount")}
-                    <ResizeGrip table="cleared" colKey="redeemAmount" width={colWidth("cleared", "redeemAmount", 112)} minWidth={82} />
-                  </th>
-
-                  <SortHead sk="historicalProfit" label={t("fundShell.col.clearedProfit")} cls="text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200" sortType="cleared" table="cleared" colKey="historical" width={colWidth("cleared", "historical", 112)} minWidth={82} />
-
-                  <th className="relative select-none text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">
-                    {t("stats.rate")}
-                    <ResizeGrip table="cleared" colKey="returnRate" width={colWidth("cleared", "returnRate", 80)} minWidth={62} />
-                  </th>
-
-                </tr>
-
-              </thead>
-
-              <tbody className="text-sm">
-
-                {sortedClearedPositions.length === 0 ? (
-
-                  <tr><td className="px-4 py-6 text-xs text-slate-500" colSpan={7}>{noClearedText}</td></tr>
-
-                ) : sortedClearedPositions.map((c: any) => {
-
-                  const clearedKey = positionAssetKey(c);
-
-                  const active = clearedKey === fundCode;
-
-                  return (
-
-                    <tr
-
-                      key={clearedKey || c.fundCode}
-
-                      onClick={() => switchFund(clearedKey)}
-
-                    className={`cursor-pointer ${active ? "bg-blue-50 hover:bg-blue-50" : "hover:bg-blue-50/40"}`}
-
-                    >
-
-                      <td className="px-4 py-2 border-b border-slate-100"><span className={`block truncate text-xs font-medium ${active ? "text-blue-700" : "text-slate-700"}`} title={isWealthAccount ? c.name : `${c.name} ${c.fundCode}`}>{c.name}{!isWealthAccount && <span className="ml-1 text-slate-400">{c.fundCode}</span>}</span></td>
-
-                      <td className="px-3 py-2 border-b border-slate-100 text-xs tabular-nums text-slate-600">{c.firstBuyDate || "-"}</td>
-
-                      <td className="px-3 py-2 border-b border-slate-100 text-xs tabular-nums text-slate-600">{c.clearedDate || "-"}</td>
-
-                      <td className="px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums">{formatMoney(c.totalBuyAmount)}</td>
-
-                      <td className="px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums">{formatMoney(c.totalRedeemAmount)}</td>
-
-                      <td className={`px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums ${pnl(c.historicalProfit)}`}>{formatMoney(c.historicalProfit)}</td>
-
-                      <td className={`px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums ${pnl(c.returnRate)}`}>{(c.returnRate * 100).toFixed(2)}%</td>
-
-                    </tr>
-
-                  );
-
-                })}
-
-              </tbody>
-
-              {sortedClearedPositions.length > 0 && (() => {
-
-                const totalBuyAmt = sortedClearedPositions.reduce((s: number, c: any) => s + c.totalBuyAmount, 0);
-
-                const totalRedeemAmt = sortedClearedPositions.reduce((s: number, c: any) => s + c.totalRedeemAmount, 0);
-
-                const totalReturnRate = totalBuyAmt > 0 ? (d.clearedHistoricalProfit / totalBuyAmt) : 0;
-
-                return (
-
-                  <tfoot className="sticky bottom-0 bg-slate-50/95 font-semibold backdrop-blur">
-
-                    <tr>
-
-                      <td className="px-4 py-2 border-t border-slate-200 text-xs text-slate-700" colSpan={3}>{t("debtShell.summaryRow")}</td>
-
-                      <td className="px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums text-slate-800">{formatMoney(totalBuyAmt)}</td>
-
-                      <td className="px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums text-slate-800">{formatMoney(totalRedeemAmt)}</td>
-
-                      <td className={`px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums ${pnl(d.clearedHistoricalProfit)}`}>{formatMoney(d.clearedHistoricalProfit)}</td>
-
-                      <td className={`px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums ${pnl(totalReturnRate)}`}>{totalBuyAmt > 0 ? formatPercent(totalReturnRate) : "-"}</td>
-
-                    </tr>
-
-                  </tfoot>
-
-                );
-
-              })()}
-
-            </table>
+            <AdvancedDataTable
+              storageKey={`mmh_fund_shell_cleared_advanced_v1:${isWealthAccount ? "wealth" : isMetalAccount ? "metal" : "fund"}`}
+              columns={clearedAdvancedColumns}
+              rows={d.clearedPositions}
+              rowKey={(c, index) => positionAssetKey(c) || c.fundCode || String(index)}
+              emptyText={noClearedText}
+              minTableWidth={Math.max(820, minFundTableWidth("cleared", CLEARED_COLS))}
+              rowClassName={(c) => {
+                const clearedKey = positionAssetKey(c);
+                const active = clearedKey === fundCode;
+                return `cursor-pointer ${active ? "bg-blue-50 hover:bg-blue-50" : "hover:bg-blue-50/40"}`;
+              }}
+              onRowClick={(c) => switchFund(positionAssetKey(c))}
+              showFilters={false}
+              fillHeight
+              toolbarMode="none"
+              draggableRows={false}
+              defaultSort={clearedDefaultSort}
+              summaryRow={clearedSummaryRow}
+            />
 
           )}
 
@@ -3570,56 +3235,6 @@ export function FundShell(props: Props) {
         </div>
 
       </div>
-
-      {editingRegularPlan ? (
-        <RegularInvestForm
-          mode="edit"
-          editData={{
-            id: editingRegularPlan.id,
-            taskType: normalizeScheduledTaskType(
-              editingRegularPlan.taskType ?? decodeScheduledTaskMemo(editingRegularPlan.memo).type,
-            ),
-            accountId: editingRegularPlan.accountId,
-            fundCode: editingRegularPlan.fundCode,
-            fundName: editingRegularPlan.fundName,
-            amount: Number(editingRegularPlan.amount ?? 0),
-            intervalUnit: editingRegularPlan.intervalUnit,
-            intervalValue: Number(editingRegularPlan.intervalValue ?? 1),
-            executionDay: editingRegularPlan.executionDay ?? null,
-            secondaryExecutionDay:
-              editingRegularPlan.secondaryExecutionDay ??
-              editingRegularPlan.plan?.secondaryExecutionDay ??
-              null,
-            startDate: String(editingRegularPlan.startDate ?? "").slice(0, 10),
-            nextRunDate: editingRegularPlan.nextRunDate ? String(editingRegularPlan.nextRunDate).slice(0, 10) : null,
-            endDate: editingRegularPlan.endDate ? String(editingRegularPlan.endDate).slice(0, 10) : null,
-            totalRuns: editingRegularPlan.totalRuns ?? null,
-            cashAccountId: editingRegularPlan.cashAccountId ?? null,
-            feeRate: editingRegularPlan.feeRate ?? null,
-            confirmDays: editingRegularPlan.confirmDays ?? null,
-            arrivalDays: editingRegularPlan.arrivalDays ?? null,
-            skipPendingPreceding: editingRegularPlan.skipPendingPreceding ?? true,
-          }}
-          accountId={editingRegularPlan.accountId}
-          accountLabel={editingRegularPlan.accountName ?? ""}
-          editAccountLabel={editingRegularPlan.accountName ?? ""}
-          cashAccounts={cashAccounts}
-          cashAccountSSOptions={cashAccountSSOptions}
-          investmentAccountSSOptions={investmentAccountSSOptions}
-          nestedFieldData={nestedFieldData}
-          showTriggerButton={false}
-          open={true}
-          onOpenChange={(open) => {
-            if (!open) setEditingRegularPlan(null);
-          }}
-          submitMethod="api"
-          onSuccess={() => {
-            setEditingRegularPlan(null);
-            void loadRegularPlans();
-            dispatchFinanceDataChanged({ reason: "regular-invest-plan:edit" });
-          }}
-        />
-      ) : null}
 
       {showSelectedFundChart ? (
         <div
@@ -3666,19 +3281,6 @@ export function FundShell(props: Props) {
         </div>
       ) : null}
 
-      <FundConfirmDaysModal
-        accountId={accountId}
-        open={confirmDaysModalOpen}
-        onClose={() => setConfirmDaysModalOpen(false)}
-        onSaved={() => {
-          setConfirmDaysModalOpen(false);
-          dispatchFinanceDataChanged({ reason: "fund-confirm-days:save", accountIds: [accountId] });
-        }}
-        initialFundCode={confirmDaysModalFundCode}
-        fundName={confirmDaysModalFundName}
-        initialTab={confirmDaysModalTab}
-      />
-
       <FundProfileSettingsModal
         open={fundSettingsCode !== null}
         account={{
@@ -3689,6 +3291,11 @@ export function FundShell(props: Props) {
         fundCode={fundSettingsCode ?? ""}
         fallbackFundName={fundSettingsName}
         funds={fundSettingsFunds}
+        onFundChange={handleFundSettingsChange}
+        investmentAccounts={investmentAccounts}
+        cashAccounts={cashAccounts}
+        investmentAccountSSOptions={investmentAccountSSOptions}
+        cashAccountSSOptions={cashAccountSSOptions}
         onClose={() => {
           setFundSettingsCode(null);
           setFundSettingsName(null);
@@ -4056,10 +3663,7 @@ export function FundShell(props: Props) {
             </div>
           )}
         </div>
-        <div
-          ref={detailTableViewportRef}
-          className="hidden flex-1 min-h-0 pb-10 md:block"
-        >
+        <div className="hidden flex-1 min-h-0 pb-10 md:block">
 
           <AdvancedDataTable
             storageKey="mmh_fund_shell_detail_advanced_table_v1"
@@ -4082,7 +3686,6 @@ export function FundShell(props: Props) {
             rowActionsMinWidth={92}
             rowClassName={(entry) => (selectedIds.has(entry.id) ? "bg-blue-50/70 hover:bg-blue-50/70" : "hover:bg-blue-50/40")}
             fillHeight
-            compactRows
             toolbarMode="none"
             showFilters
             showColumnVisibilityButton={false}

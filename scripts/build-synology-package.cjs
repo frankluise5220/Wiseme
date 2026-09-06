@@ -205,6 +205,7 @@ LEGACY_VAR_DIR="$APP_DIR/var"
 DATA_DIR="$VAR_DIR/data"
 ENV_FILE="$VAR_DIR/mmh.env"
 SYSTEM_PASSWORD_FILE="$VAR_DIR/mmh-system-password.txt"
+SESSION_SECRET_FILE="$VAR_DIR/mmh-session-secret.txt"
 PID_FILE="$VAR_DIR/mmh.pid"
 LOG_FILE="$VAR_DIR/mmh.log"
 DSM_LOG_FILE="\${SYNOPKG_TEMP_LOGFILE:-$VAR_DIR/synopkg-start.log}"
@@ -237,6 +238,21 @@ generate_system_password() {
     generated="mmh$(date +%s | tail -c 11)"
   fi
   printf '%s' "$generated"
+}
+
+generate_session_secret() {
+  generated=""
+  if command -v openssl >/dev/null 2>&1; then
+    generated="$(openssl rand -base64 48 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+  if [ -z "$generated" ] && [ -x "$NODE_BIN" ]; then
+    generated="$("$NODE_BIN" -e 'process.stdout.write(require("node:crypto").randomBytes(48).toString("base64url"))' 2>/dev/null || true)"
+  fi
+  if [ -n "$generated" ] && [ "\${#generated}" -ge 32 ]; then
+    printf '%s' "$generated"
+    return 0
+  fi
+  return 1
 }
 
 append_log() {
@@ -278,14 +294,30 @@ ensure_runtime_settings() {
   fi
   export MMH_SYSTEM_PASSWORD="$system_password"
 
+  env_session_secret="$(read_env_value MMH_SESSION_SECRET 2>/dev/null || true)"
+  session_secret="\${MMH_SESSION_SECRET:-$env_session_secret}"
+  if [ -z "$session_secret" ] && [ -f "$SESSION_SECRET_FILE" ]; then
+    session_secret="$(tr -d '[:space:]' < "$SESSION_SECRET_FILE")"
+  fi
+  if [ -z "$session_secret" ] || [ "\${#session_secret}" -lt 32 ]; then
+    session_secret="$(generate_session_secret)" || {
+      append_log "ERROR: Unable to generate a strong MMH session secret."
+      return 1
+    }
+  fi
+  export MMH_SESSION_SECRET="$session_secret"
+
   cat > "$ENV_FILE" <<EOF
 PORT=\${PORT}
 TZ=Asia/Shanghai
 MMH_SYSTEM_PASSWORD=\${MMH_SYSTEM_PASSWORD}
+MMH_SESSION_SECRET=\${MMH_SESSION_SECRET}
 EOF
   chmod 600 "$ENV_FILE" 2>/dev/null || true
   printf '%s\\n' "$MMH_SYSTEM_PASSWORD" > "$SYSTEM_PASSWORD_FILE"
   chmod 600 "$SYSTEM_PASSWORD_FILE" 2>/dev/null || true
+  printf '%s\\n' "$MMH_SESSION_SECRET" > "$SESSION_SECRET_FILE"
+  chmod 600 "$SESSION_SECRET_FILE" 2>/dev/null || true
 }
 
 migrate_legacy_var_dir() {
@@ -384,7 +416,10 @@ if [ -d "$VAR_DIR" ]; then
   BACKUP_ROOT="\${SYNOPKG_PKGDEST_VOL:-/volume1}/mmh-synology-uninstall-backups"
   STAMP="$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$BACKUP_ROOT" 2>/dev/null || exit 0
+  chmod 700 "$BACKUP_ROOT" 2>/dev/null || true
   cp -a "$VAR_DIR" "$BACKUP_ROOT/uninstall-$STAMP" 2>/dev/null || true
+  chmod 700 "$BACKUP_ROOT/uninstall-$STAMP" 2>/dev/null || true
+  chmod -R go-rwx "$BACKUP_ROOT/uninstall-$STAMP" 2>/dev/null || true
 fi
 exit 0
 `, 0o755);

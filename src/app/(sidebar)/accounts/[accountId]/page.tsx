@@ -9,6 +9,7 @@ import { formatDateLocal, toNumber } from "@/lib/date-utils";
 import { buildAccountDisplayOption, formatAccountTableLabel } from "@/lib/account-display";
 import { computeAccountDisplayBalances } from "@/lib/server/account-balance";
 import { getHouseholdScope } from "@/lib/server/household-scope";
+import { getServerAccountLabelFields } from "@/lib/server/account-label-fields";
 import { getServerT } from "@/lib/server/i18n";
 import { txRecordAccountScopeWhere } from "@/lib/transaction-account-scope";
 import { categoryOrderBy } from "@/lib/category-order";
@@ -28,6 +29,7 @@ const KIND_LABEL_KEYS: Record<string, string> = {
 export default async function MobileAccountDetailPage({ params }: { params: Promise<{ accountId: string }> }) {
   const { accountId } = await params;
   const t = await getServerT();
+  const accountLabelFields = await getServerAccountLabelFields();
   const { hidFilter } = await getHouseholdScope();
   const [account, accounts, categories] = await Promise.all([
     prisma.account.findFirst({
@@ -89,8 +91,8 @@ export default async function MobileAccountDetailPage({ params }: { params: Prom
 
   const accountDisplayById = new Map(
     accounts.map((item) => {
-      const option = buildAccountDisplayOption({ ...item, kind: String(item.kind) });
-      return [item.id, formatAccountTableLabel(option)] as const;
+      const option = buildAccountDisplayOption({ ...item, kind: String(item.kind) }, undefined, { fields: accountLabelFields });
+      return [item.id, formatAccountTableLabel(option, "", accountLabelFields)] as const;
     }),
   );
   const rows: MobileTransactionRow[] = entries.map((entry) => {

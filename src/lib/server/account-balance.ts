@@ -3,6 +3,7 @@ import { AccountKind, TransactionType } from "@prisma/client";
 import { toNumber } from "@/lib/date-utils";
 import { compareDetailEntriesAsc, getDetailEntryDisplayDate } from "@/lib/detail-entry-order";
 import { applyBalanceReconcileEntry, getBalanceReconcileTarget } from "@/lib/balance-reconcile";
+import { isLoanOrSettlementAccountKind } from "@/lib/debt";
 import { debtPrincipalForAccountSide } from "@/lib/debt";
 import { txRecordAccountScopeWhere } from "@/lib/transaction-account-scope";
 
@@ -201,7 +202,7 @@ export async function computeAccountDisplayBalances(
         .sort((a, b) => compareDetailEntriesAsc(a, b, account.id));
       let runningBalance = 0;
       for (const entry of orderedRows) {
-        if (account.kind === AccountKind.loan) {
+        if (isLoanOrSettlementAccountKind(account.kind)) {
           if (getBalanceReconcileTarget(entry) != null) {
             runningBalance = applyBalanceReconcileEntry(runningBalance, entry, account.id);
             continue;
@@ -219,6 +220,82 @@ export async function computeAccountDisplayBalances(
   return result;
 }
 
+export async function computeLoanPrincipalBalancesAsOf(
+  accounts: AccountBalanceLike[],
+  hidFilter: { householdId?: string } | undefined,
+  asOfDate: Date,
+  options?: { excludeEntryId?: string | null },
+) {
+  const accountIds = accounts
+    .filter((account) => isLoanOrSettlementAccountKind(account.kind))
+    .map((account) => account.id)
+    .filter(Boolean);
+  const result = new Map<string, number>();
+  for (const accountId of accountIds) {
+    result.set(accountId, 0);
+  }
+  if (accountIds.length === 0 || !Number.isFinite(asOfDate.getTime())) return result;
+
+  const asOfDateKey = asOfDate.toISOString().slice(0, 10);
+  const txRows = await prisma.txRecord.findMany({
+    where: {
+      deletedAt: null,
+      ...(hidFilter ?? {}),
+      ...txRecordAccountScopeWhere(accountIds),
+      ...(options?.excludeEntryId ? { id: { not: options.excludeEntryId } } : {}),
+    },
+    select: {
+      id: true,
+      date: true,
+      postedAt: true,
+      createdAt: true,
+      dayOrder: true,
+      type: true,
+      amount: true,
+      accountId: true,
+      toAccountId: true,
+      toNote: true,
+      source: true,
+      debtPrincipalAmount: true,
+      fundSubtype: true,
+      fundConfirmDate: true,
+      fundArrivalDate: true,
+    },
+  });
+
+  const txByAccountId = new Map<string, typeof txRows>();
+  for (const accountId of accountIds) {
+    txByAccountId.set(accountId, []);
+  }
+  for (const entry of txRows) {
+    if (entry.accountId && txByAccountId.has(entry.accountId)) {
+      txByAccountId.get(entry.accountId)?.push(entry);
+    }
+    if (entry.source !== FX_CONVERSION_SOURCE && entry.toAccountId && txByAccountId.has(entry.toAccountId)) {
+      txByAccountId.get(entry.toAccountId)?.push(entry);
+    }
+  }
+
+  for (const accountId of accountIds) {
+    const orderedRows = (txByAccountId.get(accountId) ?? [])
+      .filter((entry) => getDetailEntryDisplayDate(entry, accountId).toISOString().slice(0, 10) <= asOfDateKey)
+      .sort((a, b) => compareDetailEntriesAsc(a, b, accountId));
+    let runningBalance = 0;
+    for (const entry of orderedRows) {
+      const reconcileTarget = getBalanceReconcileTarget(entry);
+      if (reconcileTarget != null) {
+        runningBalance = reconcileTarget;
+        continue;
+      }
+      if (entry.type !== TransactionType.transfer) continue;
+      runningBalance += debtPrincipalForAccountSide(entry, accountId);
+    }
+    result.set(accountId, runningBalance);
+  }
+
+  return result;
+}
+
 /**
  * Recalculate an account's display balance and persist it to Account.balance.
  * For incoming-side records, the receiver always treats the flow as positive.
@@ -229,6 +306,18 @@ export async function recalcAndSaveAccountBalance(accountId: string) {
     select: { kind: true, investProductType: true, billingDay: true },
   });
   if (!acc) return;
+
+  // Credit-bill accounts (bank_credit with a billing day) always fold to a
+  // display balance of 0 — computeAccountDisplayBalances discards the folded
+  // sum for them because the shown balance is derived from the
+  // CreditCardCycle cache. Skip the full transaction-history scan entirely so
+  // saving entries on a credit card does not pull its entire ledger.
+  if (acc.kind === AccountKind.bank_credit && acc.billingDay) {
+    await prisma.account
+      .update({ where: { id: accountId }, data: { balance: "0" } })
+      .catch(() => {});
+    return;
+  }
 
   const balanceMap = await computeAccountDisplayBalances([
     { id: accountId, kind: acc.kind, investProductType: acc.investProductType, billingDay: acc.billingDay },

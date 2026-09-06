@@ -1,4 +1,4 @@
-﻿import type { StatementWorkbookSheetRows } from "@/lib/statement/alipay-template";
+import type { StatementWorkbookSheetRows } from "@/lib/statement/alipay-template";
 
 /**
  * Normalized row layout produced by the WeChat bill template.

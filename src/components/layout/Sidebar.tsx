@@ -1,4 +1,4 @@
-﻿import { Suspense } from "react";
+import { Suspense } from "react";
 import { connection } from "next/server";
 import { cookies } from "next/headers";
 import { AccountKind } from "@prisma/client";
@@ -16,6 +16,7 @@ import type { SidebarGroupMode } from "@/lib/client/appPreferences";
 import { creditCardDisplayBalanceFromCurrentCycle } from "@/lib/credit/billing";
 import { convertCurrencyAmounts } from "@/lib/server/fx-rates";
 import { normalizeCurrency } from "@/lib/currency";
+import { isLoanOrSettlementAccountKind } from "@/lib/debt";
 
 type CurrentCreditCycle = {
   accountId: string;
@@ -97,7 +98,7 @@ async function getSidebarData() {
         ? (cashDisplayBalanceByAccountId.get(account.id) ?? Number(account.balance))
       : account.kind === AccountKind.bank_credit && account.billingDay
         ? (currentCreditBalanceByAccountId.get(account.id) ?? cashDisplayBalanceByAccountId.get(account.id) ?? Number(account.balance))
-      : account.kind === AccountKind.loan
+      : isLoanOrSettlementAccountKind(account.kind)
         ? (debtDisplaySummary.balanceByAccountId.get(account.id) ?? cashDisplayBalanceByAccountId.get(account.id) ?? Number(account.balance))
         : (cashDisplayBalanceByAccountId.get(account.id) ?? Number(account.balance));
     const display = buildAccountDisplayOption({
@@ -120,11 +121,13 @@ async function getSidebarData() {
       balance,
       currency: normalizeCurrency(account.currency),
       kind: account.kind as string,
-      groupName: display.groupName || (account.kind === AccountKind.loan ? "" : "未设置所有人"),
+      groupName: account.AccountGroup?.name?.trim() || display.groupName || (isLoanOrSettlementAccountKind(account.kind) ? "" : "未设置所有人"),
       institution: display.institutionName || undefined,
       institutionId: account.institutionId ?? null,
       institutionType: account.Institution?.type ?? null,
       counterpartyId: account.counterpartyId ?? null,
+      isConsumerLoan: account.isConsumerLoan === true,
+      loanType: account.loanType ?? null,
       investProductType: account.investProductType || undefined,
       fixedAssetType: account.fixedAssetType ?? null,
     };

@@ -233,7 +233,7 @@ function AccountKindIcon({ kind, compact = false }: { kind: string; compact?: bo
           ? { icon: Banknote, className: "bg-emerald-50 text-emerald-700" }
           : kind === "deposit"
             ? { icon: PiggyBank, className: "bg-amber-50 text-amber-700" }
-            : kind === "loan"
+            : kind === "loan" || kind === "settlement"
               ? { icon: HandCoins, className: "bg-red-50 text-red-700" }
               : { icon: Wallet, className: "bg-slate-100 text-slate-700" };
   const Icon = config.icon;
@@ -245,6 +245,6 @@ function AccountKindIcon({ kind, compact = false }: { kind: string; compact?: bo
 }
 
 function moneyClass(kind: string, value: number, isRedUp: boolean) {
-  if (kind === "bank_credit" || (kind === "loan" && value < 0)) return pnlClassFromRedUp(Math.abs(value), isRedUp, "strong", true);
+  if (kind === "bank_credit" || ((kind === "loan" || kind === "settlement") && value < 0)) return pnlClassFromRedUp(Math.abs(value), isRedUp, "strong", true);
   return pnlClassFromRedUp(value, isRedUp, "strong");
 }

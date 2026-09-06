@@ -26,7 +26,6 @@ import {
 export const runtime = "nodejs";
 const RESTORE_UPLOAD_LIMIT_BYTES = 128 * 1024 * 1024;
 const RESTORE_TASK_TTL_MS = 60 * 60 * 1000;
-const LEGACY_PASSWORD_KEY = "access_password";
 
 type RestoreTaskState = "queued" | "running" | "success" | "error";
 type RestoreFallbackAdmin = {
@@ -277,14 +276,7 @@ async function verifySensitiveOperationPassword(currentUser: CurrentUser, userPa
     return null;
   }
 
-  const legacySetting = await prisma.systemSetting.findUnique({ where: { key: LEGACY_PASSWORD_KEY } });
-  if (!legacySetting?.value) {
-    return NextResponse.json({ ok: false, code: "PASSWORD_NOT_SET", error: "请先设置用户密码" }, { status: 400 });
-  }
-  if (!constantTimeEqual(password, legacySetting.value)) {
-    return NextResponse.json({ ok: false, code: "INVALID_PASSWORD", error: "用户密码错误" }, { status: 401 });
-  }
-  return null;
+  return NextResponse.json({ ok: false, code: "PASSWORD_NOT_SET", error: "请先设置用户密码" }, { status: 400 });
 }
 
 function getCredentialsFromJson(value: unknown): {
@@ -311,13 +303,6 @@ function restoreFailureMessage(error: unknown) {
     return "备份文件不是有效的 MMH 加密备份，请重新选择 .mmh-backup 文件";
   }
   return error instanceof Error ? error.message : "恢复失败";
-}
-
-/** Constant-time string comparison (hashing both sides equalizes length timing). */
-function constantTimeEqual(a: string, b: string): boolean {
-  const ah = crypto.createHash("sha256").update(String(a ?? "")).digest();
-  const bh = crypto.createHash("sha256").update(String(b ?? "")).digest();
-  return crypto.timingSafeEqual(ah, bh);
 }
 
 /**

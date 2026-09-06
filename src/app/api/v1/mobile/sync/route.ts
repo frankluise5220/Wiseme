@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { AccountKind } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 import { formatDateUtc, toNumber } from "@/lib/date-utils";
-import { getLatestFundNav, refreshLatestFundNav } from "@/lib/fund/navCache";
+import { getEffectiveLatestFundNavMap, getLatestFundNav, refreshLatestFundNav } from "@/lib/fund/navCache";
 import { getFundProfileNameMap, normalizeFundDisplayName } from "@/lib/fund/fundProfile";
 import { getApiHouseholdScope } from "@/lib/server/api-auth";
 import { isPureInvestmentAccount } from "@/lib/account-kind-utils";
@@ -21,7 +21,6 @@ const MAX_LIMIT = 5000;
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key",
   } as const;
@@ -153,6 +152,7 @@ export async function GET(req: Request) {
           balance: true,
           kind: true,
           debtDirection: true,
+          loanType: true,
           currency: true,
           isActive: true,
           isPlaceholder: true,
@@ -411,6 +411,7 @@ export async function GET(req: Request) {
           cashAccountId: true,
           cashAccountName: true,
           taskType: true,
+          planName: true,
           targetName: true,
           insuranceProductName: true,
           fundCode: true,
@@ -480,13 +481,7 @@ export async function GET(req: Request) {
       await Promise.allSettled(fundCodes.map((fundCode) => refreshLatestFundNav(fundCode)));
     }
 
-    const latestNavEntries = await Promise.all(
-      fundCodes.map(async (fundCode) => {
-        const latest = await getLatestFundNav(fundCode);
-        return latest ? [fundCode, latest] as const : null;
-      }),
-    );
-    const latestNavByCode = new Map(latestNavEntries.filter((item): item is readonly [string, NonNullable<Awaited<ReturnType<typeof getLatestFundNav>>>] => item != null));
+    const latestNavByCode = await getEffectiveLatestFundNavMap(fundCodes);
     const fundProfileNameByCode = await getFundProfileNameMap(fundCodes);
 
     const fundNav = fundCodes.length
@@ -571,6 +566,7 @@ export async function GET(req: Request) {
                 : displayBalanceByAccountId.get(account.id) ?? toNumber(account.balance),
           kind: account.kind,
           debtDirection: account.debtDirection,
+          loanType: account.loanType,
           currency: account.currency,
           isActive: account.isActive,
           isPlaceholder: account.isPlaceholder,
@@ -584,7 +580,7 @@ export async function GET(req: Request) {
           institutionId: account.institutionId,
           institutionName: account.Institution?.name ?? null,
           groupId: account.groupId,
-          groupName: account.kind === AccountKind.loan ? "" : account.AccountGroup.name,
+          groupName: account.kind === AccountKind.loan || account.kind === AccountKind.settlement ? "" : account.AccountGroup.name,
           costBasisMethod: account.costBasisMethod,
           updatedAt: account.updatedAt.toISOString(),
         })),
@@ -761,6 +757,7 @@ export async function GET(req: Request) {
             cashAccountName: item.Account_RegularInvestPlan_cashAccountIdToAccount?.name ?? item.cashAccountName,
             cashAccountInstitutionName: item.Account_RegularInvestPlan_cashAccountIdToAccount?.Institution?.name ?? null,
             taskType,
+            planName: item.planName ?? null,
             taskTitle: isFundRegularInvest ? displayFundName : item.targetName ?? task.title ?? null,
             targetName: displayTargetName,
             insuranceProductName: item.insuranceProductName,

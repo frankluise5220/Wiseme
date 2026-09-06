@@ -6,7 +6,7 @@
  * GET    ?accountId=&page=&pageSize=  List transactions (existing)
  * POST   JSON body                    Create a transaction
  * PUT    JSON body { id, ... }        Update a transaction
- * DELETE ?id=xxx or POST { id }       Delete a transaction (soft delete)
+ * DELETE ?id=xxx or POST { id }       Delete a transaction and its linked business record when one exists
  *
  * Precious metal transactions:
  * - Accept metalTypeId, metalUnitId, metalQuantity, metalUnitPrice, metalFee.
@@ -37,10 +37,13 @@
  *   semantics; do not convert detail amounts 1:1.
  *
  * Accepted entity IDs: id/entryId is TxRecord.id; businessTransactionId is WealthTransaction.id.
+ * DELETE id is TxRecord.id. If that cash flow is linked to an independent
+ * business transaction, the linked business transaction and EntryBusinessLink
+ * are soft-deleted through the shared entry-delete service.
  *
  * Authentication (mixed):
  * - cookie session (browser users)
- * - X-Api-Key header (Android client, password verified)
+ * - X-Api-Key header (Android client access key)
  */
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
@@ -61,6 +64,7 @@ import { toNumber, addWorkdaysUtc, toStatementMonth, startOfDayUtc, formatDateLo
 import { logger } from "@/lib/logger";
 import { compareDetailEntriesAsc, compareDetailEntriesDesc } from "@/lib/detail-entry-order";
 import { isDepositAccount, isInsuranceAccount, isPureInvestmentAccount, isSpecialCashTargetAccount } from "@/lib/account-kind-utils";
+import { isLoanOrSettlementAccountKind } from "@/lib/debt";
 import { getOrCreateInsuranceAccount } from "@/lib/insurance/autoAccount";
 import { normalizeInsuranceAction } from "@/lib/insurance/transaction";
 import { resolveOrCreateDepositAccount } from "@/lib/server/deposit-account";
@@ -75,6 +79,7 @@ import { touchAccountUsage } from "@/lib/server/account-usage";
 import { executeNonFundScheduledTaskPlan } from "@/lib/server/scheduled-task-executor";
 import { applyBalanceReconcileEntry } from "@/lib/balance-reconcile";
 import { attachEntryTags, replaceEntryTags } from "@/lib/server/entry-tags";
+import { softDeleteEntriesByIds } from "@/lib/server/entry-delete";
 import { calculateConfirmedBuyUnits } from "@/lib/fund/refund-link";
 import {
   createFundTransactionWithCashFlows,
@@ -112,7 +117,7 @@ import { DETAIL_ALL_PAGE_SIZE } from "@/lib/detail-pagination-preference";
 export const runtime = "nodejs";
 
 function isSettlementDebtAccountForDetail(account?: { kind?: string | null; counterpartyId?: string | null } | null) {
-  return account?.kind === AccountKind.loan && !!account.counterpartyId;
+  return account?.kind === AccountKind.settlement || (account?.kind === AccountKind.loan && !!account.counterpartyId);
 }
 
 function accountDisplayName(
@@ -170,6 +175,21 @@ async function resolveRecordFundFeeRate(record: {
   const feeType = redeemLike ? "redeem" : "buy";
   const feeDate = record.fundConfirmDate ?? record.date;
   return getFundFeeRateByDate(fundAccountId, fundCode, feeDate, feeType).catch(() => null);
+}
+
+async function resolveFundTransactionFeeRate(row: {
+  fundAccountId: string;
+  fundCode?: string | null;
+  fundSubtype?: FundSubtype | string | null;
+  applyDate: Date;
+  confirmDate?: Date | null;
+}) {
+  const fundCode = String(row.fundCode ?? "").trim();
+  if (!fundCode || !row.fundAccountId) return null;
+  const redeemLike = row.fundSubtype === FundSubtype.redeem || row.fundSubtype === FundSubtype.switch_out;
+  const feeType = redeemLike ? "redeem" : "buy";
+  const feeDate = row.confirmDate ?? row.applyDate;
+  return getFundFeeRateByDate(row.fundAccountId, fundCode, feeDate, feeType).catch(() => null);
 }
 
 async function resolveAccountDisplayBalance(
@@ -310,9 +330,9 @@ async function upsertFundBuyRefundRecord(
     toAccountName: params.cashAccountName,
     amount: refundAmount,
     currency: params.currency ?? "CNY",
-    fundCode: null,
-    fundName: null,
-    fundProductType: null,
+    fundCode: params.fundCode,
+    fundName: params.fundName,
+    fundProductType: params.fundProductType,
     fundSubtype: FundSubtype.buy_failed,
     source: "regular_invest_refund",
     fundUnits: null,
@@ -870,8 +890,9 @@ async function loadApiDetailRecord(entryId: string) {
           Account: { include: { Institution: { select: { name: true } } } },
           CashAccount: { include: { Institution: { select: { name: true } } } },
         },
-      })
+    })
     : null;
+  const linkedStockTransaction = linkedStockTransactionOf(entry);
   return {
     id: entry.id,
     date: formatDateLocal(entry.date),
@@ -923,6 +944,7 @@ async function loadApiDetailRecord(entryId: string) {
     source: entry.source,
     ...buildEntryBusinessLinkSummary(entry),
     ...(linkedWealthTransaction ? linkedWealthDetailFields(entry, linkedWealthTransaction) : {}),
+    ...(linkedStockTransaction ? linkedStockDetailFields(linkedStockTransaction) : {}),
     attachments: mapEntryAttachments(entry),
     entryTags: mapEntryTags(entry),
   };
@@ -973,6 +995,7 @@ async function loadApiFundTransactionRecord(fundTransactionId: string) {
   const validBusinessLinks = row.EntryBusinessLink.filter((link) => (
     !link.cashEntryId || (!!link.CashEntry && link.CashEntry.deletedAt == null)
   ));
+  const feeRate = await resolveFundTransactionFeeRate(row);
 
   return {
     id: row.cashEntryId ?? row.id,
@@ -1014,6 +1037,7 @@ async function loadApiFundTransactionRecord(fundTransactionId: string) {
     depositSourceEntryId: null,
     fundUnits: row.units ? toNumber(row.units) : null,
     fundFee: row.fee ? toNumber(row.fee) : null,
+    feeRate,
     fundConfirmDate: row.confirmDate ? formatDateLocal(row.confirmDate) : null,
     fundArrivalDate: row.arrivalDate ? formatDateLocal(row.arrivalDate) : null,
     fundArrivalAmount: row.arrivalAmount ? toNumber(row.arrivalAmount) : null,
@@ -1032,6 +1056,39 @@ function linkedWealthTransactionIdOf(entry: {
 }) {
   return [...(entry.EntryBusinessLinkCash ?? []), ...(entry.EntryBusinessLinkBusiness ?? [])]
     .find((link) => link.wealthTransactionId)?.wealthTransactionId ?? null;
+}
+
+function linkedStockTransactionOf(entry: {
+  EntryBusinessLinkCash?: Array<{ stockTransactionId?: string | null; StockTransaction?: any | null }> | null;
+  EntryBusinessLinkBusiness?: Array<{ stockTransactionId?: string | null; StockTransaction?: any | null }> | null;
+}) {
+  return [...(entry.EntryBusinessLinkCash ?? []), ...(entry.EntryBusinessLinkBusiness ?? [])]
+    .find((link) => link.stockTransactionId && link.StockTransaction && !link.StockTransaction.deletedAt)
+    ?.StockTransaction ?? null;
+}
+
+function linkedStockDetailFields(stockRow: any) {
+  return {
+    stockTransactionId: stockRow.id,
+    stockTransaction: {
+      id: stockRow.id,
+      stockAccountId: stockRow.stockAccountId,
+      cashAccountId: stockRow.cashAccountId ?? null,
+      securityId: stockRow.securityId ?? null,
+      market: stockRow.market ?? "",
+      stockCode: stockRow.stockCode ?? "",
+      stockName: stockRow.stockName ?? null,
+      action: stockRow.action,
+      tradeDate: stockRow.tradeDate ? formatDateLocal(stockRow.tradeDate) : "",
+      settleDate: stockRow.settleDate ? formatDateLocal(stockRow.settleDate) : null,
+      grossAmount: stockRow.grossAmount == null ? null : toNumber(stockRow.grossAmount),
+      netAmount: stockRow.netAmount == null ? null : toNumber(stockRow.netAmount),
+      quantity: stockRow.quantity == null ? null : toNumber(stockRow.quantity),
+      price: stockRow.price == null ? null : toNumber(stockRow.price),
+      brokerTradeId: stockRow.brokerTradeId ?? null,
+      note: stockRow.note ?? null,
+    },
+  };
 }
 
 function linkedWealthDetailFields(record: any, wealthRow: any) {
@@ -1346,7 +1403,10 @@ export async function GET(req: Request) {
               : linkedFundTransaction.fundAccountId,
           }
         : null;
-      const fundFeeRate = await resolveRecordFundFeeRate(record);
+      const fundFeeRate = linkedFundTransaction
+        ? await resolveFundTransactionFeeRate(linkedFundTransaction)
+        : await resolveRecordFundFeeRate(record);
+      const linkedStockTransaction = linkedStockTransactionOf(record);
       const entry = {
         id: record.id,
         date: formatDateLocal(record.date),
@@ -1435,6 +1495,7 @@ export async function GET(req: Request) {
           fundUnits: linkedFundTransaction.units ? toNumber(linkedFundTransaction.units) : null,
           fundNav: linkedFundTransaction.nav ? toNumber(linkedFundTransaction.nav) : null,
           fundFee: linkedFundTransaction.fee ? toNumber(linkedFundTransaction.fee) : null,
+          feeRate: fundFeeRate,
           fundConfirmDate: linkedFundTransaction.confirmDate ? formatDateLocal(linkedFundTransaction.confirmDate) : null,
           fundArrivalDate: linkedFundTransaction.arrivalDate ? formatDateLocal(linkedFundTransaction.arrivalDate) : null,
           fundArrivalAmount: linkedFundTransaction.arrivalAmount ? toNumber(linkedFundTransaction.arrivalAmount) : null,
@@ -1444,6 +1505,7 @@ export async function GET(req: Request) {
         } : {}),
         ...buildEntryBusinessLinkSummary(record),
         ...(linkedWealthTransaction ? linkedWealthDetailFields(record, linkedWealthTransaction) : {}),
+        ...(linkedStockTransaction ? linkedStockDetailFields(linkedStockTransaction) : {}),
         attachments: mapEntryAttachments(record),
         entryTags: mapEntryTags(record),
         linkedCandidateEntries: await getFundLinkCandidateEntries(linkedFundCandidateSeed ?? record, hidFilter.householdId),
@@ -1579,6 +1641,7 @@ export async function GET(req: Request) {
     const entries = pagedEntries.map((e) => {
       const linkedWealthId = linkedWealthTransactionIdOf(e);
       const linkedWealth = linkedWealthId ? linkedWealthById.get(linkedWealthId) ?? null : null;
+      const linkedStockTransaction = linkedStockTransactionOf(e);
       return ({
       id: e.id,
       date: formatDateLocal(e.date),
@@ -1647,6 +1710,7 @@ export async function GET(req: Request) {
       source: e.source,
       ...buildEntryBusinessLinkSummary(e),
       ...(linkedWealth ? linkedWealthDetailFields(e, linkedWealth) : {}),
+      ...(linkedStockTransaction ? linkedStockDetailFields(linkedStockTransaction) : {}),
       attachments: mapEntryAttachments(e),
       entryTags: mapEntryTags(e),
     });
@@ -1817,8 +1881,8 @@ export async function POST(req: Request) {
           tx.account.findUnique({ where: { id: toAccountId }, include: { Institution: true } }),
         ]);
         if (!fromAcc || !toAcc) throw new Error("账户不存在");
-        const isDebtTransfer = fromAcc.kind === AccountKind.loan || toAcc.kind === AccountKind.loan;
-        if (fromAcc.kind === AccountKind.loan && toAcc.kind === AccountKind.loan) {
+        const isDebtTransfer = isLoanOrSettlementAccountKind(fromAcc.kind) || isLoanOrSettlementAccountKind(toAcc.kind);
+        if (isLoanOrSettlementAccountKind(fromAcc.kind) && isLoanOrSettlementAccountKind(toAcc.kind)) {
           throw new Error("往来款账户之间不能保存为普通转账");
         }
         if (!isDebtTransfer && (isSpecialCashTargetAccount(fromAcc) || isSpecialCashTargetAccount(toAcc))) {
@@ -1826,7 +1890,7 @@ export async function POST(req: Request) {
         }
         const transferCurrency = resolveSameCurrencyTransfer(fromAcc, toAcc);
         const debtMode = isDebtTransfer
-          ? fromAcc.kind === AccountKind.loan
+          ? isLoanOrSettlementAccountKind(fromAcc.kind)
             ? fromAcc.debtDirection === "receivable" ? "collect_in" : "borrow_in"
             : toAcc.debtDirection === "receivable" ? "lend_out" : "repay_out"
           : null;
@@ -2937,8 +3001,8 @@ export async function PUT(req: Request) {
           tx.account.findUnique({ where: { id: toAccountId } }),
         ]);
         if (!fromAcc || !toAcc) throw new Error("账户不存在");
-        const isDebtTransfer = fromAcc.kind === AccountKind.loan || toAcc.kind === AccountKind.loan;
-        if (fromAcc.kind === AccountKind.loan && toAcc.kind === AccountKind.loan) {
+        const isDebtTransfer = isLoanOrSettlementAccountKind(fromAcc.kind) || isLoanOrSettlementAccountKind(toAcc.kind);
+        if (isLoanOrSettlementAccountKind(fromAcc.kind) && isLoanOrSettlementAccountKind(toAcc.kind)) {
           throw new Error("往来款账户之间不能保存为普通转账");
         }
         if (!isDebtTransfer && (isSpecialCashTargetAccount(fromAcc) || isSpecialCashTargetAccount(toAcc))) {
@@ -2946,7 +3010,7 @@ export async function PUT(req: Request) {
         }
         const transferCurrency = resolveSameCurrencyTransfer(fromAcc, toAcc);
         const debtMode = isDebtTransfer
-          ? fromAcc.kind === AccountKind.loan
+          ? isLoanOrSettlementAccountKind(fromAcc.kind)
             ? fromAcc.debtDirection === "receivable" ? "collect_in" : "borrow_in"
             : toAcc.debtDirection === "receivable" ? "lend_out" : "repay_out"
           : null;
@@ -3245,11 +3309,13 @@ export async function PUT(req: Request) {
         }
         let independentFundCategoryId: string | null = null;
         let independentFundCategoryName: string | null = null;
+        let independentFundDisplayName: string | null = null;
         if (independentFundTransaction && fundCode) {
           const confirmDateValue = toDateOrNull(body.fundConfirmDate);
           const arrivalDateValue = toDateOrNull(body.fundArrivalDate);
           const arrivalAmountValue = parseMoney(body.fundArrivalAmount) || null;
           const fundNameValue = profileEditFundDisplayName ?? inputEditFundDisplayName ?? normalizeFundDisplayName(fundCode, independentFundTransaction.fundName) ?? fundCode;
+          independentFundDisplayName = fundNameValue;
           const updateUnits = recalculatedRefundUnits ?? (hasFundUnits ? roundedFundUnits : independentFundTransaction.units);
           await tx.fundTransaction.update({
             where: { id: independentFundTransaction.id },
@@ -3352,8 +3418,10 @@ export async function PUT(req: Request) {
             categoryName: independentFundCategoryName,
             toAccountId: recordToAccountId,
             toAccountName: recordToAccountName,
-            fundCode: null,
-            fundName: isFundLikeIndependentEdit || isMetalProduct ? null : (resolvedInsuranceProductName || wealthProduct?.name || effectiveEditFundDisplayName || normalizeFundDisplayName(fundCode ?? "", entry.fundName) || entry.fundName),
+            fundCode: isFundLikeIndependentEdit ? fundCode : null,
+            fundName: isFundLikeIndependentEdit
+              ? independentFundDisplayName
+              : isMetalProduct ? null : (resolvedInsuranceProductName || wealthProduct?.name || effectiveEditFundDisplayName || normalizeFundDisplayName(fundCode ?? "", entry.fundName) || entry.fundName),
             wealthProductId: wealthProduct?.id ?? null,
             metalTypeId: metalType?.id ?? null,
             metalTypeName: metalType?.name ?? null,
@@ -3367,8 +3435,10 @@ export async function PUT(req: Request) {
             insuranceProductName: isInsuranceEdit
               ? (resolvedInsuranceProductName ?? entry.insuranceProductName ?? entry.fundName)
               : entry.insuranceProductName,
-            fundProductType: isFundLikeIndependentEdit || isInsuranceEdit ? null : (productType as any) || null,
-            fundSubtype: isFundLikeIndependentEdit ? null : finalFundSubtype,
+            fundProductType: isFundLikeIndependentEdit
+              ? (productType === "money_fund" ? "money" : (productType as any) || "fund")
+              : isInsuranceEdit ? null : (productType as any) || null,
+            fundSubtype: isFundLikeIndependentEdit ? finalFundSubtype : finalFundSubtype,
             fundConfirmDate: isFundLikeIndependentEdit || isMetalProduct ? null : toDateOrNull(body.fundConfirmDate),
             fundArrivalDate: isFundLikeIndependentEdit || isMetalProduct ? null : toDateOrNull(body.fundArrivalDate),
             fundArrivalAmount: isFundLikeIndependentEdit || isDividendReinvest ? null : parseMoney(body.fundArrivalAmount) || null,
@@ -3461,13 +3531,18 @@ export async function PUT(req: Request) {
             linkedRefundEntryId,
             refundDate: effectiveRefundDate,
             refundAmount,
+            fundAccountId: investAcc.id,
+            fundAccountName: investAcc.name,
             cashAccountId: cashAccId,
             cashAccountName: cashAccName ?? "",
+            fundCode: independentFundTransaction.fundCode,
+            fundName: effectiveEditFundDisplayName || independentFundTransaction.fundName || independentFundTransaction.fundCode,
+            fundProductType: productType,
             currency: cashAccCurrency ?? investAcc.currency ?? entry.currency ?? "CNY",
             source: "regular_invest_refund",
             note: regularInvestRefundNote(
-              fundCode,
-              effectiveEditFundDisplayName || fundCode,
+              independentFundTransaction.fundCode,
+              effectiveEditFundDisplayName || independentFundTransaction.fundName || independentFundTransaction.fundCode,
               refundAmount,
               date,
               cashAccCurrency ?? investAcc.currency ?? entry.currency ?? "CNY",
@@ -3810,9 +3885,9 @@ return;
 /**
  * DELETE /api/v1/transactions/detail?id=xxx
  *
- * Soft-deletes one transaction record.
+ * Soft-deletes one transaction record and any linked independent business record.
  *
- * Response: { ok: true } | { ok: false, code, error }
+ * Response: { ok: true, deletedCount, deletedEntryIds, removedEntryIds, accountIds } | { ok: false, code, error }
  */
 export async function DELETE(req: Request) {
   try {
@@ -3821,60 +3896,38 @@ export async function DELETE(req: Request) {
     const id = (url.searchParams.get("id") ?? "").trim();
 
     if (!id) {
-      return NextResponse.json({ ok: false, code: "MISSING_ID", error: "缺少 id" }, { status: 400 });
+      return NextResponse.json({ ok: false, code: "MISSING_ID", error: "Missing id" }, { status: 400 });
     }
 
     const { householdId } = ctx;
-
-    // Find the record first
     const txRecord = await prisma.txRecord.findUnique({ where: { id } });
 
     if (!txRecord) {
-      return NextResponse.json({ ok: false, code: "ENTRY_NOT_FOUND", error: `记录不存在 (id: ${id})` }, { status: 404 });
+      return NextResponse.json({ ok: false, code: "ENTRY_NOT_FOUND", error: `Entry not found (id: ${id})` }, { status: 404 });
     }
 
     // Verify household
     if (txRecord.householdId && txRecord.householdId !== householdId) {
-      return NextResponse.json({ ok: false, code: "ENTRY_NOT_IN_HOUSEHOLD", error: "记录不属于当前账簿" }, { status: 403 });
+      return NextResponse.json({ ok: false, code: "ENTRY_NOT_IN_HOUSEHOLD", error: "Entry does not belong to the current household" }, { status: 403 });
     }
-    const linkedFundTransaction = txRecord.type === TransactionType.investment
-      ? await findFundTransactionForEntryId(prisma, { id, householdId, syncLegacy: false })
-      : null;
-    const undo = await prepareEntryUndo(prisma, householdId, [id]);
+    if (txRecord.deletedAt) {
+      return NextResponse.json({ ok: false, code: "ENTRY_NOT_FOUND", error: `Entry not found (id: ${id})` }, { status: 404 });
+    }
 
-    // Soft delete
-    await prisma.txRecord.update({
-      where: { id },
-      data: { deletedAt: new Date() },
+    const result = await softDeleteEntriesByIds(ctx, [id], undefined, { linkedAction: "deleteBusiness" });
+    if (result.deletedCount === 0 && result.keptBusinessCount === 0) {
+      return NextResponse.json({ ok: false, code: "ENTRY_NOT_FOUND", error: `Entry not found (id: ${id})` }, { status: 404 });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      deletedCount: result.deletedCount,
+      deletedEntryIds: result.deletedEntryIds,
+      removedEntryIds: result.removedEntryIds,
+      accountIds: result.accountIds,
     });
-
-    // Recalculate balances for affected accounts
-    const accountsToRecalc = new Set<string>();
-    if (txRecord.accountId) accountsToRecalc.add(txRecord.accountId);
-    if (txRecord.toAccountId) accountsToRecalc.add(txRecord.toAccountId);
-
-    // If linked fund transaction, recalc positions from the business table.
-    if (linkedFundTransaction && !linkedFundTransaction.deletedAt) {
-      await recalcFundPositions(
-        linkedFundTransaction.fundAccountId,
-        [linkedFundTransaction.fundCode],
-      ).catch(logger.catchLog("操作失败", "route.ts"));
-    }
-
-    for (const acctId of accountsToRecalc) {
-      await recalcAndSaveAccountBalance(acctId).catch(logger.catchLog("操作失败", "route.ts"));
-    }
-
-    if (txRecord.type === TransactionType.investment || txRecord.fundProductType) {
-      revalidateAfterInvestChange();
-    } else {
-      revalidateAfterTxChange();
-    }
-
-    await saveEntryUndo(prisma, ctx, undo, "delete", "删除明细");
-    return NextResponse.json({ ok: true });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "删除失败";
+    const msg = err instanceof Error ? err.message : "Delete failed";
     console.error("DELETE /api/v1/transactions/detail error:", err);
     return NextResponse.json({ ok: false, code: "INTERNAL_ERROR", error: msg }, { status: 500 });
   }

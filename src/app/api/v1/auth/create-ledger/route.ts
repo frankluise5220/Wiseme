@@ -5,6 +5,7 @@ import {
   USER_ID_COOKIE,
   USERNAME_COOKIE,
   VERIFIED_COOKIE,
+  createVerifiedSessionValue,
   sessionCookieOptions,
 } from "@/lib/server/session-cookies";
 import { prisma } from "@/lib/db/prisma";
@@ -150,7 +151,7 @@ export async function POST(req: NextRequest) {
   });
   const maxAge = resolveSessionMaxAge(req);
   const cookieOptions = sessionCookieOptions(maxAge, req);
-  response.cookies.set(VERIFIED_COOKIE, "ok", cookieOptions);
+  response.cookies.set(VERIFIED_COOKIE, createVerifiedSessionValue(created.adminUser.id, maxAge), cookieOptions);
   response.cookies.set(USER_ID_COOKIE, created.adminUser.id, cookieOptions);
   response.cookies.set(USERNAME_COOKIE, created.adminUser.name, cookieOptions);
   response.cookies.set(HOUSEHOLD_COOKIE, created.household.id, cookieOptions);

@@ -25,7 +25,7 @@ export const PRODUCT_TYPES: readonly ProductType[] = [
 ];
 
 export function supportsCostBasisMethod(productType: string | null | undefined): boolean {
-  return productType === "fund" || productType === "money";
+  return productType === "fund" || productType === "money" || productType === "stock";
 }
 
 // Transaction types supported by each product type (layout grouping)

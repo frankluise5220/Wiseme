@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
 import { RESEND_FROM, getEnvResendConfig } from "@/lib/mail/resend";
-import { isAdmin } from "@/lib/server/auth";
+import { getCurrentUser, isAdmin } from "@/lib/server/auth";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 
 export const runtime = "nodejs";
@@ -17,6 +17,11 @@ function maskApiKey(apiKey: string) {
  * Gets the Resend mail configuration (API key and sender address).
  */
 export async function GET() {
+  const user = await getCurrentUser();
+  if (!isAdmin(user)) {
+    return NextResponse.json({ ok: false, code: "ADMIN_ONLY", error: "Administrator access required." }, { status: 403 });
+  }
+
   const setting = await prisma.systemSetting.findUnique({ where: { key: "resend_config" } });
   const envConfig = getEnvResendConfig();
   const fallback = {

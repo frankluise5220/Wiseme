@@ -1,7 +1,11 @@
 import { prisma } from "@/lib/db/prisma";
 
-/** Fixed sender address */
-export const RESEND_FROM = "mmh@floatingice.win";
+/**
+ * Default sender address. Set it with RESEND_FROM in your env / .env to use a
+ * personal verified domain; otherwise falls back to Resend's platform
+ * placeholder so the source never hardcodes a private domain.
+ */
+export const RESEND_FROM = (process.env.RESEND_FROM ?? "").trim() || "onboarding@resend.dev";
 
 type ResendConfig = {
   apiKey: string;

@@ -1,11 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Building2, CalendarDays, Check, ChevronLeft, ChevronRight, CircleDollarSign, Landmark, Loader2, Save, X } from "lucide-react";
+import { Building2, CalendarClock, CalendarDays, Check, ChevronLeft, ChevronRight, CircleDollarSign, Loader2, RefreshCw, Save, X } from "lucide-react";
 import Link from "next/link";
 
 import { FundConfirmDaysPanel, type ConfirmDayRow } from "@/components/FundConfirmDaysModal";
 import { FundFeeRatePanel, type FeeRateRecord } from "@/components/FundFeeRatePanel";
+import { FundScheduledTasksPanel, type RelatedScheduledTask } from "@/components/FundScheduledTasksPanel";
+import { RegularInvestForm } from "@/components/RegularInvestForm";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { useI18n } from "@/lib/i18n";
 import { SmartSelect, type SmartSelectOption } from "@/components/SmartSelect";
@@ -17,6 +19,7 @@ export type FundProfileSettingsData = {
   custodian: string | null;
   manager: string | null;
   navDateOffset: number;
+  tradingCalendar: string | null;
 };
 
 export type FundProfileNavigationItem = {
@@ -35,22 +38,35 @@ type FundProfileSettingsClientProps = {
   onClose?: () => void;
   modal?: boolean;
   fundCompanyOptions?: SmartSelectOption[];
-  previousFund?: FundProfileNavigationItem | null;
-  nextFund?: FundProfileNavigationItem | null;
-  onNavigate?: (fund: FundProfileNavigationItem) => void;
   onDirtyChange?: (dirty: boolean) => void;
   confirmDayRows?: ConfirmDayRow[];
   feeRateRows?: FeeRateRecord[];
   onProfileSaved?: (profile: FundProfileSettingsData) => void;
   onConfirmDaysSaved?: (result: { fundCode: string; rows: ConfirmDayRow[] }) => void;
   onFeeRatesSaved?: (result: { fundCode: string; rows: FeeRateRecord[] }) => void;
+  preloadedPlans?: RelatedScheduledTask[];
+  investmentAccounts?: { id: string; name: string; label: string }[];
+  cashAccounts?: { id: string; label: string; icon?: string; subLabel?: string }[];
+  investmentAccountSSOptions?: SmartSelectOption[];
+  cashAccountSSOptions?: SmartSelectOption[];
+  onEditPlanOpenChange?: (open: boolean) => void;
+  previousFund?: FundProfileNavigationItem | null;
+  nextFund?: FundProfileNavigationItem | null;
+  onFundNavigate?: (target: FundProfileNavigationItem | null) => void;
+  fundNavigationDisabled?: boolean;
 };
 
-type ProfileForm = Omit<FundProfileSettingsData, "navDateOffset"> & { navDateOffset: 0 | 1 };
+type ProfileForm = Omit<FundProfileSettingsData, "navDateOffset" | "tradingCalendar"> & {
+  navDateOffset: 0 | 1;
+};
 
 function toForm(profile: FundProfileSettingsData): ProfileForm {
   return {
-    ...profile,
+    fundCode: profile.fundCode,
+    fundName: profile.fundName,
+    fundCompany: profile.fundCompany,
+    custodian: profile.custodian,
+    manager: profile.manager,
     navDateOffset: profile.navDateOffset === 1 ? 1 : 0,
   };
 }
@@ -67,19 +83,61 @@ function Field({
   readOnly?: boolean;
 }) {
   return (
-    <label className="space-y-1.5">
+    <label className="space-y-1">
       <span className="block text-xs font-medium text-slate-600">{label}</span>
       <input
         value={value}
         readOnly={readOnly}
         onChange={(event) => onChange?.(event.target.value)}
-        className={["h-9 w-full rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-400", readOnly ? "bg-slate-50 text-slate-500" : "bg-white text-slate-800"].join(" ")}
+        className={["h-7 w-full rounded-md border border-slate-200 px-2.5 text-sm outline-none focus:border-blue-400", readOnly ? "bg-slate-50 text-slate-500" : "bg-white text-slate-800"].join(" ")}
       />
     </label>
   );
 }
 
-export function FundProfileSettingsClient({ account, profile, backHref, onClose, modal = false, fundCompanyOptions = [], previousFund, nextFund, onNavigate, onDirtyChange, confirmDayRows, feeRateRows, onProfileSaved, onConfirmDaysSaved, onFeeRatesSaved }: FundProfileSettingsClientProps) {
+function toDateInput(value?: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "";
+}
+
+function todayInput(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function toOptionalInt(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const parsed = typeof value === "number" ? value : parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function planToEditData(plan: RelatedScheduledTask) {
+  return {
+    id: plan.id,
+    taskType: "fund_regular_invest" as const,
+    accountId: plan.accountId || "",
+    fundCode: plan.fundCode || "",
+    fundName: plan.fundName || null,
+    amount: Number(plan.amount) || 0,
+    intervalUnit: plan.intervalUnit || "month",
+    intervalValue: Number(plan.intervalValue) || 1,
+    executionDay: toOptionalInt(plan.executionDay),
+    secondaryExecutionDay: toOptionalInt(plan.secondaryExecutionDay),
+    startDate: toDateInput(plan.startDate) || todayInput(),
+    nextRunDate: plan.nextRunDate ? toDateInput(plan.nextRunDate) || null : null,
+    lastRunDate: plan.lastRunDate ? toDateInput(plan.lastRunDate) || null : null,
+    endDate: plan.endDate ? toDateInput(plan.endDate) || null : null,
+    totalRuns: toOptionalInt(plan.totalRuns),
+    executedRuns: toOptionalInt(plan.executedRuns) ?? null,
+    cashAccountId: plan.cashAccountId || null,
+    feeRate: plan.feeRate == null ? null : Number(plan.feeRate),
+    confirmDays: plan.confirmDays == null ? null : Number(plan.confirmDays),
+    arrivalDays: plan.arrivalDays == null ? null : Number(plan.arrivalDays),
+    skipPendingPreceding: plan.skipPendingPreceding !== false,
+  };
+}
+
+export function FundProfileSettingsClient({ account, profile, backHref, onClose, modal = false, fundCompanyOptions = [], onDirtyChange, confirmDayRows, feeRateRows, onProfileSaved, onConfirmDaysSaved, onFeeRatesSaved, preloadedPlans, investmentAccounts, cashAccounts, investmentAccountSSOptions, cashAccountSSOptions, onEditPlanOpenChange, previousFund = null, nextFund = null, onFundNavigate, fundNavigationDisabled = false }: FundProfileSettingsClientProps) {
   const { t } = useI18n();
   const [form, setForm] = useState<ProfileForm>(() => toForm(profile));
   const [dirtyFields, setDirtyFields] = useState<Set<keyof ProfileForm>>(() => new Set());
@@ -87,6 +145,8 @@ export function FundProfileSettingsClient({ account, profile, backHref, onClose,
   const [fetching, setFetching] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [saveError, setSaveError] = useState("");
+  const [editPlan, setEditPlan] = useState<RelatedScheduledTask | null>(null);
+  const [scheduledReloadToken, setScheduledReloadToken] = useState(0);
 
   useEffect(() => {
     setForm(toForm(profile));
@@ -98,6 +158,10 @@ export function FundProfileSettingsClient({ account, profile, backHref, onClose,
   useEffect(() => {
     onDirtyChange?.(dirtyFields.size > 0);
   }, [dirtyFields, onDirtyChange]);
+
+  useEffect(() => {
+    onEditPlanOpenChange?.(editPlan !== null);
+  }, [editPlan, onEditPlanOpenChange]);
 
   const pendingFundCompanyOption = useMemo<SmartSelectOption | null>(() => {
     const value = form.fundCompany?.trim();
@@ -115,6 +179,10 @@ export function FundProfileSettingsClient({ account, profile, backHref, onClose,
     if (!value) return "";
     return effectiveFundCompanyOptions.find((option) => option.label.trim() === value || option.subLabel?.trim() === value)?.id ?? "";
   }, [effectiveFundCompanyOptions, form.fundCompany]);
+
+  const currentFundName = useMemo(() => {
+    return form.fundName?.trim() || profile.fundName?.trim() || "-";
+  }, [form.fundName, profile.fundName]);
 
   const updateField = useCallback(<K extends keyof ProfileForm>(key: K, value: ProfileForm[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -178,78 +246,78 @@ export function FundProfileSettingsClient({ account, profile, backHref, onClose,
     }
   }, [account.id, form, onProfileSaved, t]);
 
-  const sectionClass = "rounded-xl border border-slate-200 bg-white shadow-sm";
-  const sectionHeaderClass = "flex items-start gap-3 border-b border-slate-100 px-5 py-4";
+  const sectionClass = "rounded-lg border border-slate-200 bg-white shadow-sm";
+  const sectionHeaderClass = "flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-2.5 py-1.5";
+  const profileActionBar = (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      {saveMessage ? <span className="inline-flex items-center gap-1 text-xs text-emerald-700"><Check className="h-3.5 w-3.5" />{saveMessage}</span> : null}
+      {saveError ? <span className="text-xs text-rose-600">{saveError}</span> : null}
+      <button
+        type="button"
+        onClick={() => void fetchProfile()}
+        disabled={fetching || saving}
+        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+        aria-label={fetching ? t("fundSettings.fetchingProfile") : t("fundSettings.fetchProfile")}
+        title={fetching ? t("fundSettings.fetchingProfile") : t("fundSettings.fetchProfile")}
+      >
+        {fetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+      </button>
+      <button
+        type="button"
+        onClick={() => void saveProfile()}
+        disabled={saving || fetching}
+        className="inline-flex h-7 items-center gap-1 rounded-md bg-blue-600 px-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+      >
+        <Save className="h-3.5 w-3.5" />
+        {saving ? t("fundSettings.savingProfile") : t("fundSettings.saveProfile")}
+      </button>
+    </div>
+  );
 
   return (
     <div className={[modal ? "min-h-0 flex-1" : "flex min-h-0 flex-1", "flex flex-col overflow-hidden bg-slate-50/60"].join(" ")}>
       <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-6xl space-y-4 px-4 py-4 md:px-6 md:py-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
-            {modal && previousFund ? (
-              <button type="button" onClick={() => onNavigate?.(previousFund)} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700" aria-label={t("fundSettings.previousFund")} title={t("fundSettings.previousFund")}>
-                <ChevronLeft className="h-4 w-4" />
-              </button>
-            ) : onClose && !modal ? (
-              <button
-                type="button"
-                onClick={onClose}
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                aria-label={t("common.cancel")}
-                title={t("common.cancel")}
-              >
-                <X className="h-4 w-4" />
-              </button>
-            ) : backHref ? (
-              <Link
-                href={backHref}
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                aria-label={t("fundSettings.backToHolding")}
-                title={t("fundSettings.backToHolding")}
-              >
-                <ArrowLeft className="h-4 w-4" />
-              </Link>
-            ) : null}
+      <div className={["mx-auto w-full space-y-2 px-2.5 py-2 md:px-3", "max-w-xl"].join(" ")}>
+        <div className={modal ? "modal-header" : "px-0.5 py-0.5"}>
+          <div className={modal ? "grid flex-1 grid-cols-[minmax(0,1fr)_auto] items-center gap-3" : "grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3"}>
             <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <h1 id="fund-profile-settings-title" className="truncate text-lg font-semibold text-slate-900">{t("fundSettings.title")}</h1>
-                <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium tabular-nums text-blue-700">{profile.fundCode}</span>
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
-                <span>{profile.fundName || profile.fundCode}</span>
-                <span>{t("fundSettings.accountLabel")}: {account.name}</span>
-                <span>{t("fundSettings.institutionLabel")}: {account.institutionName || t("fundSettings.noInstitution")}</span>
+              <h1 id="fund-profile-settings-title" className="text-sm font-semibold text-slate-900">{t("fundSettings.profileSection")}</h1>
+              <div className="mt-1 flex min-w-0 items-baseline gap-2 text-sm" title={`${currentFundName} / ${form.fundCode}`}>
+                <span className="truncate font-medium text-slate-800">{currentFundName}</span>
+                <span className="shrink-0 truncate text-xs tabular-nums text-slate-500">{form.fundCode}</span>
               </div>
             </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {modal && nextFund ? (
-              <button type="button" onClick={() => onNavigate?.(nextFund)} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700" aria-label={t("fundSettings.nextFund")} title={t("fundSettings.nextFund")}>
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            ) : null}
-            {modal && onClose ? (
-              <button type="button" onClick={onClose} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700" aria-label={t("common.cancel")} title={t("common.cancel")}>
-                <X className="h-4 w-4" />
-              </button>
-            ) : null}
-            {!modal ? <div className="text-xs text-slate-500">{t("fundSettings.subtitle")}</div> : null}
+            <div className="flex h-8 w-8 items-center justify-center">
+              {onClose ? (
+                <button type="button" onClick={onClose} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700" aria-label={t("common.cancel")} title={t("common.cancel")}>
+                  <X className="h-4 w-4" />
+                </button>
+              ) : backHref ? (
+                <Link
+                  href={backHref}
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                  aria-label={t("fundSettings.backToHolding")}
+                  title={t("fundSettings.backToHolding")}
+                >
+                  <X className="h-4 w-4 rotate-45" />
+                </Link>
+              ) : null}
+            </div>
           </div>
         </div>
 
         <section className={sectionClass}>
           <div className={sectionHeaderClass}>
-            <Building2 className="mt-0.5 h-5 w-5 shrink-0 text-blue-600" />
-            <div>
+            <div className="flex min-w-0 items-center gap-2">
+              <Building2 className="h-4 w-4 shrink-0 text-blue-600" />
               <h2 className="text-sm font-semibold text-slate-900">{t("fundSettings.profileSection")}</h2>
-              <p className="mt-1 text-xs text-slate-500">{t("fundSettings.profileHint")}</p>
             </div>
+            {profileActionBar}
           </div>
-          <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-2 p-2.5 md:grid-cols-2">
             <Field label={t("fundSettings.fundCode")} value={form.fundCode} readOnly />
             <Field label={t("fundSettings.fundName")} value={form.fundName || ""} onChange={(value) => updateField("fundName", value || null)} />
-            <label className="space-y-1.5">
+            <label className="space-y-1">
               <span className="block text-xs font-medium text-slate-600">{t("fundSettings.fundCompany")}</span>
               <SmartSelect
                 mode="single"
@@ -260,54 +328,47 @@ export function FundProfileSettingsClient({ account, profile, backHref, onClose,
                 behavior={{ search: true, clearable: true, density: "compact" }}
               />
             </label>
-            <Field label={t("fundSettings.custodian")} value={form.custodian || ""} onChange={(value) => updateField("custodian", value || null)} />
-            <Field label={t("fundSettings.manager")} value={form.manager || ""} onChange={(value) => updateField("manager", value || null)} />
-            <label className="space-y-1.5">
+            <label className="space-y-1">
               <span className="block text-xs font-medium text-slate-600">{t("fundSettings.navDateOffset")}</span>
               <select
                 value={form.navDateOffset}
                 onChange={(event) => updateField("navDateOffset", event.target.value === "1" ? 1 : 0)}
-                className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 outline-none focus:border-blue-400"
+                className="h-7 w-full rounded-md border border-slate-200 bg-white px-2.5 text-sm text-slate-800 outline-none focus:border-blue-400"
               >
                 <option value={0}>{t("fundSettings.navDateOffsetCurrent")}</option>
                 <option value={1}>{t("fundSettings.navDateOffsetPrevious")}</option>
               </select>
-              <span className="block text-[11px] text-slate-400">{t("fundSettings.navDateOffsetHint")}</span>
             </label>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 px-5 py-3">
-            {!modal && saveMessage ? <span className="inline-flex items-center gap-1 text-xs text-emerald-700"><Check className="h-3.5 w-3.5" />{saveMessage}</span> : null}
-            {!modal && saveError ? <span className="text-xs text-rose-600">{saveError}</span> : null}
-            <button
-              type="button"
-              onClick={() => void fetchProfile()}
-              disabled={fetching || saving}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
-            >
-              {fetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Building2 className="h-3.5 w-3.5" />}
-              {fetching ? t("fundSettings.fetchingProfile") : t("fundSettings.fetchProfile")}
-            </button>
-            {!modal ? <button
-              type="button"
-              onClick={() => void saveProfile()}
-              disabled={saving || fetching}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-            >
-              <Save className="h-3.5 w-3.5" />
-              {saving ? t("fundSettings.savingProfile") : t("fundSettings.saveProfile")}
-            </button> : null}
-          </div>
-        </section>
-
-        <section className={sectionClass}>
-          <div className={sectionHeaderClass}>
-            <CalendarDays className="mt-0.5 h-5 w-5 shrink-0 text-blue-600" />
-            <div>
-              <h2 className="text-sm font-semibold text-slate-900">{t("fundSettings.tradingSection")}</h2>
-              <p className="mt-1 text-xs text-slate-500">{t("fundSettings.tradingHint")}</p>
+          <div className="relative border-t border-slate-100 p-2.5 pt-2">
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+              <CalendarDays className="h-3.5 w-3.5 text-blue-600" />
+              {t("fundSettings.tradingSection")}
             </div>
-          </div>
-          <div className="p-5">
+            {onFundNavigate ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onFundNavigate(previousFund)}
+                  disabled={!previousFund || fundNavigationDisabled}
+                  className="absolute left-1 top-1/2 -translate-y-[calc(50%+3rem)] z-30 inline-flex h-12 w-12 items-center justify-center rounded-full bg-blue-500/5 text-blue-700 shadow-md backdrop-blur-sm transition-all hover:bg-blue-600/30 hover:text-blue-900 disabled:cursor-not-allowed disabled:opacity-25"
+                  title={t("fundSettings.previousFund")}
+                  aria-label={t("fundSettings.previousFund")}
+                >
+                  <ChevronLeft className="h-8 w-8" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onFundNavigate(nextFund)}
+                  disabled={!nextFund || fundNavigationDisabled}
+                  className="absolute right-1 top-1/2 -translate-y-[calc(50%+3rem)] z-30 inline-flex h-12 w-12 items-center justify-center rounded-full bg-blue-500/5 text-blue-700 shadow-md backdrop-blur-sm transition-all hover:bg-blue-600/30 hover:text-blue-900 disabled:cursor-not-allowed disabled:opacity-25"
+                  title={t("fundSettings.nextFund")}
+                  aria-label={t("fundSettings.nextFund")}
+                >
+                  <ChevronRight className="h-8 w-8" />
+                </button>
+              </>
+            ) : null}
             <FundConfirmDaysPanel
               accountId={account.id}
               initialFundCode={profile.fundCode}
@@ -318,19 +379,22 @@ export function FundProfileSettingsClient({ account, profile, backHref, onClose,
                 onConfirmDaysSaved?.(result);
                 dispatchFinanceDataChanged({ reason: "fund-confirm-days:save", accountIds: [account.id] });
               }}
+              hideFundColumn
             />
           </div>
         </section>
 
         <section className={sectionClass}>
           <div className={sectionHeaderClass}>
-            <CircleDollarSign className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
-            <div>
+            <div className="flex min-w-0 items-center gap-2">
+              <CircleDollarSign className="h-4 w-4 shrink-0 text-emerald-600" />
               <h2 className="text-sm font-semibold text-slate-900">{t("fundSettings.institutionSection")}</h2>
-              <p className="mt-1 text-xs text-slate-500">{t("fundSettings.institutionHint", { institution: account.institutionName || t("fundSettings.noInstitution") })}</p>
             </div>
+            <span className="rounded bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+              {account.institutionName || t("fundSettings.noInstitution")}
+            </span>
           </div>
-          <div className="p-5">
+          <div className="p-2.5">
             <FundFeeRatePanel
               accountId={account.id}
               initialFundCode={profile.fundCode}
@@ -340,29 +404,46 @@ export function FundProfileSettingsClient({ account, profile, backHref, onClose,
                 onFeeRatesSaved?.(result);
                 dispatchFinanceDataChanged({ reason: "fund-fee-rate:save", accountIds: [account.id] });
               }}
+              hideFundColumn
+            />
+          </div>
+          <div className="border-t border-slate-100 p-2.5 pt-2">
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+              <CalendarClock className="h-3.5 w-3.5 text-indigo-600" />
+              {t("fundSettings.scheduledTaskSection")}
+            </div>
+            <FundScheduledTasksPanel
+              accountId={account.id}
+              fundCode={profile.fundCode}
+              preloadedPlans={preloadedPlans}
+              reloadToken={scheduledReloadToken}
+              onEdit={setEditPlan}
             />
           </div>
         </section>
-
-        <div className="flex items-center gap-2 px-1 pb-2 text-xs text-slate-400">
-          <Landmark className="h-3.5 w-3.5" />
-          {t("fundSettings.footerHint")}
-        </div>
       </div>
       </div>
-      {modal ? <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-white px-5 py-3">
-        {saveMessage ? <span className="mr-auto inline-flex items-center gap-1 text-xs text-emerald-700"><Check className="h-3.5 w-3.5" />{saveMessage}</span> : null}
-        {saveError ? <span className="mr-auto text-xs text-rose-600">{saveError}</span> : null}
-        <button
-              type="button"
-              onClick={() => void saveProfile()}
-              disabled={saving || fetching}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-            >
-              <Save className="h-3.5 w-3.5" />
-              {saving ? t("fundSettings.savingProfile") : t("fundSettings.saveProfile")}
-            </button>
-      </div> : null}
+      {editPlan ? (
+        <RegularInvestForm
+          key={editPlan.id}
+          mode="edit"
+          editData={planToEditData(editPlan)}
+          accountId={editPlan.accountId || account.id || ""}
+          investmentAccounts={investmentAccounts}
+          cashAccounts={cashAccounts}
+          investmentAccountSSOptions={investmentAccountSSOptions}
+          cashAccountSSOptions={cashAccountSSOptions}
+          showTriggerButton={false}
+          open={editPlan !== null}
+          onOpenChange={(open) => { if (!open) setEditPlan(null); }}
+          submitMethod="api"
+          onSuccess={() => {
+            setEditPlan(null);
+            setScheduledReloadToken((n) => n + 1);
+            dispatchFinanceDataChanged({ reason: "fund-profile-scheduled-task-edit", accountIds: [account.id] });
+          }}
+        />
+      ) : null}
     </div>
   );
 }

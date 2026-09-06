@@ -11,15 +11,55 @@ import {
   type DragEvent as ReactDragEvent,
   type ReactNode,
 } from "react";
-import { GripVertical, Pencil, SlidersHorizontal, Trash2 } from "lucide-react";
+import { GripVertical, SlidersHorizontal, Trash2 } from "lucide-react";
 import { DateRangeColumnFilter, NumberRangeColumnFilter, TableColumnFilter, TextColumnFilter } from "./TableColumnFilter";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useI18n } from "@/lib/i18n";
-import { APP_PREFS_EVENT, DEFAULT_COMPACT_ROW_HEIGHT, getCompactRowHeightPreference } from "@/lib/client/appPreferences";
+import {
+  APP_PREFS_EVENT,
+  DEFAULT_ROW_HEIGHT_MODE,
+  getRowHeightModePreference,
+  ROW_HEIGHT_PRESETS,
+  type RowHeightMode,
+} from "@/lib/client/appPreferences";
 
 const HORIZONTAL_SCROLL_TOLERANCE_PX = 4;
 const ROW_VIRTUALIZATION_THRESHOLD = 200;
 const HEADER_SORT_CLICK_DELAY_MS = 220;
+// Compact rows stay fixed; the user-facing row-height preference owns normal density.
+const COMPACT_ROW_HEIGHT = 30;
+const COMPACT_ROW_CONTENT_HEIGHT = 20;
+const ROW_BORDER_HEIGHT = 1;
+const ROW_ACTIONS_COMPACT_CLASS =
+  " [&_button]:h-5 [&_button]:w-5 [&_button]:min-h-0 [&_svg]:h-3 [&_svg]:w-3";
+const ROW_ACTIONS_SIZE_CLASS: Record<RowHeightMode, string> = {
+  41: " [&_button]:max-h-7",
+  39: " [&_button]:max-h-[27px]",
+  37: " [&_button]:max-h-[26px]",
+  35: " [&_button]:max-h-[26px]",
+  33: " [&_button]:max-h-6",
+  31: " [&_button]:max-h-[22px]",
+};
+const HEADER_PADDING_CLASS: Record<RowHeightMode, string> = {
+  41: "px-3 py-1.5",
+  39: "px-3 py-[5px]",
+  37: "px-3 py-[5px]",
+  35: "px-3 py-1",
+  33: "px-2.5 py-[3px]",
+  31: "px-2.5 py-[3px]",
+};
+// Body text size tracks row-height mode: 41px rows are 14px, 39/37px rows are 13px, and compact rows are 12px.
+// Column render callbacks should inherit this instead of hardcoding text-xs.
+// Small secondary labels and button text keep their own explicit sizing.
+const BODY_TEXT_CLASS: Record<RowHeightMode, string> = {
+  41: "text-sm",
+  // Arbitrary font-size classes need an explicit line-height to keep rows stable.
+  39: "text-[13px]/[18px]",
+  37: "text-[13px]/[18px]",
+  35: "text-xs",
+  33: "text-xs",
+  31: "text-xs",
+};
 
 function isInteractiveRowTarget(target: EventTarget | null) {
   return target instanceof Element && !!target.closest(
@@ -94,6 +134,19 @@ type ResizeGuide = {
   x: number;
   top: number;
   height: number;
+};
+
+type ColumnMenuAnchor = {
+  top: number;
+  right: number;
+};
+
+type ColumnMenuTriggerDetail = {
+  anchorRect?: {
+    left?: number;
+    right?: number;
+    bottom?: number;
+  };
 };
 
 type ResizeSession = {
@@ -199,10 +252,7 @@ function groupedRowBackgroundClass(groupIndex: number, rowInGroupIndex: number) 
 
 function inferBatchActionIcon(action: AdvancedDataTableBatchAction) {
   if (action.icon) return action.icon;
-  if (action.label.includes("删除")) return <Trash2 className="h-3.5 w-3.5" />;
-  if (action.label.includes("编辑") || action.label.includes("修改") || action.label.includes("替换")) {
-    return <Pencil className="h-3.5 w-3.5" />;
-  }
+  if (action.tone === "danger") return <Trash2 className="h-3.5 w-3.5" />;
   return null;
 }
 
@@ -368,13 +418,18 @@ export function AdvancedDataTable<T>({
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set());
   const [menuOpen, setMenuOpen] = useState(false);
+  const [externalColumnMenuAnchor, setExternalColumnMenuAnchor] = useState<ColumnMenuAnchor | null>(null);
   const [filters, setFilters] = useState<Partial<Record<string, string[]>>>({});
   const [activeFilterColumn, setActiveFilterColumn] = useState<string | null>(null);
   const [sortState, setSortState] = useState<AdvancedDataTableSortState | null>(null);
-  const [compactRowHeight, setCompactRowHeight] = useState(DEFAULT_COMPACT_ROW_HEIGHT);
-  const rowHeight = compactRows ? compactRowHeight : 38;
-  const rowPaddingY = compactRows ? Math.max(2, Math.round((compactRowHeight - 18) / 2)) : 8;
-  const rowCellPaddingStyle = compactRows ? { paddingTop: rowPaddingY, paddingBottom: rowPaddingY } : undefined;
+  const [rowHeightMode, setRowHeightMode] = useState<RowHeightMode>(DEFAULT_ROW_HEIGHT_MODE);
+  const rowHeightPreset = ROW_HEIGHT_PRESETS[rowHeightMode];
+  const rowHeight = compactRows ? COMPACT_ROW_HEIGHT : rowHeightPreset.height;
+  const rowPaddingY = compactRows
+    ? Math.max(2, Math.floor((COMPACT_ROW_HEIGHT - COMPACT_ROW_CONTENT_HEIGHT - ROW_BORDER_HEIGHT) / 2))
+    : rowHeightPreset.padding;
+  const rowCellPaddingStyle = { paddingTop: rowPaddingY, paddingBottom: rowPaddingY };
+  const rowActionsSizeClass = ROW_ACTIONS_SIZE_CLASS[rowHeightMode];
   const [internalSelectedKeys, setInternalSelectedKeys] = useState<Set<string>>(new Set());
   const [draggedRowKey, setDraggedRowKey] = useState<string | null>(null);
   const [dragTarget, setDragTarget] = useState<{ key: string; position: AdvancedDataTableDropPosition } | null>(null);
@@ -395,10 +450,12 @@ export function AdvancedDataTable<T>({
   const paginationOnRowCountChange = pagination?.onRowCountChange;
 
   useEffect(() => {
-    const syncCompactRowHeight = () => setCompactRowHeight(getCompactRowHeightPreference());
-    syncCompactRowHeight();
-    window.addEventListener(APP_PREFS_EVENT, syncCompactRowHeight);
-    return () => window.removeEventListener(APP_PREFS_EVENT, syncCompactRowHeight);
+    const syncRowSizing = () => {
+      setRowHeightMode(getRowHeightModePreference());
+    };
+    syncRowSizing();
+    window.addEventListener(APP_PREFS_EVENT, syncRowSizing);
+    return () => window.removeEventListener(APP_PREFS_EVENT, syncRowSizing);
   }, []);
 
   const clearPendingHeaderSortClick = useCallback(() => {
@@ -422,7 +479,7 @@ export function AdvancedDataTable<T>({
           <div
             data-row-double-click-ignore
             data-advanced-table-row-actions
-            className="flex items-center justify-end gap-1"
+            className={`flex items-center justify-end gap-1${compactRows ? ROW_ACTIONS_COMPACT_CLASS : rowActionsSizeClass}`}
             onClick={(event) => event.stopPropagation()}
           >
             {rowActions(row, index)}
@@ -430,7 +487,7 @@ export function AdvancedDataTable<T>({
         ),
       },
     ];
-  }, [columns, rowActions, rowActionsMinWidth, rowActionsWidth]);
+  }, [columns, compactRows, rowActions, rowActionsMinWidth, rowActionsSizeClass, rowActionsWidth]);
   const hiddenStorageKey = `${storageKey}:hidden:v2`;
   const hideableColumnKeys = useMemo(
     () => new Set(tableColumns.filter((column) => column.hideable).map((column) => column.key)),
@@ -591,7 +648,23 @@ export function AdvancedDataTable<T>({
 
   useEffect(() => {
     if (!columnVisibilityTriggerId) return;
-    const onTrigger = () => setMenuOpen(true);
+    const onTrigger = (event: Event) => {
+      const detail = (event as CustomEvent<ColumnMenuTriggerDetail>).detail;
+      const rect = detail?.anchorRect ?? (
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement.getBoundingClientRect()
+          : null
+      );
+      if (rect && Number.isFinite(rect.right) && Number.isFinite(rect.bottom)) {
+        setExternalColumnMenuAnchor({
+          top: Math.max(8, rect.bottom ?? 8) + 4,
+          right: Math.max(8, window.innerWidth - (rect.right ?? window.innerWidth - 8)),
+        });
+      } else {
+        setExternalColumnMenuAnchor(null);
+      }
+      setMenuOpen(true);
+    };
     window.addEventListener(columnVisibilityTriggerId, onTrigger);
     return () => window.removeEventListener(columnVisibilityTriggerId, onTrigger);
   }, [columnVisibilityTriggerId]);
@@ -649,9 +722,9 @@ export function AdvancedDataTable<T>({
   }, [activeFilterColumn, filters, rows, showFilters, tableColumns]);
   const filteredRows = useMemo(() => {
     if (!showFilters) return rows;
+    if (filterRows) return filterRows(rows, filters, tableColumns);
     const activeFilters = Object.entries(filters).filter(([, values]) => (values?.length ?? 0) > 0);
     if (activeFilters.length === 0) return rows;
-    if (filterRows) return filterRows(rows, filters, tableColumns);
     return rows.filter((row) => rowMatchesFilters(row, tableColumns, filters));
   }, [filterRows, filters, rows, showFilters, tableColumns]);
 
@@ -1278,6 +1351,19 @@ export function AdvancedDataTable<T>({
     setActiveFilterColumn(null);
   };
   const clearSelection = () => setSelection(new Set());
+  const columnVisibilityMenuContent = (
+    <>
+      <div className="mb-1 px-1 text-[11px] font-semibold text-slate-500">{t("table.visibleColumns")}</div>
+      <div className="max-h-56 space-y-1 overflow-y-auto">
+        {tableColumns.filter((column) => column.key !== "__row_actions").map((column) => (
+          <label key={column.key} className={`flex items-center gap-2 rounded px-1.5 py-1 text-xs ${column.hideable ? "cursor-pointer text-slate-700 hover:bg-slate-50" : "text-slate-400"}`}>
+            <input type="checkbox" checked={!hiddenKeys.has(column.key)} disabled={!column.hideable} onChange={() => toggleColumn(column.key)} className="h-3.5 w-3.5 rounded border-slate-300" />
+            <span className="truncate">{column.label}</span>
+          </label>
+        ))}
+      </div>
+    </>
+  );
   const tableStateControls = (
     <>
       {selectedCount > 0 ? (
@@ -1301,9 +1387,10 @@ export function AdvancedDataTable<T>({
       ) : null}
     </>
   );
-  const headerPaddingClass = compactRows ? "px-3 py-1.5" : "px-3 py-2";
-  const cellPaddingClass = compactRows ? "px-3 py-1.5" : "px-3 py-2";
-  const selectPaddingClass = compactRows ? "px-2 py-1.5" : "px-2 py-2";
+  const headerPaddingClass = compactRows ? "px-3 py-1" : HEADER_PADDING_CLASS[rowHeightMode];
+  const cellPaddingClass = "px-3";
+  const selectPaddingClass = "px-2";
+  const bodyTextClass = compactRows ? "text-xs" : BODY_TEXT_CLASS[rowHeightMode];
   const bodyColSpan = ((selectable || draggableRows) ? 1 : 0) + visibleColumns.length || 1;
   const showToolbar =
     toolbarMode !== "none" &&
@@ -1341,6 +1428,7 @@ export function AdvancedDataTable<T>({
               </>
             ) : (
               <>
+                {toolbarLeftContent}
                 {selectedCount > 0 ? batchActionSlot : null}
                 {selectable && selectedCount > 0 ? <span className="font-medium text-slate-600">{tf("table.selectedCount", { count: selectedCount })}</span> : null}
                 {selectedCount > 0 ? batchActions.map((action) => {
@@ -1354,7 +1442,7 @@ export function AdvancedDataTable<T>({
                       disabled={action.disabled}
                       className={
                         icon
-                          ? `flex h-6 w-6 items-center justify-center rounded border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${batchActionToneClass(action.tone ?? (action.label.includes("删除") ? "danger" : "primary"))}`
+                          ? `flex h-6 w-6 items-center justify-center rounded border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${batchActionToneClass(action.tone ?? "primary")}`
                           : "secondary-button h-7 px-2 text-xs"
                       }
                       title={title}
@@ -1379,25 +1467,35 @@ export function AdvancedDataTable<T>({
             {toolbarRightContent}
             {showColumnVisibilityButton ? (
               <div ref={columnMenuRef} className="relative">
-                <button type="button" data-advanced-table-column-settings onClick={() => setMenuOpen((open) => !open)} className="secondary-button h-7 px-2 text-xs" title={t("table.columnSettings")}>
+                <button
+                  type="button"
+                  data-advanced-table-column-settings
+                  onClick={() => {
+                    setExternalColumnMenuAnchor(null);
+                    setMenuOpen((open) => !open);
+                  }}
+                  className="secondary-button h-7 px-2 text-xs"
+                  title={t("table.columnSettings")}
+                >
                   <SlidersHorizontal className="h-3.5 w-3.5" />
                 </button>
-                {menuOpen ? (
+                {menuOpen && !externalColumnMenuAnchor ? (
                   <div className="absolute right-0 top-8 z-50 w-44 rounded-lg border border-slate-200 bg-white p-2 shadow-soft">
-                    <div className="mb-1 px-1 text-[11px] font-semibold text-slate-500">{t("table.visibleColumns")}</div>
-                    <div className="max-h-56 space-y-1 overflow-y-auto">
-                      {tableColumns.filter((column) => column.key !== "__row_actions").map((column) => (
-                        <label key={column.key} className={`flex items-center gap-2 rounded px-1.5 py-1 text-xs ${column.hideable ? "cursor-pointer text-slate-700 hover:bg-slate-50" : "text-slate-400"}`}>
-                          <input type="checkbox" checked={!hiddenKeys.has(column.key)} disabled={!column.hideable} onChange={() => toggleColumn(column.key)} className="h-3.5 w-3.5 rounded border-slate-300" />
-                          <span className="truncate">{column.label}</span>
-                        </label>
-                      ))}
-                    </div>
+                    {columnVisibilityMenuContent}
                   </div>
                 ) : null}
               </div>
             ) : null}
           </div>
+        </div>
+      ) : null}
+      {menuOpen && externalColumnMenuAnchor ? (
+        <div
+          ref={columnMenuRef}
+          className="fixed z-50 w-44 rounded-lg border border-slate-200 bg-white p-2 shadow-soft"
+          style={{ top: externalColumnMenuAnchor.top, right: externalColumnMenuAnchor.right }}
+        >
+          {columnVisibilityMenuContent}
         </div>
       ) : null}
 
@@ -1553,7 +1651,7 @@ export function AdvancedDataTable<T>({
               ))}
             </tr>
           </thead>
-          <tbody className="text-sm">
+          <tbody className={bodyTextClass}>
             {shouldVirtualizeRows && virtualPaddingTop > 0 ? (
               <tr aria-hidden="true">
                 <td colSpan={bodyColSpan} style={{ height: virtualPaddingTop, padding: 0, border: 0 }} />
@@ -1673,7 +1771,7 @@ export function AdvancedDataTable<T>({
                     return (
                       <td
                         key={column.key}
-                        className={["select-text border-b border-slate-100 text-xs", cellPaddingClass, alignClass(column.align), column.className ?? ""].join(" ")}
+                        className={["select-text border-b border-slate-100", bodyTextClass, cellPaddingClass, alignClass(column.align), column.className ?? ""].join(" ")}
                         style={{ ...rowCellPaddingStyle, ...selectionEndCellStyle }}
                       >
                         {wrappedContent}
@@ -1684,7 +1782,7 @@ export function AdvancedDataTable<T>({
               );
             }) : (
               <tr>
-                <td className="px-4 py-8 text-center text-sm text-slate-400" colSpan={bodyColSpan}>
+                <td className={`px-4 py-8 text-center text-slate-400 ${bodyTextClass}`} colSpan={bodyColSpan}>
                   {emptyText == null ? t("table.empty") : emptyText}
                 </td>
               </tr>
@@ -1707,7 +1805,8 @@ export function AdvancedDataTable<T>({
                   <td
                     key={column.key}
                     className={[
-                      "border-t border-slate-200 text-xs font-medium text-slate-700",
+                      "border-t border-slate-200 font-medium text-slate-700",
+                      bodyTextClass,
                       cellPaddingClass,
                       alignClass(column.align),
                       summaryRow.cellClassName ?? "",

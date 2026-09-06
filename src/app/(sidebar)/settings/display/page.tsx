@@ -3,10 +3,15 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
-import { SIDEBAR_CREDIT_CARD_LABEL_TEMPLATE } from "@/lib/account-display";
 import {
-  getCreditCardSidebarLabelTemplatePreference,
-  getCompactRowHeightPreference,
+  DEFAULT_ACCOUNT_LABEL_FIELDS,
+  normalizeAccountLabelFields,
+  renderAccountLabel,
+  type AccountLabelField,
+} from "@/lib/account-display";
+import {
+  getAccountLabelFieldsPreference,
+  getAccountDropdownRestrictTypePreference,
   getDetailDateBackgroundPreference,
   getDateDisplayFormatPreference,
   getDisplayLanguagePreference,
@@ -16,11 +21,15 @@ import {
   getSidebarShowFixedAssetsPreference,
   getTimeZoneModePreference,
   getTimeZonePreference,
-  setCreditCardSidebarLabelTemplatePreference,
-  setCompactRowHeightPreference,
+  DEFAULT_ROW_HEIGHT_MODE,
+  ROW_HEIGHT_OPTIONS,
+  getRowHeightModePreference,
+  normalizeRowHeightMode,
+  setAccountLabelFieldsPreference,
+  setAccountDropdownRestrictTypePreference,
+  setRowHeightModePreference,
   setDetailDateBackgroundPreference,
   setDateDisplayFormatPreference,
-  setCreditCardLabelTemplatePreference,
   setDisplayLanguagePreference,
   setSidebarGroupPreference,
   setSidebarHideInitialDataPreference,
@@ -29,11 +38,14 @@ import {
   setTimeZonePreference,
   type DisplayLanguage,
   type DateDisplayFormat,
+  type RowHeightMode,
   type SidebarGroupMode,
   type TimeZoneMode,
 } from "@/lib/client/appPreferences";
-import { CURRENCY_OPTIONS } from "@/lib/currency";
+import { kindLabel } from "@/lib/account-kinds";
+import { CurrencySmartSelect } from "@/components/CurrencySmartSelect";
 import { useI18n } from "@/lib/i18n";
+import { GripVertical, X } from "lucide-react";
 
 type ColorScheme = "red_up_green_down" | "green_up_red_down";
 
@@ -61,77 +73,35 @@ const DATE_DISPLAY_FORMAT_OPTIONS: ReadonlyArray<{ value: DateDisplayFormat; lab
   { value: "dd/mm/yyyy", labelKey: "settings.display.dateFormat.ddMmYyyy" },
 ];
 
-const CREDIT_CARD_TEMPLATE_TOKEN = {
-  owner: "{\u6240\u6709\u4eba}",
-  institutionShort: "{\u673a\u6784\u7b80\u79f0}",
-  institutionFull: "{\u673a\u6784\u5168\u79f0}",
-  institutionName: "{\u673a\u6784\u540d\u79f0}",
-  cardName: "{\u4fe1\u7528\u5361\u540d\u79f0}",
-  accountName: "{\u8d26\u6237\u540d\u79f0}",
-  last4: "{\u4fe1\u7528\u5361\u540e4\u4f4d}",
-  shortLast4: "{\u540e4\u4f4d}",
-  separator: "·",
-} as const;
-
-const CREDIT_CARD_NAME_PRESETS = [
-  {
-    value: `${CREDIT_CARD_TEMPLATE_TOKEN.institutionShort}${CREDIT_CARD_TEMPLATE_TOKEN.last4}`,
-    labelKey: "settings.display.preset.short",
-  },
-  {
-    value: `${CREDIT_CARD_TEMPLATE_TOKEN.institutionShort}${CREDIT_CARD_TEMPLATE_TOKEN.separator}${CREDIT_CARD_TEMPLATE_TOKEN.last4}`,
-    labelKey: "settings.display.preset.shortDot",
-  },
-  {
-    value: `${CREDIT_CARD_TEMPLATE_TOKEN.institutionName}${CREDIT_CARD_TEMPLATE_TOKEN.separator}${CREDIT_CARD_TEMPLATE_TOKEN.cardName}`,
-    labelKey: "settings.display.preset.full",
-  },
-  {
-    value: `${CREDIT_CARD_TEMPLATE_TOKEN.institutionShort}${CREDIT_CARD_TEMPLATE_TOKEN.separator}${CREDIT_CARD_TEMPLATE_TOKEN.cardName}${CREDIT_CARD_TEMPLATE_TOKEN.separator}${CREDIT_CARD_TEMPLATE_TOKEN.last4}`,
-    labelKey: "settings.display.preset.fullShort",
-  },
+const ACCOUNT_LABEL_FIELD_OPTIONS: ReadonlyArray<{ value: AccountLabelField; labelKey: string }> = [
+  { value: "owner", labelKey: "settings.display.accountFormatField.owner" },
+  { value: "institution", labelKey: "settings.display.accountFormatField.institution" },
+  { value: "institutionShort", labelKey: "settings.display.accountFormatField.institutionShort" },
+  { value: "name", labelKey: "settings.display.accountFormatField.name" },
+  { value: "last4", labelKey: "settings.display.accountFormatField.last4" },
+  { value: "kind", labelKey: "settings.display.accountFormatField.kind" },
 ];
 
-const CREDIT_CARD_NAME_FIELDS = [
-  { value: CREDIT_CARD_TEMPLATE_TOKEN.owner, labelKey: "settings.display.creditCardField.owner" },
-  { value: CREDIT_CARD_TEMPLATE_TOKEN.institutionShort, labelKey: "settings.display.creditCardField.institutionShort" },
-  { value: CREDIT_CARD_TEMPLATE_TOKEN.institutionName, labelKey: "settings.display.creditCardField.institutionName" },
-  { value: CREDIT_CARD_TEMPLATE_TOKEN.cardName, labelKey: "settings.display.creditCardField.cardName" },
-  { value: CREDIT_CARD_TEMPLATE_TOKEN.last4, labelKey: "settings.display.creditCardField.last4" },
-  { value: CREDIT_CARD_TEMPLATE_TOKEN.separator, labelKey: "settings.display.creditCardField.separator" },
-];
-
-type CreditCardPreviewSample = {
-  ownerName: string;
-  institutionShort: string;
-  institutionName: string;
-  cardName: string;
-  last4: string;
-};
-
-const CREDIT_CARD_PREVIEW_SAMPLE: CreditCardPreviewSample = {
-  ownerName: "\u5f20\u56db",
-  institutionShort: "\u62db\u884c",
-  institutionName: "\u62db\u5546\u94f6\u884c",
-  cardName: "\u4f18\u4eab\u767d\u91d1\u5361",
-  last4: "8333",
-};
-
-function previewCreditCardName(value: string, sample: CreditCardPreviewSample) {
-  const last4 = sample.cardName.includes(sample.last4) ? "" : sample.last4;
-  return value
-    .replaceAll(CREDIT_CARD_TEMPLATE_TOKEN.institutionShort, sample.institutionShort)
-    .replaceAll(CREDIT_CARD_TEMPLATE_TOKEN.institutionFull, sample.institutionName)
-    .replaceAll(CREDIT_CARD_TEMPLATE_TOKEN.institutionName, sample.institutionName)
-    .replaceAll(CREDIT_CARD_TEMPLATE_TOKEN.owner, sample.ownerName)
-    .replaceAll(CREDIT_CARD_TEMPLATE_TOKEN.cardName, sample.cardName)
-    .replaceAll(CREDIT_CARD_TEMPLATE_TOKEN.accountName, sample.cardName)
-    .replaceAll(CREDIT_CARD_TEMPLATE_TOKEN.last4, last4)
-    .replaceAll(CREDIT_CARD_TEMPLATE_TOKEN.shortLast4, last4)
-    .replace(/[·]{2,}/g, "·")
-    .replace(/(^[·\s]+|[·\s]+$)/g, "")
-    .trim();
-}
+const ACCOUNT_FORMAT_PREVIEW_SAMPLES = [
+  {
+    id: "debit",
+    labelKey: "settings.display.accountFormatSampleDebit",
+    ownerName: "\u5f20\u56db",
+    institution: { name: "\u62db\u5546\u94f6\u884c", shortName: "\u62db\u884c" },
+    accountName: "\u4e00\u5361\u901a",
+    numberMasked: "8333",
+    kind: "bank_debit",
+  },
+  {
+    id: "fund",
+    labelKey: "settings.display.accountFormatSampleFund",
+    ownerName: "\u5f20\u56db",
+    institution: { name: "\u62db\u5546\u94f6\u884c", shortName: "\u62db\u884c" },
+    accountName: "\u62db\u5546\u94f6\u884c\u57fa\u91d1\u00b7\u5f00\u653e\u5f0f\u57fa\u91d1",
+    numberMasked: "",
+    kind: "investment",
+  },
+] as const;
 
 function getColorSchemePreference(): ColorScheme {
   if (typeof document === "undefined") return "red_up_green_down";
@@ -169,7 +139,7 @@ function SettingRow({
         <div className="text-sm font-medium text-slate-800">{title}</div>
         {showDesc ? <div className="mt-1 text-xs text-slate-500">{desc}</div> : null}
       </div>
-      <div className={wide ? "min-w-0 flex-1 lg:max-w-3xl" : "min-w-0 lg:min-w-[280px] lg:max-w-xl"}>
+      <div className={wide ? "min-w-0 flex-1 lg:max-w-none" : "min-w-0 lg:min-w-[280px] lg:max-w-xl"}>
         {children}
       </div>
     </div>
@@ -185,19 +155,22 @@ export default function DisplaySettingsPage() {
   const [baseCurrency, setBaseCurrency] = useState("CNY");
   const [timeZoneMode, setTimeZoneMode] = useState<TimeZoneMode>("system");
   const [timeZone, setTimeZone] = useState("Asia/Shanghai");
-  const [creditCardSidebarDisplayName, setCreditCardSidebarDisplayName] = useState(SIDEBAR_CREDIT_CARD_LABEL_TEMPLATE);
+  const [accountLabelFields, setAccountLabelFieldsState] = useState<AccountLabelField[]>(DEFAULT_ACCOUNT_LABEL_FIELDS);
   const [sidebarGroupBy, setSidebarGroupBy] = useState<SidebarGroupMode>("kind");
   const [sidebarHideZero, setSidebarHideZero] = useState(false);
   const [sidebarHideInitialData, setSidebarHideInitialData] = useState(false);
   const [sidebarShowFixedAssets, setSidebarShowFixedAssets] = useState(true);
   const [detailDateBackground, setDetailDateBackground] = useState(false);
-  const [compactRowHeight, setCompactRowHeight] = useState(30);
+  const [accountDropdownRestrictType, setAccountDropdownRestrictType] = useState(true);
+  const [rowHeightMode, setRowHeightMode] = useState<RowHeightMode>(DEFAULT_ROW_HEIGHT_MODE);
   const [savingScheme, setSavingScheme] = useState(false);
   const [savingBaseCurrency, setSavingBaseCurrency] = useState(false);
   const [savingTimeZone, setSavingTimeZone] = useState(false);
   const [savingDisplayLanguage, setSavingDisplayLanguage] = useState(false);
   const [savingDateDisplayFormat, setSavingDateDisplayFormat] = useState(false);
-  const [savingCreditCardSidebarDisplayName, setSavingCreditCardSidebarDisplayName] = useState(false);
+  const [savingAccountLabelFields, setSavingAccountLabelFields] = useState(false);
+  const [draggingAccountLabelField, setDraggingAccountLabelField] = useState<AccountLabelField | null>(null);
+  const [dragOverAccountLabelField, setDragOverAccountLabelField] = useState<AccountLabelField | null>(null);
 
   useEffect(() => {
     const colorScheme = getColorSchemePreference();
@@ -207,12 +180,13 @@ export default function DisplaySettingsPage() {
     setSidebarHideInitialData(getSidebarHideInitialDataPreference());
     setSidebarShowFixedAssets(getSidebarShowFixedAssetsPreference());
     setDetailDateBackground(getDetailDateBackgroundPreference());
-    setCompactRowHeight(getCompactRowHeightPreference());
+    setAccountDropdownRestrictType(getAccountDropdownRestrictTypePreference());
+    setRowHeightMode(getRowHeightModePreference());
     setDisplayLanguage(getDisplayLanguagePreference());
     setDateDisplayFormat(getDateDisplayFormatPreference());
     setTimeZoneMode(getTimeZoneModePreference());
     setTimeZone(getTimeZonePreference());
-    setCreditCardSidebarDisplayName(getCreditCardSidebarLabelTemplatePreference());
+    setAccountLabelFieldsState(getAccountLabelFieldsPreference());
   }, []);
 
   async function loadBaseCurrency() {
@@ -367,35 +341,63 @@ export default function DisplaySettingsPage() {
     }
   }
 
-  async function saveCreditCardSidebarDisplayName(next: string) {
-    const prev = creditCardSidebarDisplayName;
-    const normalized = next || SIDEBAR_CREDIT_CARD_LABEL_TEMPLATE;
-    setCreditCardSidebarDisplayName(normalized);
-    setCreditCardSidebarLabelTemplatePreference(normalized);
-    setCreditCardLabelTemplatePreference(normalized);
-    setSavingCreditCardSidebarDisplayName(true);
+  async function saveAccountLabelFields(next: AccountLabelField[]) {
+    const normalized = normalizeAccountLabelFields(next);
+    const prev = accountLabelFields;
+    setAccountLabelFieldsState(normalized);
+    setAccountLabelFieldsPreference(normalized);
+    setSavingAccountLabelFields(true);
     try {
       const res = await fetch("/api/v1/settings/app-preferences", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          creditCardSidebarLabelTemplate: normalized,
-          creditCardLabelTemplate: normalized,
-        }),
+        body: JSON.stringify({ accountLabelFields: normalized }),
       });
       const data = await res.json();
       if (!data.ok) {
-        setCreditCardSidebarDisplayName(prev);
-        setCreditCardSidebarLabelTemplatePreference(prev);
-        setCreditCardLabelTemplatePreference(prev);
+        setAccountLabelFieldsState(prev);
+        setAccountLabelFieldsPreference(prev);
+      } else if (Array.isArray(data.accountLabelFields)) {
+        const saved = normalizeAccountLabelFields(data.accountLabelFields);
+        setAccountLabelFieldsState(saved);
+        setAccountLabelFieldsPreference(saved);
+        // Account labels are rendered on the server from this preference, so
+        // re-render the current route to apply the new format everywhere.
+        router.refresh();
       }
     } catch {
-      setCreditCardSidebarDisplayName(prev);
-      setCreditCardSidebarLabelTemplatePreference(prev);
-      setCreditCardLabelTemplatePreference(prev);
+      setAccountLabelFieldsState(prev);
+      setAccountLabelFieldsPreference(prev);
     } finally {
-      setSavingCreditCardSidebarDisplayName(false);
+      setSavingAccountLabelFields(false);
     }
+  }
+
+  function toggleAccountLabelField(field: AccountLabelField) {
+    const next = accountLabelFields.includes(field)
+      ? accountLabelFields.filter((item) => item !== field)
+      : [...accountLabelFields, field];
+    void saveAccountLabelFields(next);
+  }
+
+  /**
+   * Moves a selected field onto another one's slot. Dropping a field onto its
+   * own chip is a no-op, so an accidental short drag cannot reorder anything.
+   */
+  function reorderAccountLabelFields(from: AccountLabelField, to: AccountLabelField) {
+    if (from === to) return;
+    const fromIndex = accountLabelFields.indexOf(from);
+    const toIndex = accountLabelFields.indexOf(to);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const next = [...accountLabelFields];
+    next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, from);
+    void saveAccountLabelFields(next);
+  }
+
+  function clearAccountLabelDragState() {
+    setDraggingAccountLabelField(null);
+    setDragOverAccountLabelField(null);
   }
 
   function updateSidebarGroup(next: SidebarGroupMode) {
@@ -471,34 +473,71 @@ export default function DisplaySettingsPage() {
     }
   }
 
-  async function updateCompactRowHeight(next: number) {
-    const normalized = Math.min(Math.max(Math.round(next), 25), 35);
-    const prev = compactRowHeight;
-    setCompactRowHeight(normalized);
-    setCompactRowHeightPreference(normalized);
+  async function updateAccountDropdownRestrictType(next: boolean) {
+    const prev = accountDropdownRestrictType;
+    setAccountDropdownRestrictType(next);
+    setAccountDropdownRestrictTypePreference(next);
     try {
       const res = await fetch("/api/v1/settings/app-preferences", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ compactRowHeight: normalized }),
+        body: JSON.stringify({ accountDropdownRestrictType: next }),
       });
       const data = await res.json();
       if (!data.ok) {
-        setCompactRowHeight(prev);
-        setCompactRowHeightPreference(prev);
-      } else if (typeof data.compactRowHeight === "number") {
-        setCompactRowHeight(data.compactRowHeight);
-        setCompactRowHeightPreference(data.compactRowHeight);
+        setAccountDropdownRestrictType(prev);
+        setAccountDropdownRestrictTypePreference(prev);
       }
     } catch {
-      setCompactRowHeight(prev);
-      setCompactRowHeightPreference(prev);
+      setAccountDropdownRestrictType(prev);
+      setAccountDropdownRestrictTypePreference(prev);
     }
   }
 
-  const sidebarPreview = useMemo(
-    () => previewCreditCardName(creditCardSidebarDisplayName, CREDIT_CARD_PREVIEW_SAMPLE),
-    [creditCardSidebarDisplayName]
+  async function updateRowHeightMode(next: RowHeightMode) {
+    const prev = rowHeightMode;
+    setRowHeightMode(next);
+    setRowHeightModePreference(next);
+    try {
+      const res = await fetch("/api/v1/settings/app-preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rowHeightMode: next }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setRowHeightMode(prev);
+        setRowHeightModePreference(prev);
+      } else {
+        const saved = normalizeRowHeightMode(data.rowHeightMode);
+        setRowHeightMode(saved);
+        setRowHeightModePreference(saved);
+      }
+    } catch {
+      setRowHeightMode(prev);
+      setRowHeightModePreference(prev);
+    }
+  }
+
+  const accountFormatPreviews = useMemo(
+    () =>
+      ACCOUNT_FORMAT_PREVIEW_SAMPLES.map((sample) => ({
+        id: sample.id,
+        label: t(sample.labelKey),
+        text: renderAccountLabel({
+          accountName: sample.accountName,
+          institution: sample.institution,
+          numberMasked: sample.numberMasked,
+          ownerName: sample.ownerName,
+          kindLabelText: kindLabel(sample.kind, t),
+          fields: accountLabelFields,
+        }),
+      })),
+    [t, accountLabelFields]
+  );
+  const unselectedAccountLabelFields = useMemo(
+    () => ACCOUNT_LABEL_FIELD_OPTIONS.filter((option) => !accountLabelFields.includes(option.value)),
+    [accountLabelFields]
   );
   const timeZoneOptions = useMemo(() => buildTimeZoneOptions(t), [t]);
   const hideSettingDescriptions = sidebarHideInitialData;
@@ -516,6 +555,7 @@ export default function DisplaySettingsPage() {
     },
   ];
   const selectedColorOption = colorOptions.find((opt) => opt.value === scheme) ?? colorOptions[0];
+  const rowHeightSliderIndex = Math.max(0, ROW_HEIGHT_OPTIONS.indexOf(rowHeightMode));
 
   return (
     <div className="space-y-5">
@@ -557,6 +597,14 @@ export default function DisplaySettingsPage() {
               type="checkbox"
               checked={sidebarShowFixedAssets}
               onChange={(e) => void updateSidebarShowFixedAssets(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-200"
+            />
+          </SettingRow>
+          <SettingRow title={t("settings.display.accountDropdownRestrictType")} desc={t("settings.display.accountDropdownRestrictTypeDesc")} hideDesc={hideSettingDescriptions}>
+            <input
+              type="checkbox"
+              checked={accountDropdownRestrictType}
+              onChange={(e) => void updateAccountDropdownRestrictType(e.target.checked)}
               className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-200"
             />
           </SettingRow>
@@ -606,18 +654,31 @@ export default function DisplaySettingsPage() {
             className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-200"
           />
         </SettingRow>
-        <SettingRow title={t("settings.display.compactRowHeight")} desc={t("settings.display.compactRowHeightDesc")} hideDesc={hideSettingDescriptions}>
-          <div className="flex w-full max-w-xl items-center gap-3">
+        <SettingRow title={t("settings.display.rowHeight")} desc={t("settings.display.rowHeightDesc")} hideDesc={hideSettingDescriptions}>
+          <div className="w-full max-w-md space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-medium text-slate-700">{rowHeightMode}px</span>
+              <span className="text-slate-400">{ROW_HEIGHT_OPTIONS[0]}px / {ROW_HEIGHT_OPTIONS[ROW_HEIGHT_OPTIONS.length - 1]}px</span>
+            </div>
             <input
               type="range"
-              min={25}
-              max={35}
+              min={0}
+              max={ROW_HEIGHT_OPTIONS.length - 1}
               step={1}
-              value={compactRowHeight}
-              onChange={(e) => void updateCompactRowHeight(Number(e.target.value))}
+              value={rowHeightSliderIndex}
+              onChange={(event) => {
+                const index = Number(event.currentTarget.value);
+                const next = ROW_HEIGHT_OPTIONS[index] ?? DEFAULT_ROW_HEIGHT_MODE;
+                void updateRowHeightMode(next);
+              }}
               className="h-2 w-full cursor-pointer accent-blue-600"
+              aria-label={t("settings.display.rowHeight")}
             />
-            <span className="w-14 shrink-0 text-right text-sm tabular-nums text-slate-600">{compactRowHeight}px</span>
+            <div className="flex justify-between text-[11px] tabular-nums text-slate-400">
+              {ROW_HEIGHT_OPTIONS.map((height) => (
+                <span key={height}>{height}</span>
+              ))}
+            </div>
           </div>
         </SettingRow>
       </section>
@@ -625,18 +686,17 @@ export default function DisplaySettingsPage() {
       <section className="panel-surface overflow-hidden">
         <div>
           <SettingRow title={t("settings.display.baseCurrency")} desc={t("settings.display.baseCurrencyDesc")} hideDesc={hideSettingDescriptions}>
-            <select
-              value={baseCurrency}
-              onChange={(e) => void saveBaseCurrency(e.target.value)}
-              disabled={savingBaseCurrency}
-              className="form-input"
-            >
-              {CURRENCY_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {t(`entityForm.currency.${option.value.toLowerCase()}`)}
-                </option>
-              ))}
-            </select>
+            <div className="w-full sm:max-w-xs">
+              <CurrencySmartSelect
+                value={baseCurrency}
+                onChange={(code) => void saveBaseCurrency(code)}
+                labelSystem={(code) => t(`entityForm.currency.${code.toLowerCase()}`, { defaultValue: code })}
+                placeholder={t("settings.display.baseCurrencyPlaceholder")}
+              />
+              {savingBaseCurrency ? (
+                <p className="mt-1 text-[11px] text-slate-400">{t("common.loading")}</p>
+              ) : null}
+            </div>
           </SettingRow>
           <SettingRow title={t("settings.display.language")} desc={t("settings.display.languageDesc")} hideDesc={hideSettingDescriptions}>
             <select
@@ -690,8 +750,106 @@ export default function DisplaySettingsPage() {
       <section className="panel-surface overflow-hidden">
         <div>
           <SettingRow title={t("settings.display.accountFormat")} desc={t("settings.display.accountFormatDesc")} hideDesc={hideSettingDescriptions} wide>
-            <div className="text-sm text-slate-700">
-              {t("settings.display.accountFormatExample")}
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:gap-4 xl:gap-6">
+              <div className="min-w-0 flex-1">
+                <div className="flex min-h-8 flex-nowrap items-center gap-2 overflow-x-auto pb-1">
+                  {accountLabelFields.length === 0 ? (
+                    <span className="text-xs text-slate-400">{t("settings.display.accountFormatEmpty")}</span>
+                  ) : (
+                    accountLabelFields.map((field, index) => {
+                      const option = ACCOUNT_LABEL_FIELD_OPTIONS.find((item) => item.value === field);
+                      if (!option) return null;
+                      const isDragging = draggingAccountLabelField === field;
+                      const isDropTarget = dragOverAccountLabelField === field && !isDragging;
+                      return (
+                        <div
+                          key={field}
+                          draggable
+                          onDragStart={(event) => {
+                            setDraggingAccountLabelField(field);
+                            event.dataTransfer.effectAllowed = "move";
+                            // Firefox only starts a drag when payload data is set.
+                            event.dataTransfer.setData("text/plain", field);
+                          }}
+                          onDragOver={(event) => {
+                            if (!draggingAccountLabelField || draggingAccountLabelField === field) return;
+                            event.preventDefault();
+                            event.dataTransfer.dropEffect = "move";
+                            setDragOverAccountLabelField(field);
+                          }}
+                          onDragLeave={() => {
+                            if (dragOverAccountLabelField === field) setDragOverAccountLabelField(null);
+                          }}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            if (draggingAccountLabelField) {
+                              reorderAccountLabelFields(draggingAccountLabelField, field);
+                            }
+                            clearAccountLabelDragState();
+                          }}
+                          onDragEnd={clearAccountLabelDragState}
+                          title={t("settings.display.accountFormatDragHint")}
+                          className={`flex h-8 shrink-0 cursor-grab items-center gap-1 rounded-[8px] border px-2 text-xs shadow-sm active:cursor-grabbing ${
+                            isDropTarget
+                              ? "border-blue-400 bg-blue-100 text-blue-800 ring-1 ring-inset ring-blue-300"
+                              : "border-blue-200 bg-blue-50/70 text-blue-700"
+                          } ${isDragging ? "opacity-50" : ""}`}
+                        >
+                          <GripVertical className="h-3.5 w-3.5 shrink-0 text-blue-300" aria-hidden="true" />
+                          <span className="shrink-0 tabular-nums text-blue-400">{index + 1}.</span>
+                          <span className="whitespace-nowrap font-medium">{t(option.labelKey)}</span>
+                          <button
+                            type="button"
+                            onClick={() => toggleAccountLabelField(field)}
+                            title={t("settings.display.accountFormatRemove")}
+                            aria-label={t("settings.display.accountFormatRemove")}
+                            className="ml-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded text-blue-400 hover:bg-blue-100 hover:text-blue-700"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+                {unselectedAccountLabelFields.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-slate-400">{t("settings.display.accountFormatAdd")}</span>
+                    {unselectedAccountLabelFields.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => toggleAccountLabelField(option.value)}
+                        className="segment-button h-7 px-2 text-xs"
+                      >
+                        + {t(option.labelKey)}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                  <span>{t("settings.display.accountFormatHint")}</span>
+                  <button
+                    type="button"
+                    onClick={() => void saveAccountLabelFields(DEFAULT_ACCOUNT_LABEL_FIELDS)}
+                    className="text-blue-600 hover:underline"
+                  >
+                    {t("settings.display.accountFormatReset")}
+                  </button>
+                  {savingAccountLabelFields ? <span className="text-slate-400">{t("settings.display.applying")}</span> : null}
+                </div>
+              </div>
+              <div className="w-full shrink-0 rounded-[10px] border border-slate-200 bg-slate-50/70 px-3 py-2 lg:w-64 xl:w-72">
+                <div className="text-xs text-slate-500">{t("settings.display.preview")}</div>
+                <div className="mt-1 space-y-1">
+                  {accountFormatPreviews.map((preview) => (
+                    <div key={preview.id} className="flex items-baseline justify-between gap-3">
+                      <span className="shrink-0 text-xs text-slate-400">{preview.label}</span>
+                      <span className="truncate text-sm text-slate-800" title={preview.text}>{preview.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </SettingRow>
         </div>

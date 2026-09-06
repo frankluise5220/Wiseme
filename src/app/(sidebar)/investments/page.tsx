@@ -13,6 +13,7 @@ import { pnlClassFromRedUp } from "@/lib/client/colors";
 import type { InvestBalanceDetail } from "@/lib/invest-balance";
 import { loadInvestBalances } from "@/lib/server/cached-data";
 import { getHouseholdScope } from "@/lib/server/household-scope";
+import { ACCOUNT_LABEL_FIELDS_COOKIE, accountLabelFieldsFromCookieValue } from "@/lib/server/account-label-fields";
 import { getServerT } from "@/lib/server/i18n";
 import { MobileInvestments, type MobileInvestmentAccountDetail } from "@/components/mobile/MobileInvestments";
 
@@ -62,6 +63,7 @@ export default async function InvestmentsPage({
   const ctx = await getHouseholdScope();
   const { hidFilter } = ctx;
   const cookieStore = await cookies();
+  const accountLabelFields = accountLabelFieldsFromCookieValue(cookieStore.get(ACCOUNT_LABEL_FIELDS_COOKIE)?.value);
   const isRedUp = (cookieStore.get("colorScheme")?.value ?? "red_up_green_down") === "red_up_green_down";
   const creditCardLabelMode = cookieStore.get("mmh_credit_card_label_mode")?.value === "full_name" ? "full_name" : "short_last4";
   const creditCardLabelTemplate = normalizeCreditCardLabelTemplate(
@@ -101,7 +103,7 @@ export default async function InvestmentsPage({
       investProductType: account.investProductType,
       Institution: account.Institution,
       AccountGroup: account.AccountGroup,
-    }, creditCardLabelTemplate);
+    }, creditCardLabelTemplate, { fields: accountLabelFields });
     const accountLabel = display.label;
     const groupName = account.AccountGroup?.name?.trim() || t("investments.noOwner");
     const institutionName = display.institutionName || t("investments.noInstitution");

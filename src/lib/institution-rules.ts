@@ -1,4 +1,4 @@
-export const INCOME_EXPENSE_INSTITUTION_TYPES = ["bank", "payment", "ewallet"] as const;
+export const INCOME_EXPENSE_INSTITUTION_TYPES = ["bank", "payment"] as const;
 
 const incomeExpenseInstitutionTypeSet = new Set<string>(INCOME_EXPENSE_INSTITUTION_TYPES);
 

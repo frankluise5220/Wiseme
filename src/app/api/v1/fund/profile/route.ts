@@ -4,11 +4,14 @@ import {
   getFundNavDateOffsets,
   getFundProfiles,
   ensureFundCompanyInstitution,
+  fundTradingCalendarForProfile,
   getFundProfile,
+  normalizeFundTradingCalendar,
   refreshFundProfile,
   syncFundCompanyInstitution,
   updateFundProfile,
 } from "@/lib/fund/fundProfile";
+import { TRADING_CALENDARS, type TradingCalendarValue } from "@/lib/fund/trading-calendar";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 
 /**
@@ -17,13 +20,15 @@ import { getHouseholdScope } from "@/lib/server/household-scope";
  * GET /api/v1/fund/profile?fundCode=110000[&syncInstitution=0]
  * GET /api/v1/fund/profile?list=1[&includeProfiles=1]
  * PATCH /api/v1/fund/profile
- * PATCH body: { fundCode: string, fundName?, fundCompany?, custodian?, manager?, navDateOffset?: 0 | 1 }
+ * PATCH body: { fundCode: string, fundName?, fundCompany?, custodian?, manager?, navDateOffset?: 0 | 1, tradingCalendar? }
  * POST /api/v1/fund/profile
  * POST body: { fundCode: string, syncInstitution?: boolean }
  *
- * navDateOffset is the binary publication-lag mode used when selecting the NAV
- * for the daily investment profit report: 0 means the latest NAV is current-day
- * data, and 1 means the latest NAV is older than the current date.
+ * navDateOffset is the stable fund-level offset used by the daily investment
+ * profit report: 0 means report-date NAV minus previous NAV, and 1 means the
+ * previous trading-day NAV minus the NAV before it. External profile refreshes
+ * must not overwrite this setting. tradingCalendar is the fund-level NAV
+ * calendar used to decide which dates can legitimately have an external NAV.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -44,17 +49,38 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, code: "FUND_NOT_FOUND", error: "Fund is not available in the current household." }, { status: 404 });
     }
     const codes = fundCode ? [fundCode] : householdCodes;
-    const offsets = await getFundNavDateOffsets(codes);
+    const [offsets, profiles] = await Promise.all([
+      getFundNavDateOffsets(codes),
+      getFundProfiles(codes),
+    ]);
+    const profileByCode = new Map(profiles.map((profile) => [profile.fundCode, profile]));
     if (fundCode) {
-      const profile = await getFundProfile(fundCode);
+      let profile = profileByCode.get(fundCode) ?? null;
+      if (!profile) profile = await getFundProfile(fundCode);
       if (profile && syncInstitution) await syncFundCompanyInstitution(profile, { householdId: ctx.householdId });
-      return NextResponse.json({ ok: true, fundCode, profile: profile ?? { fundCode, navDateOffset: offsets.get(fundCode) ?? 0 } });
+      return NextResponse.json({
+        ok: true,
+        fundCode,
+        profile: profile
+          ? { ...profile, tradingCalendar: fundTradingCalendarForProfile(profile) }
+          : { fundCode, navDateOffset: offsets.get(fundCode) ?? 0, tradingCalendar: "cn_fund" },
+      });
     }
     const sortedCodes = [...codes].sort();
-    const rows = sortedCodes.map((code) => ({ fundCode: code, navDateOffset: offsets.get(code) ?? 0 }));
+    const rows = sortedCodes.map((code) => {
+      const profile = profileByCode.get(code);
+      return {
+        fundCode: code,
+        navDateOffset: offsets.get(code) ?? 0,
+        tradingCalendar: fundTradingCalendarForProfile(profile),
+      };
+    });
     if (!includeProfiles) return NextResponse.json({ ok: true, rows });
-    const profiles = await getFundProfiles(sortedCodes);
-    return NextResponse.json({ ok: true, rows, profiles });
+    return NextResponse.json({
+      ok: true,
+      rows,
+      profiles: profiles.map((profile) => ({ ...profile, tradingCalendar: fundTradingCalendarForProfile(profile) })),
+    });
   } catch (error) {
     return NextResponse.json(
       { ok: false, code: "FETCH_FAILED", error: error instanceof Error ? error.message : "Failed to fetch fund profiles." },
@@ -73,6 +99,7 @@ export async function PATCH(req: NextRequest) {
       custodian?: unknown;
       manager?: unknown;
       navDateOffset?: unknown;
+      tradingCalendar?: unknown;
     };
     const fundCode = typeof body.fundCode === "string" ? body.fundCode.trim() : "";
     const offset = body.navDateOffset;
@@ -81,6 +108,16 @@ export async function PATCH(req: NextRequest) {
     }
     if (offset !== undefined && offset !== 0 && offset !== 1) {
       return NextResponse.json({ ok: false, code: "INVALID_NAV_DATE_OFFSET", error: "navDateOffset must be 0 or 1." }, { status: 400 });
+    }
+    let tradingCalendar: TradingCalendarValue | null | undefined;
+    if (body.tradingCalendar !== undefined) {
+      if (body.tradingCalendar === null || body.tradingCalendar === "") {
+        tradingCalendar = null;
+      } else if (typeof body.tradingCalendar === "string" && TRADING_CALENDARS.includes(body.tradingCalendar as TradingCalendarValue)) {
+        tradingCalendar = normalizeFundTradingCalendar(body.tradingCalendar, "cn_fund");
+      } else {
+        return NextResponse.json({ ok: false, code: "INVALID_TRADING_CALENDAR", error: "tradingCalendar is invalid." }, { status: 400 });
+      }
     }
     const fundCodes = await fundCodesInHousehold(ctx.householdId);
     if (!fundCodes.includes(fundCode)) {
@@ -99,6 +136,7 @@ export async function PATCH(req: NextRequest) {
       custodian: parseText(body.custodian, "custodian"),
       manager: parseText(body.manager, "manager"),
       navDateOffset: offset as 0 | 1 | undefined,
+      tradingCalendar,
     });
     await ensureFundCompanyInstitution(ctx.householdId, profile.fundCompany);
     return NextResponse.json({ ok: true, profile });
@@ -113,7 +151,7 @@ export async function PATCH(req: NextRequest) {
 
 /**
  * Fetch and persist fund-level profile metadata from the configured external
- * fund data source without changing account-level rules or NAV offset settings.
+ * fund data source without changing account-level T+N or fee rules.
  */
 export async function POST(req: NextRequest) {
   try {

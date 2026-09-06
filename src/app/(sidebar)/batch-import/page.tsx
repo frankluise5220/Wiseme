@@ -21,6 +21,7 @@ import {
 } from "@/lib/account-import-match";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { fetchSettingsBootstrap } from "@/lib/client/settingsCache";
+import { parseFlexibleDateToYmd } from "@/lib/date-utils";
 import { systemCategoryLabel } from "@/lib/system-category-labels";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -57,6 +58,7 @@ import {
   isCreditCardRepaymentTargetAccountKind,
   type CreditCardRepaymentBusinessType,
 } from "@/lib/transaction-semantics";
+import { getAccountLabelFieldsPreference } from "@/lib/client/appPreferences";
 
 type ParsedItem = {
   rawText: string;
@@ -157,6 +159,8 @@ type AccountOption = {
   name: string;
   kind: "cash" | "bank_debit" | "bank_credit" | string;
   label?: string | null;
+  /** Table/list label that follows the configured display fields. */
+  listLabel?: string | null;
   selectorLabel?: string | null;
   selectorCoreLabel?: string | null;
   fullLabel?: string | null;
@@ -213,6 +217,9 @@ type ImportFileParseResult = {
   };
 };
 type ImportDebugDetails = Record<string, string | number | boolean | null>;
+
+const BATCH_IMPORT_ITEMS_STORAGE_KEY = "batchImportItems:v2";
+const LEGACY_BATCH_IMPORT_ITEMS_STORAGE_KEY = "batchImportItems";
 
 function createImportTraceId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -681,24 +688,26 @@ function normalizeDateCell(value: string) {
 
   match = normalized.match(/^(\d{1,2})-(\d{1,2})-(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (match) {
-    return appendNormalizedTime(formatDateParts(Number(match[3]), Number(match[1]), Number(match[2])), match[4], match[5], match[6]);
+    const datePart = formatDateParts(Number(match[3]), Number(match[1]), Number(match[2]));
+    if (datePart) {
+      return appendNormalizedTime(datePart, match[4], match[5], match[6]);
+    }
   }
 
   match = normalized.match(/^(\d{1,2})-(\d{1,2})-(\d{2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (match) {
     const year = Number(match[3]);
-    return appendNormalizedTime(
-      formatDateParts(year >= 70 ? 1900 + year : 2000 + year, Number(match[1]), Number(match[2])),
-      match[4],
-      match[5],
-      match[6],
-    );
+    const datePart = formatDateParts(year >= 70 ? 1900 + year : 2000 + year, Number(match[1]), Number(match[2]));
+    if (datePart) {
+      return appendNormalizedTime(datePart, match[4], match[5], match[6]);
+    }
   }
 
   match = normalized.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (match) return formatDateParts(Number(match[1]), Number(match[2]), Number(match[3]));
 
-  return raw;
+  // Lenient fallback (e.g. "26-02-2026" day-first, "Jan 26, 2026"); date part only.
+  return parseFlexibleDateToYmd(raw) ?? raw;
 }
 
 function normalizeOptionalDateCell(value: string) {
@@ -1664,6 +1673,8 @@ export default function BatchImportPage() {
   const [bookCategoriesLoaded, setBookCategoriesLoaded] = useState(false);
   const [categoryRuleSamples, setCategoryRuleSamples] = useState<StatementHistoricalCategorySample[]>([]);
   const [categoryRuleSamplesLoaded, setCategoryRuleSamplesLoaded] = useState(false);
+  const accountMatcherRef = useRef(createImportAccountMatcher<AccountOption>([]));
+  const accountIdentityConflictRef = useRef(createImportAccountIdentityConflictChecker<AccountOption>([]));
   const refreshCategoryRuleSamples = useCallback(async () => {
     const res = await fetch("/api/v1/statement/recognition-rules", { cache: "no-store" });
     const data = await res.json().catch(() => null) as { samples?: StatementHistoricalCategorySample[] } | null;
@@ -1688,7 +1699,8 @@ export default function BatchImportPage() {
 
   useEffect(() => {
     try {
-      const data = sessionStorage.getItem("batchImportItems");
+      sessionStorage.removeItem(LEGACY_BATCH_IMPORT_ITEMS_STORAGE_KEY);
+      const data = sessionStorage.getItem(BATCH_IMPORT_ITEMS_STORAGE_KEY);
       const storedItems = data ? JSON.parse(data) as ParsedItem[] : [];
       if (Array.isArray(storedItems) && storedItems.length > 0) {
         setActiveImportKind("normal");
@@ -1697,7 +1709,7 @@ export default function BatchImportPage() {
         setSelected(new Set());
       }
     } catch {
-      sessionStorage.removeItem("batchImportItems");
+      sessionStorage.removeItem(BATCH_IMPORT_ITEMS_STORAGE_KEY);
     }
   }, []);
 
@@ -1709,6 +1721,9 @@ export default function BatchImportPage() {
       .then((res) => res.json())
       .then((data) => {
         if (cancelled || !data?.ok || !Array.isArray(data.accounts)) return;
+        const activeAccounts = data.accounts.filter((account: AccountOption) => account.isActive !== false);
+        accountMatcherRef.current = createImportAccountMatcher(activeAccounts);
+        accountIdentityConflictRef.current = createImportAccountIdentityConflictChecker(activeAccounts);
         setAccountOptions(data.accounts);
         postImportDebugLog(importTraceIdRef.current, "accounts_request_succeeded", {
           accountCount: data.accounts.length,
@@ -1760,7 +1775,7 @@ export default function BatchImportPage() {
   }, [refreshCategoryRuleSamples]);
 
   const accountDisplayLabel = useCallback((account: AccountOption) => {
-    const provided = formatAccountTableLabel(account);
+    const provided = formatAccountTableLabel(account, "", getAccountLabelFieldsPreference());
     if (provided) return provided;
     return formatAccountSelectorLabel({
       accountName: account.name,
@@ -1771,32 +1786,23 @@ export default function BatchImportPage() {
         }
         : null,
       numberMasked: account.numberMasked,
+      fields: getAccountLabelFieldsPreference(),
     });
   }, []);
 
   const accountHoverTitle = useCallback((account: AccountOption) => {
-    return formatAccountTableTitle(account, accountDisplayLabel(account));
+    return formatAccountTableTitle(account, accountDisplayLabel(account), getAccountLabelFieldsPreference());
   }, [accountDisplayLabel]);
 
   const activeAccountOptions = useMemo(
     () => accountOptions.filter((account) => account.isActive !== false),
     [accountOptions],
   );
-  const getAccountMatch = useMemo(() => {
-    const matchImportAccount = createImportAccountMatcher(activeAccountOptions);
-    const cache = new Map<string, ReturnType<typeof matchImportAccount>>();
-    return (value: string): ReturnType<typeof matchImportAccount> => {
-      const key = value.trim();
-      if (cache.has(key)) return cache.get(key)!;
-      const match = matchImportAccount(key);
-      cache.set(key, match);
-      return match;
-    };
-  }, [activeAccountOptions]);
   const getAccountIdentityConflict = useMemo(
-    () => createImportAccountIdentityConflictChecker(activeAccountOptions),
-    [activeAccountOptions],
+    () => accountIdentityConflictRef.current,
+    [],
   );
+  const getAccountMatch = useCallback((value: string) => accountMatcherRef.current(value.trim()), []);
   const findMatchedAccountId = useCallback((value: string): string | null => (
     getAccountMatch(value).account?.id ?? null
   ), [getAccountMatch]);
@@ -2180,7 +2186,7 @@ export default function BatchImportPage() {
         setMessage(formatText("batchImport.noRecordsRecognizedMessage", { name: file.name, headers }));
         return;
       }
-      sessionStorage.setItem("batchImportItems", JSON.stringify(parsed));
+      sessionStorage.setItem(BATCH_IMPORT_ITEMS_STORAGE_KEY, JSON.stringify(parsed));
       setItems(parsed);
       setFundUploadItems([]);
       setFundPreviewItems([]);
@@ -3060,7 +3066,7 @@ export default function BatchImportPage() {
         kind: "normal",
         importBatchId: data.importBatchId ?? null,
       });
-      sessionStorage.removeItem("batchImportItems");
+      sessionStorage.removeItem(BATCH_IMPORT_ITEMS_STORAGE_KEY);
     } catch (error) {
       postImportDebugLog(importTraceIdRef.current, "import_failed", {
         importKind: "bill",
@@ -3162,7 +3168,7 @@ export default function BatchImportPage() {
   }, [importing, fundSelected, fundPreviewItems, fundImportErrorIssues, fundImportIssues, fundRuleRows, fundImportContext, formatText, t]);
 
   const handleCancel = useCallback(() => {
-    sessionStorage.removeItem("batchImportItems");
+    sessionStorage.removeItem(BATCH_IMPORT_ITEMS_STORAGE_KEY);
     setActiveImportKind(null);
     setImporting(false);
     setUploading(false);

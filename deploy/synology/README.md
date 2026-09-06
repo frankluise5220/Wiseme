@@ -69,6 +69,10 @@ SYNOLOGY_VERIFY_BUILT_SPK=1 npm run check:synology
 
 ## 发布规则
 
+- 凡是正式发布包含群晖 `.spk`，必须先在发布前本地生成同版本 x86_64 / arm64 两个 `.spk`，交给真实 DSM 环境安装/覆盖升级测试；用户确认可以安装且 MMH 可以启动后，才允许创建 GitHub Release 或上传公开 SPK 资产。
+- 正式 `.spk` 打包必须在 Linux 环境完成；如果当前机器是 Windows 或缺少对应 Linux Node runtime tarball，只能视为发布阻塞，不能用 GitHub Release workflow 直接替代首次安装测试。
+- 本地交付测试前必须对两个架构分别执行 `SYNOLOGY_VERIFY_BUILT_SPK=1 npm run check:synology`，arm64 额外带 `SYNOLOGY_TARGET_ARCH=arm64`。
+- 如果其他分发面需要先发布，而群晖本地测试尚未通过，Release 说明中必须明确“群晖 SPK 暂缓发布”，并且不得上传 `.spk` 资产。
 - GitHub Release 通过 `.github/workflows/synology-release.yml` 构建并上传 `release-artifacts/synology/*.spk`。
 - Release workflow 必须重新构建 `.spk`，不能把 `*-spk-source.tgz` 当成用户安装包。
 - 包版本直接使用 `package.json` 的 `0.1.x`，与 GitHub Release tag、GHCR 镜像 tag、飞牛 `.fpk` 和 Android 版本保持同号。

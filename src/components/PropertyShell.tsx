@@ -26,15 +26,18 @@ import { useI18n } from "@/lib/i18n";
 import { normalizeFixedAssetType } from "@/lib/fixed-asset";
 import { formatAccountTableLabel, formatAccountTableTitle, type AccountTableDisplaySource } from "@/lib/account-display";
 import { systemCategoryLabel } from "@/lib/system-category-labels";
+import { getAccountLabelFieldsPreference } from "@/lib/client/appPreferences";
 
 type PropertyPosition = {
   fundCode: string;
   accountId?: string | null;
   propertyAssetId?: string | null;
+  mortgageLoanAccountId?: string | null;
   assetType?: string | null;
   propertyType?: string | null;
   address?: string | null;
   attributes?: Record<string, unknown> | null;
+  status?: string | null;
   purchasePrice?: number | null;
   note?: string | null;
   name: string;
@@ -114,6 +117,13 @@ function transactionCategoryLabel(t: (key: string) => string, categoryName: stri
 function assetTypeLabel(t: (key: string) => string, assetType: string | null | undefined) {
   const type = assetType || "property";
   return t(`fixedAsset.type.${type}`);
+}
+
+function propertyStatusText(t: (key: string) => string, status: string | null | undefined) {
+  if (status === "mortgaged") return t("fixedAssetEdit.status.mortgaged");
+  if (status === "sold") return t("fixedAssetEdit.status.sold");
+  if (status === "disposed") return t("fixedAssetEdit.status.disposed");
+  return t("fixedAssetEdit.status.normal");
 }
 
 function assetDetailText(position: PropertyPosition) {
@@ -228,11 +238,11 @@ function FixedAssetTransactionTable({
   usePruneBasicDetailSelection(currentEntryIds);
   const normalizedAccountOptions = useMemo(
     () => accountOptions.map((account) => {
-      const label = formatAccountTableLabel(account, account.name ?? "");
+      const label = formatAccountTableLabel(account, account.name ?? "", getAccountLabelFieldsPreference());
       return {
         id: account.id,
         label: label || account.name?.trim() || account.id,
-        title: formatAccountTableTitle(account, label),
+        title: formatAccountTableTitle(account, label, getAccountLabelFieldsPreference()),
       };
     }),
     [accountOptions],
@@ -268,7 +278,6 @@ function FixedAssetTransactionTable({
       emptyText={t("propertyShell.emptyTransactions")}
       minTableWidth={980}
       fillHeight
-      compactRows
       toolbarMode="default"
       toolbarTitle={(
         <div className="flex min-w-0 items-center gap-2">
@@ -465,6 +474,7 @@ export function PropertyShell({
       purchaseDate: position.holdingDate || "",
       purchasePrice: position.purchasePrice != null ? String(position.purchasePrice) : "",
       note: position.note ?? "",
+      status: position.status ?? "active",
     });
     setEditMeta({
       accountName: position.name,
@@ -489,6 +499,7 @@ export function PropertyShell({
           purchaseDate: next.purchaseDate.trim() || undefined,
           purchasePrice: next.purchasePrice.trim() || undefined,
           note: next.note.trim() || undefined,
+          status: next.status || "active",
         }),
       });
       const data = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
@@ -520,16 +531,34 @@ export function PropertyShell({
         const selected = assetId === selectedAssetId;
         return (
           <div className="flex min-w-0 items-center gap-2">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
               <Boxes className="h-3.5 w-3.5" />
             </span>
             <div className="min-w-0">
-              <div className={`truncate text-xs font-medium ${selected ? "text-blue-700" : "text-slate-700"}`} title={position.name}>
+              <div className={`truncate font-medium ${selected ? "text-blue-700" : "text-slate-700"}`} title={position.name}>
                 {position.name}
               </div>
             </div>
           </div>
         );
+      },
+    },
+    {
+      key: "status",
+      label: t("propertyShell.column.status"),
+      width: 92,
+      minWidth: 72,
+      sortValue: (position) => propertyStatusText(t, position.status),
+      filterText: (position) => propertyStatusText(t, position.status),
+      render: (position) => {
+        const text = propertyStatusText(t, position.status);
+        if (position.status === "mortgaged") {
+          return <span className="inline-flex items-center rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700">{text}</span>;
+        }
+        if (position.status === "sold" || position.status === "disposed") {
+          return <span className="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">{text}</span>;
+        }
+        return <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">{text}</span>;
       },
     },
     ...(assetType
@@ -541,7 +570,7 @@ export function PropertyShell({
           minWidth: 80,
           sortValue: (position) => assetTypeLabel(t, position.assetType),
           filterText: (position) => assetTypeLabel(t, position.assetType),
-          render: (position) => <span className="text-xs text-slate-600">{assetTypeLabel(t, position.assetType)}</span>,
+          render: (position) => <span className="text-slate-600">{assetTypeLabel(t, position.assetType)}</span>,
         }]),
     ...typedDetailColumns.map((column): AdvancedDataTableColumn<PropertyPosition> => ({
       key: column.key,
@@ -552,7 +581,7 @@ export function PropertyShell({
       filterText: (position) => column.text(position),
       truncate: true,
       cellTitle: (position) => column.text(position),
-      render: (position) => <span className="text-xs text-slate-600">{column.text(position)}</span>,
+      render: (position) => <span className="text-slate-600">{column.text(position)}</span>,
     })),
     {
       key: "holdingDate",
@@ -631,8 +660,8 @@ export function PropertyShell({
     {
       key: "actions",
       label: t("detail.column.actions"),
-      width: 112,
-      minWidth: 96,
+      width: 76,
+      minWidth: 64,
       align: "right",
       render: (position) => {
         const assetId = position.propertyAssetId ?? position.fundCode;
@@ -663,10 +692,11 @@ export function PropertyShell({
                   },
                 }));
               }}
-              className="secondary-button h-7 gap-1 px-2 text-xs"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-700 transition-colors hover:bg-slate-50 hover:text-blue-600"
+              title={t("propertyShell.updateValuation")}
+              aria-label={t("propertyShell.updateValuation")}
             >
               <RefreshCcw className="h-3.5 w-3.5" />
-              {t("propertyShell.updateValuation")}
             </button>
           </div>
         );
@@ -690,8 +720,8 @@ export function PropertyShell({
   const transactionColumns = useMemo<AdvancedDataTableColumn<FixedAssetTransaction>[]>(() => {
     const accountDisplay = (id: string | null | undefined, fallback: string | null | undefined) => {
       const source = id ? accountOptionById.get(id) : undefined;
-      const label = source ? formatAccountTableLabel(source, fallback ?? "") : (fallback ?? "").trim();
-      return { label: label || "-", title: source ? formatAccountTableTitle(source, label) : label };
+      const label = source ? formatAccountTableLabel(source, fallback ?? "", getAccountLabelFieldsPreference()) : (fallback ?? "").trim();
+      return { label: label || "-", title: source ? formatAccountTableTitle(source, label, getAccountLabelFieldsPreference()) : label };
     };
     const currencyFor = (entry: FixedAssetTransaction) => entry.currency || displayCurrency;
     const flowAmount = (entry: FixedAssetTransaction) => Number(entry.amount ?? 0);
@@ -707,7 +737,7 @@ export function PropertyShell({
         filterKind: "dateRange",
         filterText: (entry) => entry.date,
         sortValue: (entry) => entry.date,
-        render: (entry) => <span className="whitespace-nowrap text-xs tabular-nums text-slate-600">{formatDateDisplay(entry.date)}</span>,
+        render: (entry) => <span className="whitespace-nowrap tabular-nums text-slate-600">{formatDateDisplay(entry.date)}</span>,
       },
       {
         key: "postedAt",
@@ -717,7 +747,7 @@ export function PropertyShell({
         hideable: true,
         filterKind: "dateRange",
         filterText: (entry) => (entry.postedAt ?? "").slice(0, 10),
-        render: (entry) => <span className="whitespace-nowrap text-xs tabular-nums text-slate-500">{entry.postedAt ? formatDateDisplay(entry.postedAt) : ""}</span>,
+        render: (entry) => <span className="whitespace-nowrap tabular-nums text-slate-500">{entry.postedAt ? formatDateDisplay(entry.postedAt) : ""}</span>,
       },
       {
         key: "account",
@@ -734,7 +764,7 @@ export function PropertyShell({
         cellTitle: (entry) => accountDisplay(entry.accountId, entry.accountName).title,
         render: (entry) => {
           const display = accountDisplay(entry.accountId, entry.accountName);
-          return <span className="block truncate text-xs text-slate-600" title={display.title}>{display.label}</span>;
+          return <span className="block truncate text-slate-600" title={display.title}>{display.label}</span>;
         },
       },
       {
@@ -774,7 +804,7 @@ export function PropertyShell({
         minWidth: 54,
         hideable: true,
         filterText: (entry) => currencyFor(entry),
-        render: (entry) => <span className="block truncate text-center text-xs font-medium tabular-nums text-slate-500">{currencyFor(entry)}</span>,
+        render: (entry) => <span className="block truncate text-center font-medium tabular-nums text-slate-500">{currencyFor(entry)}</span>,
       },
       {
         key: "type",
@@ -783,7 +813,7 @@ export function PropertyShell({
         minWidth: 80,
         filterText: (entry) => transactionTypeLabel(t, entry),
         sortValue: (entry) => transactionTypeLabel(t, entry),
-        render: (entry) => <span className="text-xs text-slate-700">{transactionTypeLabel(t, entry)}</span>,
+        render: (entry) => <span className="text-slate-700">{transactionTypeLabel(t, entry)}</span>,
       },
       {
         key: "category",
@@ -794,7 +824,7 @@ export function PropertyShell({
         sortValue: (entry) => transactionCategoryLabel(t, entry.categoryName),
         truncate: true,
         cellTitle: (entry) => transactionCategoryLabel(t, entry.categoryName),
-        render: (entry) => <span className="block truncate text-xs text-slate-500" title={transactionCategoryLabel(t, entry.categoryName)}>{transactionCategoryLabel(t, entry.categoryName)}</span>,
+        render: (entry) => <span className="block truncate text-slate-500" title={transactionCategoryLabel(t, entry.categoryName)}>{transactionCategoryLabel(t, entry.categoryName)}</span>,
       },
       {
         key: "counterpartyInstitution",
@@ -804,7 +834,7 @@ export function PropertyShell({
         hideable: true,
         defaultHidden: true,
         filterText: (entry) => entry.counterpartyInstitutionName ?? "",
-        render: (entry) => <span className="block truncate text-xs text-slate-500" title={entry.counterpartyInstitutionName ?? ""}>{entry.counterpartyInstitutionName || <span className="text-slate-300">-</span>}</span>,
+        render: (entry) => <span className="block truncate text-slate-500" title={entry.counterpartyInstitutionName ?? ""}>{entry.counterpartyInstitutionName || <span className="text-slate-300">-</span>}</span>,
       },
       {
         key: "related",
@@ -822,7 +852,7 @@ export function PropertyShell({
         cellTitle: (entry) => accountDisplay(entry.toAccountId, entry.toAccountName).title,
         render: (entry) => {
           const display = accountDisplay(entry.toAccountId, entry.toAccountName);
-          return <span className="block truncate text-xs text-slate-500" title={display.title}>{display.label}</span>;
+          return <span className="block truncate text-slate-500" title={display.title}>{display.label}</span>;
         },
       },
       {
@@ -848,7 +878,7 @@ export function PropertyShell({
         minWidth: 120,
         hideable: true,
         filterText: (entry) => entry.note ?? "",
-        render: (entry) => <span className="block truncate text-xs text-slate-500" title={entry.note ?? ""}>{entry.note || ""}</span>,
+        render: (entry) => <span className="block truncate text-slate-500" title={entry.note ?? ""}>{entry.note || ""}</span>,
       },
     ];
   }, [accountOptionById, displayCurrency, pnlCls, t]);
@@ -893,7 +923,7 @@ export function PropertyShell({
               rows={positions}
               rowKey={(position, index) => position.propertyAssetId ?? position.fundCode ?? String(index)}
               emptyText={t("propertyShell.emptyTitle")}
-              minTableWidth={1240}
+              minTableWidth={1332}
               rowClassName={(position) => {
                 const assetId = position.propertyAssetId ?? position.fundCode;
                 const selected = assetId === selectedAssetId;
@@ -903,7 +933,6 @@ export function PropertyShell({
               onRowDoubleClick={openFixedAssetEdit}
               showFilters={false}
               fillHeight
-              compactRows
               toolbarMode="none"
               draggableRows={false}
               sortable

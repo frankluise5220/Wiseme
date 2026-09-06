@@ -149,7 +149,6 @@ function buildImportFailureDetail(rowIndex: number, item: ParsedItem, error: unk
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key",
   } as const;
@@ -1052,7 +1051,7 @@ export async function POST(req: Request) {
       // Find or create loan accounts
       const cpIds = [...new Set(cpByName.values())];
       const existingLoans = cpIds.length > 0 ? await prisma.account.findMany({
-        where: { householdId: ctx.householdId, counterpartyId: { in: cpIds }, kind: "loan", isPlaceholder: { not: true } },
+        where: { householdId: ctx.householdId, counterpartyId: { in: cpIds }, kind: { in: ["settlement", "loan"] }, isPlaceholder: { not: true } },
         select: { id: true, name: true, counterpartyId: true, billingDay: true, currency: true },
       }) : [];
       const loanByCpId = new Map<string, string>();
@@ -1065,13 +1064,13 @@ export async function POST(req: Request) {
         let loanId = loanByCpId.get(cpId);
         if (!loanId && defaultGroup) {
           try {
-            const nl = await prisma.account.create({ data: { name, kind: "loan", debtDirection: "receivable", currency: "CNY", groupId: defaultGroup, counterpartyId: cpId, householdId: ctx.householdId, isActive: true } });
+            const nl = await prisma.account.create({ data: { name, kind: "settlement", debtDirection: "receivable", currency: "CNY", groupId: defaultGroup, counterpartyId: cpId, householdId: ctx.householdId, isActive: true } });
             loanId = nl.id; loanByCpId.set(cpId, loanId);
           } catch {}
         }
         if (loanId) {
-          ctx.accountMetaById.set(loanId, { name, kind: "loan", billingDay: null, currency: "CNY" });
-          ctx.accountLookupRows.push({ id: loanId, name, kind: "loan", billingDay: null, currency: "CNY", numberMasked: null, Institution: null, AccountGroup: null, AccountAlias: null });
+          ctx.accountMetaById.set(loanId, { name, kind: "settlement", billingDay: null, currency: "CNY" });
+          ctx.accountLookupRows.push({ id: loanId, name, kind: "settlement", billingDay: null, currency: "CNY", numberMasked: null, Institution: null, AccountGroup: null, AccountAlias: null });
         }
       }
     }

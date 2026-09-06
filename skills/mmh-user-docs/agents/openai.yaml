@@ -1,4 +1,0 @@
-interface:
-  display_name: "MMH User Docs"
-  short_description: "Write clear Chinese MMH docs."
-  default_prompt: "Use $mmh-user-docs to rewrite MMH user-facing documentation in clear Chinese."

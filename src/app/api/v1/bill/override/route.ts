@@ -9,7 +9,6 @@ export const runtime = "nodejs";
 
 function cors() {
   return {
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
   } as const;

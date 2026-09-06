@@ -13,6 +13,7 @@ import { pnlClassFromRedUp } from "@/lib/client/colors";
 import { creditCardDisplayBalanceFromCurrentCycle } from "@/lib/credit/billing";
 import { computeAccountDisplayBalances } from "@/lib/server/account-balance";
 import { getHouseholdScope } from "@/lib/server/household-scope";
+import { ACCOUNT_LABEL_FIELDS_COOKIE, accountLabelFieldsFromCookieValue } from "@/lib/server/account-label-fields";
 import { getServerT } from "@/lib/server/i18n";
 import { MobileAccounts } from "@/components/mobile/MobileAccounts";
 
@@ -36,6 +37,7 @@ const MONEY_KINDS: AccountKind[] = [
   AccountKind.ewallet,
   AccountKind.cash,
   "deposit" as AccountKind,
+  AccountKind.settlement,
   AccountKind.loan,
   AccountKind.other,
 ];
@@ -46,6 +48,7 @@ const KIND_ICON = {
   cash: Banknote,
   deposit: PiggyBank,
   bank_credit: CreditCard,
+  settlement: HandCoins,
   loan: HandCoins,
   other: Wallet,
 };
@@ -59,6 +62,7 @@ function kindLabel(t: T, kind: string) {
     cash: t("account.kind.cash"),
     deposit: t("account.kind.deposit"),
     bank_credit: t("account.kind.bank_credit"),
+    settlement: t("account.kind.settlement"),
     loan: t("account.kind.loan"),
     other: t("account.kind.other"),
   };
@@ -92,6 +96,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
   const ctx = await getHouseholdScope();
   const { hidFilter } = ctx;
   const cookieStore = await cookies();
+  const accountLabelFields = accountLabelFieldsFromCookieValue(cookieStore.get(ACCOUNT_LABEL_FIELDS_COOKIE)?.value);
   const creditCardLabelMode = cookieStore.get("mmh_credit_card_label_mode")?.value === "full_name" ? "full_name" : "short_last4";
   const creditCardLabelTemplate = normalizeCreditCardLabelTemplate(
     cookieStore.get("mmh_credit_card_label_template")?.value,
@@ -154,7 +159,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
         investProductType: account.investProductType,
         Institution: account.Institution,
         AccountGroup: account.AccountGroup,
-      }, creditCardLabelTemplate);
+      }, creditCardLabelTemplate, { fields: accountLabelFields });
       return {
         id: account.id,
         name: display.label,
@@ -177,7 +182,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
         investProductType: account.investProductType,
         Institution: account.Institution,
         AccountGroup: account.AccountGroup,
-      }, creditCardLabelTemplate);
+      }, creditCardLabelTemplate, { fields: accountLabelFields });
       const cycle = cycleByAccountId.get(account.id);
       const balance = cycle
         ? creditCardDisplayBalanceFromCurrentCycle(cycle)
@@ -204,10 +209,10 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
     });
 
   const assetTotal = moneyAccounts
-    .filter((account) => account.kind !== AccountKind.loan)
+    .filter((account) => account.kind !== AccountKind.loan && account.kind !== AccountKind.settlement)
     .reduce((sum, account) => sum + account.balance, 0);
   const loanTotal = moneyAccounts
-    .filter((account) => account.kind === AccountKind.loan)
+    .filter((account) => account.kind === AccountKind.loan || account.kind === AccountKind.settlement)
     .reduce((sum, account) => sum + Math.abs(Math.min(0, account.balance)), 0);
   const creditUsedTotal = creditAccounts.reduce((sum, account) => sum + Math.max(0, account.balance), 0);
   const creditLimitTotal = creditAccounts.reduce((sum, account) => sum + account.creditLimit, 0);
@@ -234,7 +239,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
         creditAccounts={creditAccounts.map((account) => ({ ...account, kind: String(account.kind) }))}
         activeTab={tab}
         insuranceCount={insuranceProductCount}
-        liabilityCount={moneyAccounts.filter((account) => account.kind === AccountKind.loan).length}
+        liabilityCount={moneyAccounts.filter((account) => account.kind === AccountKind.loan || account.kind === AccountKind.settlement).length}
         isRedUp={isRedUp}
       />
     </div>
@@ -359,7 +364,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="text-sm font-medium text-slate-700">{group.label}</div>
-                          <div className={`text-base font-semibold tabular-nums ${group.kind === AccountKind.loan ? debtMoneyClass(total, isRedUp) : neutralMoneyClass(total)}`}>{formatMoney(total)}</div>
+                          <div className={`text-base font-semibold tabular-nums ${group.kind === AccountKind.loan || group.kind === AccountKind.settlement ? debtMoneyClass(total, isRedUp) : neutralMoneyClass(total)}`}>{formatMoney(total)}</div>
                         </div>
                         <div className="text-xs text-slate-400">{t("settings.accounts.kindCount", { count: group.accounts.length })}</div>
                       </div>
@@ -384,7 +389,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
                     const detailView =
                       String(account.kind) === "deposit"
                         ? "deposit"
-                        : account.kind === "loan"
+                        : account.kind === "loan" || account.kind === "settlement"
                           ? "debt"
                           : "detail";
                     return (
@@ -399,7 +404,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
                             <span className="rounded bg-slate-100 px-1.5 py-0.5">{account.groupName}</span>
                           </div>
                         </div>
-                        <div className={`shrink-0 text-sm font-semibold tabular-nums ${account.kind === AccountKind.loan ? debtMoneyClass(account.balance, isRedUp) : neutralMoneyClass(account.balance)}`}>
+                        <div className={`shrink-0 text-sm font-semibold tabular-nums ${account.kind === AccountKind.loan || account.kind === AccountKind.settlement ? debtMoneyClass(account.balance, isRedUp) : neutralMoneyClass(account.balance)}`}>
                           {formatMoney(account.balance)}
                         </div>
                       </Link>

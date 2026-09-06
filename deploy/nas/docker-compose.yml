@@ -4,7 +4,7 @@ services:
     container_name: mmh-db
     restart: unless-stopped
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-mmh}
       POSTGRES_USER: ${POSTGRES_USER:-mmh-fs}
@@ -33,7 +33,7 @@ services:
       MMH_GIT_BRANCH: ${MMH_GIT_BRANCH:-main}
       MMH_UPDATE_SOURCE_URL: ${MMH_UPDATE_SOURCE_URL:-https://github.com/frankluise5220/MMH.git}
       MMH_UPDATER_URL: ${MMH_UPDATER_URL:-http://updater:7788}
-      MMH_UPDATE_TOKEN: ${POSTGRES_PASSWORD:-CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD}
+      MMH_UPDATE_TOKEN: ${MMH_UPDATE_TOKEN:-}
       NODE_ENV: production
       POSTGRES_DB: ${POSTGRES_DB:-mmh}
       POSTGRES_USER: ${POSTGRES_USER:-mmh-fs}
@@ -56,7 +56,7 @@ services:
     working_dir: /workspace
     command: sh -lc "git config --global --add safe.directory /workspace >/dev/null 2>&1 || true; exec node /updater/mmh-updater-server.mjs"
     environment:
-      MMH_UPDATE_TOKEN: ${POSTGRES_PASSWORD:-CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD}
+      MMH_UPDATE_TOKEN: ${MMH_UPDATE_TOKEN:-}
       MMH_WORKDIR: /workspace
       MMH_COMPOSE_PROJECT: ${MMH_COMPOSE_PROJECT:-mmh}
       MMH_COMPOSE_FILE: /workspace/docker-compose.yml

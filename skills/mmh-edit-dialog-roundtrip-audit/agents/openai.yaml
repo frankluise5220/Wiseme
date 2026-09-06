@@ -1,4 +1,0 @@
-interface:
-  display_name: "MMH Edit Dialog Roundtrip Audit"
-  short_description: "Audit MMH create/edit dialogs end to end."
-  default_prompt: "Use $mmh-edit-dialog-roundtrip-audit to verify an MMH create or edit dialog round-trips correctly."

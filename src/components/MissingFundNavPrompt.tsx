@@ -33,12 +33,32 @@ function navKey(item: Pick<InvestmentProfitMissingNav, "fundCode" | "date">) {
   return `${item.fundCode.trim()}|${item.date}`;
 }
 
+function navBatchKey(item: InvestmentProfitMissingNav) {
+  return `${item.fundCode.trim()}|${item.date.slice(0, 7)}`;
+}
+
+function buildMissingNavBatches(items: InvestmentProfitMissingNav[]) {
+  const grouped = new Map<string, InvestmentProfitMissingNav[]>();
+  for (const item of items) {
+    const key = navBatchKey(item);
+    const list = grouped.get(key) ?? [];
+    list.push(item);
+    grouped.set(key, list);
+  }
+  return Array.from(grouped.values()).sort((a, b) =>
+    a[0]!.date.localeCompare(b[0]!.date) || a[0]!.fundCode.localeCompare(b[0]!.fundCode, "zh-Hans-CN"),
+  );
+}
+
 type MissingNavResponse = {
   ok?: boolean;
   error?: string;
   unresolvedItems?: InvestmentProfitMissingNav[];
   resolvedItems?: InvestmentProfitMissingNav[];
+  fetched?: number;
   written?: number;
+  failed?: number;
+  skippedClosed?: number;
 };
 
 async function readMissingNavResponse(res: Response, fallbackMessage: string): Promise<MissingNavResponse | null> {
@@ -47,11 +67,8 @@ async function readMissingNavResponse(res: Response, fallbackMessage: string): P
     return await res.json().catch(() => null);
   }
 
-  const text = await res.text().catch(() => "");
-  const plainText = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-  const detail = plainText && !plainText.startsWith("<!DOCTYPE") ? `: ${plainText.slice(0, 120)}` : "";
   const status = res.status ? ` (HTTP ${res.status})` : "";
-  return { ok: false, error: `${fallbackMessage}${status}${detail}` };
+  return { ok: false, error: `${fallbackMessage}${status}` };
 }
 
 export function MissingFundNavPrompt({
@@ -94,29 +111,51 @@ export function MissingFundNavPrompt({
     setMessage("");
     startTransition(async () => {
       try {
-        const res = await fetch("/api/v1/fund/nav/missing", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            items: missingItems.map((item) => ({ fundCode: item.fundCode, date: item.date })),
-          }),
-        });
-        const data = await readMissingNavResponse(res, t("missingNav.fetchFailed"));
-        if (!data || !res.ok || !data.ok) {
-          window.alert(data?.error ?? t("missingNav.fetchFailed"));
-          return;
+        const batches = buildMissingNavBatches(missingItems);
+        const aggregate: MissingNavResponse = {
+          ok: true,
+          unresolvedItems: [],
+          resolvedItems: [],
+          fetched: 0,
+          written: 0,
+          failed: 0,
+          skippedClosed: 0,
+        };
+        for (const batch of batches) {
+          const res = await fetch("/api/v1/fund/nav/missing", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              items: batch.map((item) => ({
+                fundCode: item.fundCode,
+                date: item.date,
+                accountId: item.accountId,
+              })),
+            }),
+          });
+          const data = await readMissingNavResponse(res, t("missingNav.fetchFailed"));
+          if (!data || !res.ok || !data.ok) {
+            window.alert(data?.error ?? t("missingNav.fetchFailed"));
+            return;
+          }
+          aggregate.fetched = (aggregate.fetched ?? 0) + (data.fetched ?? 0);
+          aggregate.written = (aggregate.written ?? 0) + (data.written ?? 0);
+          aggregate.failed = (aggregate.failed ?? 0) + (data.failed ?? 0);
+          aggregate.skippedClosed = (aggregate.skippedClosed ?? 0) + (data.skippedClosed ?? 0);
+          if (Array.isArray(data.unresolvedItems)) aggregate.unresolvedItems!.push(...data.unresolvedItems);
+          if (Array.isArray(data.resolvedItems)) aggregate.resolvedItems!.push(...data.resolvedItems);
         }
-        const unresolvedItems = Array.isArray(data.unresolvedItems)
-          ? uniqueMissingNavs(data.unresolvedItems)
+        const unresolvedItems = Array.isArray(aggregate.unresolvedItems)
+          ? uniqueMissingNavs(aggregate.unresolvedItems)
           : [];
-        const resolvedItems = Array.isArray(data.resolvedItems)
-          ? uniqueMissingNavs(data.resolvedItems)
+        const resolvedItems = Array.isArray(aggregate.resolvedItems)
+          ? uniqueMissingNavs(aggregate.resolvedItems)
           : [];
 
         setMissingItems([]);
-        window.dispatchEvent(new CustomEvent("mmh:fund:nav-cache-updated", { detail: data }));
+        window.dispatchEvent(new CustomEvent("mmh:fund:nav-cache-updated", { detail: aggregate }));
         router.refresh();
-        if (unresolvedItems.length > 0 && resolvedItems.length === 0 && (data.written ?? 0) === 0) {
+        if (unresolvedItems.length > 0 && resolvedItems.length === 0 && (aggregate.written ?? 0) === 0) {
           window.alert(t("missingNav.unresolvedAlert").replace("{count}", String(unresolvedItems.length)));
         }
       } catch (error) {

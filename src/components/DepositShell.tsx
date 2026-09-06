@@ -365,7 +365,6 @@ export function DepositShell({
             emptyText={lotTab === "held" ? t("depositShell.emptyHoldings") : t("depositShell.emptyExpired")}
             showFilters
             fillHeight
-            compactRows
             toolbarMode="none"
             defaultSort={{ key: "originalAmount", direction: "desc" }}
             summaryRow={lotsSummaryRow}
@@ -420,7 +419,6 @@ export function DepositShell({
             minTableWidth={1020}
             emptyText={selectedLot ? t("depositShell.emptyRelatedEntries") : t("depositShell.emptyAllEntries")}
             fillHeight
-            compactRows
             toolbarMode="none"
             showColumnVisibilityButton={false}
             showFilters

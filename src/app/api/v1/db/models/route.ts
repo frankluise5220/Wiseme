@@ -4,9 +4,9 @@ import { getApiHouseholdScope } from "@/lib/server/api-auth";
 export const runtime = "nodejs";
 
 /**
- * Lists the Agent-accessible models of the Prisma schema.
+ * Lists the database-API models available to signed-in administrators.
  *
- * Auth: browser session cookie, Authorization: Bearer <admin password>, or X-Api-Key.
+ * Auth: browser administrator session cookie only.
  *
  * GET /api/v1/db/models
  */
@@ -45,7 +45,6 @@ const READ_ALLOWED_MODELS = new Set([
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key",
   } as const;
@@ -57,48 +56,30 @@ export async function OPTIONS() {
 
 export async function GET(req: Request) {
   try {
-    await getApiHouseholdScope(req);
+    const scope = await getApiHouseholdScope(req);
+    if (scope.authMethod !== "session") {
+      return NextResponse.json(
+        { ok: false, code: "API_KEY_SCOPE_DENIED", error: "API keys cannot access the database API." },
+        { status: 403, headers: corsHeaders() },
+      );
+    }
+    if (!scope.user || !(scope.user.role === "admin" || scope.user.isSystem === true)) {
+      return NextResponse.json(
+        { ok: false, code: "FORBIDDEN", error: "Administrator access is required for the database API." },
+        { status: 403, headers: corsHeaders() },
+      );
+    }
 
     // Dynamically fetch all model metadata via Prisma's DMMF API
     const { Prisma } = await import("@prisma/client");
     const dmmf = Prisma?.dmmf?.datamodel?.models || [];
-
-    // Model name to Chinese title mapping
-    const MODEL_CN: Record<string, string> = {
-      Household: "家庭",
-      User: "用户",
-      AccountGroup: "所有人",
-      Account: "账户",
-      Category: "分类",
-      Institution: "机构",
-      Tag: "标签",
-      EntryTag: "明细标签",
-      ImportBatch: "导入批次",
-      UserSettings: "用户设置",
-      AccountAlias: "账户别名",
-      DistillLog: "提取日志",
-      AccessKey: "访问密钥",
-      AiChannel: "AI渠道",
-      AiModel: "AI模型",
-      BillOverride: "账单覆盖",
-      CreditCardCycle: "账单周期",
-      FundSnapshot: "资产快照",
-      FundHolding: "持仓",
-      FundFeeRate: "费率",
-      FundConfirmDays: "确认天数",
-      FundNavCache: "净值缓存",
-      TxRecord: "交易记录",
-      RegularInvestPlan: "定投计划",
-      Attachment: "附件",
-      ApiKey: "API密钥",
-    };
 
     const models = dmmf
       .filter((model: any) => !BLOCKED_MODELS.has(model.name) && READ_ALLOWED_MODELS.has(model.name))
       .map((model: any) => ({
         name: model.name,
         dbName: model.dbName || model.name,
-        title: MODEL_CN[model.name] || model.name,
+        title: model.name,
         fields: model.fields.map((field: any) => ({
           name: field.name,
           type: field.type,
@@ -116,11 +97,12 @@ export async function GET(req: Request) {
       models,
     }, { headers: corsHeaders() });
   } catch (e) {
-    console.error("获取模型列表失败:", e);
+    console.error("[db-models] Failed to list database models:", e);
 
     return NextResponse.json({
       ok: false,
-      error: e instanceof Error ? e.message : "无法动态获取模型列表，请使用Prisma Studio",
+      code: e instanceof Error ? e.name || "MODEL_LIST_FAILED" : "MODEL_LIST_FAILED",
+      error: e instanceof Error ? e.message : "Unable to list database models.",
     }, { status: 401, headers: corsHeaders() });
   }
 }

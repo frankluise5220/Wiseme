@@ -379,7 +379,7 @@ private fun AccountListRowDto.displayName(): String = formatAccountDisplayName(n
 
 @Composable
 private fun balanceColor(kind: String, amount: Double): Color = when {
-    kind == "bank_credit" || kind == "loan" -> MaterialTheme.colorScheme.error
+    kind == "bank_credit" || kind == "loan" || kind == "settlement" -> MaterialTheme.colorScheme.error
     amount < 0 -> MaterialTheme.colorScheme.error
     else -> MaterialTheme.colorScheme.onSurface
 }
@@ -389,7 +389,7 @@ private fun kindIcon(kind: String): ImageVector = when (kind) {
     "bank_credit" -> Icons.Default.CreditCard
     "ewallet" -> Icons.Default.AccountBalanceWallet
     "cash" -> Icons.Default.Payments
-    "loan" -> Icons.Default.RequestQuote
+    "loan", "settlement" -> Icons.Default.RequestQuote
     else -> Icons.Default.Savings
 }
 
@@ -398,6 +398,6 @@ private fun kindColor(kind: String): Color = when (kind) {
     "bank_credit" -> Color(0xFFDC2626)
     "ewallet" -> Color(0xFF0891B2)
     "cash" -> Color(0xFF16A34A)
-    "loan" -> Color(0xFFB91C1C)
+    "loan", "settlement" -> Color(0xFFB91C1C)
     else -> Color(0xFF6B7280)
 }

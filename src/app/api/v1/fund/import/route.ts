@@ -17,7 +17,8 @@ import { createFundTransactionWithCashFlows, type FundCashFlowInput } from "@/li
 import { normalizeFundUnitsDecimals, roundFundUnits } from "@/lib/fund/unit-precision-core";
 import { recalcFundPositions } from "@/lib/fund/recalcPosition";
 import { recalcAndSaveAccountBalance } from "@/lib/server/account-balance";
-import { addTradingDaysUtc } from "@/lib/date-utils";
+import { attachEntryTagsByNames, parseTagNamesInput } from "@/lib/server/entry-tags";
+import { addTradingDaysUtc, parseFlexibleDateToYmd } from "@/lib/date-utils";
 import { getCurrentUser, isReadOnly } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
@@ -95,6 +96,7 @@ type FundImportInput = {
   confirmDate?: string | null;
   arrivalDate?: string | null;
   remark?: string;
+  tags?: string | string[];
   calculatedFields?: FundImportCalculatedField[] | null;
 };
 
@@ -114,6 +116,7 @@ type FundImportEnrichedItem = {
   confirmDate: string | null;
   arrivalDate: string | null;
   remark: string;
+  tags: string;
   feeRate: number | null;
   confirmDays: number | null;
   arrivalDays: number | null;
@@ -166,10 +169,30 @@ type ParsedRuleOverride = {
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key",
   } as const;
+}
+
+// Enrichment runs per-row DB and external-API lookups; cap the concurrency so
+// large imports do not exhaust the pg pool (and its connection wait timeout).
+const ENRICH_CONCURRENCY = Math.max(1, Number(process.env.FUND_IMPORT_ENRICH_CONCURRENCY ?? 6));
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const runners = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 function isPureInvestmentAccount(account: Pick<AccountLookupRow, "kind" | "investProductType"> | null | undefined) {
@@ -179,15 +202,7 @@ function isPureInvestmentAccount(account: Pick<AccountLookupRow, "kind" | "inves
 const FUND_NAV_CUTOFF_SECONDS = 15 * 60 * 60;
 
 function normalizeImportDatePart(value: string | null | undefined) {
-  const raw = String(value ?? "").trim();
-  const match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T].*)?$/);
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  return parseFlexibleDateToYmd(value);
 }
 
 function importDateTimeSeconds(value: string | null | undefined) {
@@ -220,18 +235,6 @@ function toUtcDate(dateStr: string): Date {
   const datePart = normalizeImportDatePart(dateStr) ?? dateStr;
   const [y, m, d] = datePart.split("-").map(Number);
   return new Date(Date.UTC(y, (m || 1) - 1, d || 1));
-}
-
-function formatDate(date: Date | null | undefined) {
-  return date ? date.toISOString().slice(0, 10) : null;
-}
-
-function parseDate(date?: string) {
-  const value = String(date ?? "").trim();
-  if (!value) return null;
-  const dt = new Date(value);
-  if (Number.isNaN(dt.getTime())) return null;
-  return toUtcDate(dt.toISOString().slice(0, 10));
 }
 
 function parsePositiveNumber(value: unknown): number | null {
@@ -631,6 +634,7 @@ async function enrichImportItem(
   let fundName = firstUsableFundName(fundCode, input.fundName, contextFundCodeUsed ? ctx.requestContext?.fundName : null);
   let arrivalDate = normalizeImportDatePart(String(input.arrivalDate ?? "").trim()) ?? null;
   const remark = String(input.remark ?? "").trim();
+  const tags = parseTagNamesInput(input.tags).join(",");
 
   if (fundAccountMeta && fundCode && supportedFundCode && date) {
     const override = findRuleOverride(overrideMap, fundAccountMeta, fundAccount, fundCode);
@@ -721,6 +725,7 @@ async function enrichImportItem(
     confirmDate,
     arrivalDate,
     remark,
+    tags,
     feeRate,
     confirmDays,
     arrivalDays,
@@ -818,6 +823,7 @@ async function createFundTransaction(tx: Prisma.TransactionClient, householdId: 
   return {
     id: created.cashEntry?.id ?? created.fundTransaction.id,
     fundTransactionId: created.fundTransaction.id,
+    cashEntryId: created.cashEntry?.id ?? null,
   };
 }
 
@@ -848,7 +854,11 @@ export async function POST(req: Request) {
 
     const ctx = await buildImportContext();
     ctx.requestContext = await resolveFundImportRequestContext(ctx, body?.context);
-    const enrichedItems = await Promise.all(items.map((item) => enrichImportItem(ctx, item as FundImportInput, overrideMap)));
+    const enrichedItems = await mapWithConcurrency(
+      items as FundImportInput[],
+      ENRICH_CONCURRENCY,
+      (item) => enrichImportItem(ctx, item, overrideMap),
+    );
 
     if (mode === "preview") {
       return NextResponse.json({ ok: true, items: enrichedItems }, { headers: corsHeaders() });
@@ -884,6 +894,15 @@ export async function POST(req: Request) {
           }
         }
         rows.push(await createFundTransaction(tx, householdId, item));
+        const cashEntryId = rows[rows.length - 1]?.cashEntryId ?? null;
+        if (cashEntryId && item.tags) {
+          await attachEntryTagsByNames({
+            tx,
+            entryId: cashEntryId,
+            householdId,
+            names: parseTagNamesInput(item.tags),
+          });
+        }
       }
       return rows;
     }, {

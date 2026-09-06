@@ -2,7 +2,9 @@
 
 import { ChevronDown } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useI18n } from "@/lib/i18n";
+import { investProductTypeLabel } from "@/lib/account-kinds";
 import {
   FUND_COMPANY_INSTITUTION_PREFIX,
   fundCompanyInstitutionId,
@@ -13,7 +15,9 @@ export type StatisticsAccountItem = {
   id: string;
   name: string;
   kind?: string | null;
+  investProductType?: string | null;
   label?: string;
+  isPlaceholder?: boolean | null;
   groupId?: string;
   userId?: string | null;
   Institution?: { id?: string; name: string } | null;
@@ -39,6 +43,7 @@ type Props = {
   allAccounts: StatisticsAccountItem[];
   allInstitutions?: StatisticsInstitutionItem[];
   allUsers?: StatisticsUserItem[];
+  showAccountFilter?: boolean;
   /** Fund company names shown as an extra group inside the institution menu. */
   fundCompanies?: string[];
   /** Subset of `fundCompanies` that no longer holds a position. Rendered as its own sub-group so the union list is not mistaken for a miscount. */
@@ -51,6 +56,7 @@ export function AccountScopeFilter({
   allAccounts,
   allInstitutions = [],
   allUsers = [],
+  showAccountFilter = true,
   fundCompanies = [],
   clearedOnlyFundCompanies = [],
   value,
@@ -87,7 +93,7 @@ export function AccountScopeFilter({
     draftAccountIdsRef.current = draftAccountIds;
   }, [draftUserIds, draftInstitutionIds, draftAccountIds]);
 
-  const validAccounts = useMemo(() => allAccounts.filter((account) => account.name.trim() && account.name.trim() !== "未指定账户"), [allAccounts]);
+  const validAccounts = useMemo(() => allAccounts.filter((account) => account.name.trim() && account.isPlaceholder !== true), [allAccounts]);
   const userFilteredAccounts = useMemo(() => validAccounts.filter((account) =>
     userIds.length === 0 || (account.groupId && userIds.includes(account.groupId)),
   ), [validAccounts, userIds]);
@@ -154,6 +160,23 @@ export function AccountScopeFilter({
     return () => document.removeEventListener("pointerdown", handlePointerDown);
   // The handler intentionally reads the current draft selection when the menu closes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openMenu]);
+
+  // The menu is rendered via createPortal to <body>, so `position: fixed` coordinates
+  // are relative to the viewport. Keep them in sync with the trigger button on scroll
+  // and resize (e.g. inside a sticky header that moves as the page scrolls).
+  useEffect(() => {
+    if (!openMenu) return;
+    const activeKind = openMenu;
+    function reposition() {
+      positionMenu(activeKind);
+    }
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    };
   }, [openMenu]);
 
   function selectSingle(kind: "users" | "institutions" | "accounts", id: string) {
@@ -226,8 +249,20 @@ export function AccountScopeFilter({
       : [...new Set([...current, ...ids])]);
   }
 
+  /** Grouping key for the account menu: investment accounts group by product
+   *  category (fund/wealth/stock/property/...), everything else by account kind. */
+  function accountGroupKey(account: StatisticsAccountItem) {
+    if (account.kind === "investment" && account.investProductType) return `__ipt__${account.investProductType}`;
+    return account.kind ?? "other";
+  }
+
+  function accountGroupLabel(type: string) {
+    if (type.startsWith("__ipt__")) return investProductTypeLabel(type.slice("__ipt__".length), t);
+    return t(`account.kind.${type}`);
+  }
+
   function toggleAccountType(type: string) {
-    const ids = accountOptions.filter((account) => account.kind === type).map((account) => account.id);
+    const ids = accountOptions.filter((account) => accountGroupKey(account) === type).map((account) => account.id);
     setDraftAccountIds((current) => ids.every((id) => current.includes(id)) ? current.filter((id) => !ids.includes(id)) : [...new Set([...current, ...ids])]);
   }
 
@@ -240,7 +275,7 @@ export function AccountScopeFilter({
   function institutionGroupKey(type: string | null | undefined) {
     if (type === "cash") return "cash";
     if (type === "bank") return "bank";
-    if (type === "payment" || type === "ewallet") return "payment";
+    if (type === "payment") return "payment";
     if (type === "brokerage" || type === "fund_company" || type === "investment") return "investment";
     return "other";
   }
@@ -253,14 +288,33 @@ export function AccountScopeFilter({
     return t("institution.type.other");
   }
 
+  function positionMenu(kind: "users" | "institutions" | "accounts") {
+    const button = menuAnchorRef.current;
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    const menuWidth = kind === "users" ? 224 : 620;
+    const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - menuWidth - 8));
+    const menuHeight = Math.min(window.innerHeight * 0.7, 520);
+    const openUpward = rect.bottom + 4 + menuHeight > window.innerHeight - 8 && rect.top - 4 - menuHeight > 8;
+    const top = openUpward ? rect.top - menuHeight - 4 : rect.bottom + 4;
+    setMenuPosition({ left, top });
+  }
+
   function toggleMenu(kind: "users" | "institutions" | "accounts", button: HTMLButtonElement) {
     if (openMenu === kind) {
       confirm(kind);
       return;
     }
-    const rect = button.getBoundingClientRect();
     menuAnchorRef.current = button;
-    setMenuPosition({ left: rect.left, top: rect.bottom + 4 });
+    // 在挂载弹层前先同步计算好位置，避免弹层以初始 {left:0, top:0} 闪现一帧
+    // 再被 setMenuPosition 跳到正确位置。
+    const rect = button.getBoundingClientRect();
+    const menuWidth = kind === "users" ? 224 : 620;
+    const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - menuWidth - 8));
+    const menuHeight = Math.min(window.innerHeight * 0.7, 520);
+    const openUpward = rect.bottom + 4 + menuHeight > window.innerHeight - 8 && rect.top - 4 - menuHeight > 8;
+    const top = openUpward ? rect.top - menuHeight - 4 : rect.bottom + 4;
+    setMenuPosition({ left, top });
     setOpenMenu(kind);
   }
 
@@ -289,6 +343,10 @@ export function AccountScopeFilter({
     if (!('Institution' in account)) return account.name;
     return account.Institution?.name ? `${account.Institution.name}·${account.name}` : account.name;
   }
+
+  const filterKinds = showAccountFilter
+    ? (["users", "institutions", "accounts"] as const)
+    : (["users", "institutions"] as const);
 
   const fundCompanyGroupBlock = fundCompanyOptions.length === 0 ? null : (
     <div className="grid grid-cols-[96px_1fr] items-start gap-2 border-b border-slate-200 py-2 last:border-b-0">
@@ -332,7 +390,7 @@ export function AccountScopeFilter({
 
   return (
     <div className="flex min-w-max items-center gap-3">
-      {(["users", "institutions", "accounts"] as const).map((kind) => {
+      {filterKinds.map((kind) => {
         const isUsers = kind === "users";
         const isInstitutions = kind === "institutions";
         const selected = isUsers ? userIds : isInstitutions ? institutionIds : accountIds;
@@ -343,11 +401,11 @@ export function AccountScopeFilter({
             <span className="truncate">{selectionLabel(kind, selected)}</span>
             <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform ${openMenu === kind ? "rotate-180" : ""}`} />
           </button>
-          {openMenu === kind && <div ref={menuRef} style={{ left: menuPosition.left, top: menuPosition.top }} className={`fixed z-[100] max-h-[min(70vh,520px)] overflow-y-auto rounded-md ${isInstitutions || !isUsers ? "w-[620px]" : "w-56"} border border-slate-200 bg-white p-2 shadow-lg`}>
+          {openMenu === kind && createPortal(<div ref={menuRef} style={{ left: menuPosition.left, top: menuPosition.top }} className={`fixed z-[100] max-h-[min(70vh,520px)] overflow-y-auto rounded-md ${isInstitutions || !isUsers ? "w-[620px]" : "w-56"} border border-slate-200 bg-white p-2 shadow-lg`}>
             <div className="mb-1 px-2 text-[11px] font-medium text-slate-500">{isUsers ? t("statistics.allPeople") : isInstitutions ? t("statistics.allInstitutions") : t("reports.allAccounts")}</div>
             <button type="button" className="absolute right-2 top-2 text-[11px] text-blue-600 hover:text-blue-800" onClick={() => clearSelection(kind)}>{t("statistics.clearSelection")}</button>
             {items.length === 0 && <div className="px-2 py-2 text-xs text-slate-400">{t("table.empty")}</div>}
-            {isInstitutions ? Array.from(new Set(institutionOptions.map((institution) => institutionGroupKey(institution.type)))).map((type) => { const groupedItems = institutionOptions.filter((institution) => institutionGroupKey(institution.type) === type); return <div key={type} className="grid grid-cols-[96px_1fr] items-start gap-2 border-b border-slate-200 py-2 last:border-b-0"><label className="flex min-h-7 items-center gap-1.5 px-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={groupedItems.every((institution) => draftInstitutionIds.includes(institution.id))} onChange={() => toggleInstitutionType(type)} />{institutionGroupLabel(type)}</label><div className="grid grid-cols-3 items-start gap-x-2 gap-y-1">{groupedItems.map((item) => <div key={item.id} className="flex min-h-7 min-w-0 items-center gap-1.5 rounded px-1 py-1 text-xs hover:bg-slate-50"><input type="checkbox" className="shrink-0" checked={draftInstitutionIds.includes(item.id)} onChange={() => toggleDraft("institutions", item.id)} /><button type="button" className="min-w-0 flex-1 truncate text-left" title={item.name} onClick={() => selectSingle("institutions", item.id)}>{item.name}</button></div>)}</div></div>; }) : !isUsers ? Array.from(new Set(accountOptions.map((account) => account.kind ?? "other"))).map((type) => { const groupedItems = accountOptions.filter((account) => (account.kind ?? "other") === type); return <div key={type} className="grid grid-cols-[96px_1fr] items-start gap-2 border-b border-slate-200 py-2 last:border-b-0"><label className="flex min-h-7 items-center gap-1.5 px-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={groupedItems.every((account) => draftAccountIds.includes(account.id))} onChange={() => toggleAccountType(type)} />{t(`account.kind.${type}`)}</label><div className="grid grid-cols-3 items-start gap-x-2 gap-y-1">{groupedItems.map((item) => <div key={item.id} className="flex min-h-7 min-w-0 items-center gap-1.5 rounded px-1 py-1 text-xs hover:bg-slate-50"><input type="checkbox" className="shrink-0" checked={draftAccountIds.includes(item.id)} onChange={() => toggleDraft("accounts", item.id)} /><button type="button" className="min-w-0 flex-1 truncate text-left" title={accountLabel(item)} onClick={() => selectSingle("accounts", item.id)}>{accountLabel(item)}</button></div>)}</div></div>; }) : items.map((item) => <div key={item.id} className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50">
+            {isInstitutions ? Array.from(new Set(institutionOptions.map((institution) => institutionGroupKey(institution.type)))).map((type) => { const groupedItems = institutionOptions.filter((institution) => institutionGroupKey(institution.type) === type); return <div key={type} className="grid grid-cols-[96px_1fr] items-start gap-2 border-b border-slate-200 py-2 last:border-b-0"><label className="flex min-h-7 items-center gap-1.5 px-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={groupedItems.every((institution) => draftInstitutionIds.includes(institution.id))} onChange={() => toggleInstitutionType(type)} />{institutionGroupLabel(type)}</label><div className="grid grid-cols-3 items-start gap-x-2 gap-y-1">{groupedItems.map((item) => <div key={item.id} className="flex min-h-7 min-w-0 items-center gap-1.5 rounded px-1 py-1 text-xs hover:bg-slate-50"><input type="checkbox" className="shrink-0" checked={draftInstitutionIds.includes(item.id)} onChange={() => toggleDraft("institutions", item.id)} /><button type="button" className="min-w-0 flex-1 truncate text-left" title={item.name} onClick={() => selectSingle("institutions", item.id)}>{item.name}</button></div>)}</div></div>; }) : !isUsers ? Array.from(new Set(accountOptions.map((account) => accountGroupKey(account)))).map((type) => { const groupedItems = accountOptions.filter((account) => accountGroupKey(account) === type); return <div key={type} className="grid grid-cols-[96px_1fr] items-start gap-2 border-b border-slate-200 py-2 last:border-b-0"><label className="flex min-h-7 items-center gap-1.5 px-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={groupedItems.every((account) => draftAccountIds.includes(account.id))} onChange={() => toggleAccountType(type)} />{accountGroupLabel(type)}</label><div className="grid grid-cols-3 items-start gap-x-2 gap-y-1">{groupedItems.map((item) => <div key={item.id} className="flex min-h-7 min-w-0 items-center gap-1.5 rounded px-1 py-1 text-xs hover:bg-slate-50"><input type="checkbox" className="shrink-0" checked={draftAccountIds.includes(item.id)} onChange={() => toggleDraft("accounts", item.id)} /><button type="button" className="min-w-0 flex-1 truncate text-left" title={accountLabel(item)} onClick={() => selectSingle("accounts", item.id)}>{accountLabel(item)}</button></div>)}</div></div>; }) : items.map((item) => <div key={item.id} className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50">
               <input type="checkbox" checked={draft.includes(item.id)} onChange={() => toggleDraft(kind, item.id)} />
               <button type="button" className="min-w-0 flex-1 truncate text-left" onClick={() => selectSingle(kind, item.id)}>{isUsers ? (allUsers.find((user) => user.id === item.id)?.name ?? item.id) : isInstitutions ? (institutionOptions.find((institution) => institution.id === item.id)?.name ?? item.id) : accountLabel(accountOptions.find((account) => account.id === item.id))}</button>
             </div>)}
@@ -355,7 +413,7 @@ export function AccountScopeFilter({
             <div className="sticky bottom-0 mt-1 border-t border-slate-200 bg-white pt-1.5">
               <button type="button" className="h-7 w-full rounded bg-slate-900 px-3 text-xs font-medium text-white hover:bg-slate-700" onClick={() => confirm(kind)}>{t("table.confirm")}</button>
             </div>
-          </div>}
+          </div>, document.body)}
         </div>;
       })}
     </div>

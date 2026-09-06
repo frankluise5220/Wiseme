@@ -11,7 +11,7 @@ import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { useCloseOnNavigation } from "@/lib/client/useCloseOnNavigation";
 import { useI18n } from "@/lib/i18n";
 
-type PropertyAction = "purchase" | "improvement" | "sale";
+type PropertyAction = "purchase" | "improvement" | "sale" | "disposal";
 type ModalMode = "transaction" | "valuation";
 
 type AccountOption = {
@@ -224,7 +224,7 @@ export function PropertyFormModal({
       window.alert(t("propertyForm.alert.enterPropertyName"));
       return;
     }
-    if (parseAmount(amount) <= 0) {
+    if (parseAmount(amount) <= 0 && action !== "disposal") {
       window.alert(t("propertyForm.alert.enterTradeAmount"));
       return;
     }
@@ -289,6 +289,7 @@ export function PropertyFormModal({
                   ["purchase", "propertyForm.action.purchase"],
                   ["improvement", "propertyForm.action.improvement"],
                   ["sale", "propertyForm.action.sale"],
+                  ["disposal", "propertyForm.action.disposal"],
                 ] as const).map(([key, labelKey]) => (
                   <button
                     key={key}
@@ -378,24 +379,30 @@ export function PropertyFormModal({
             {mode === "transaction" ? (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <div className="space-y-1">
-                  <div className="form-label">{action === "sale" ? t("propertyForm.amountSale") : action === "improvement" ? t("propertyForm.amountImprovement") : t("propertyForm.amountPurchase")}</div>
-                  <CalcInput value={amount} onChange={setAmount} placeholder={t("txForm.amount")} label={t("txForm.amount")} precision={2} />
+                  <div className="form-label">{action === "sale" ? t("propertyForm.amountSale") : action === "disposal" ? t("propertyForm.amountDisposal") : action === "improvement" ? t("propertyForm.amountImprovement") : t("propertyForm.amountPurchase")}</div>
+                  <CalcInput value={amount} onChange={setAmount} placeholder={action === "disposal" ? t("stockFee.optional") : t("txForm.amount")} label={t("txForm.amount")} precision={2} />
                 </div>
-                <div className="space-y-1">
-                  <div className="form-label">{t("txForm.fee")}</div>
-                  <CalcInput value={fee} onChange={setFee} placeholder={t("stockFee.optional")} label={t("txForm.fee")} precision={2} />
-                </div>
-                <div className="space-y-1">
-                  <div className="form-label">{t("propertyForm.tax")}</div>
-                  <CalcInput value={tax} onChange={setTax} placeholder={t("stockFee.optional")} label={t("propertyForm.tax")} precision={2} />
-                </div>
+                {action !== "disposal" ? (
+                  <>
+                    <div className="space-y-1">
+                      <div className="form-label">{t("txForm.fee")}</div>
+                      <CalcInput value={fee} onChange={setFee} placeholder={t("stockFee.optional")} label={t("txForm.fee")} precision={2} />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="form-label">{t("propertyForm.tax")}</div>
+                      <CalcInput value={tax} onChange={setTax} placeholder={t("stockFee.optional")} label={t("propertyForm.tax")} precision={2} />
+                    </div>
+                  </>
+                ) : null}
               </div>
             ) : null}
 
-            <div className="space-y-1">
-              <div className="form-label">{mode === "valuation" ? t("propertyForm.marketValueLatest") : t("propertyForm.marketValueAfter")}</div>
-              <CalcInput value={marketValue} onChange={setMarketValue} placeholder={mode === "valuation" ? t("propertyForm.marketValuePlaceholderManual") : t("propertyForm.marketValuePlaceholderDefault")} label={t("propertyForm.marketValue")} precision={2} />
-            </div>
+            {action !== "disposal" ? (
+              <div className="space-y-1">
+                <div className="form-label">{mode === "valuation" ? t("propertyForm.marketValueLatest") : t("propertyForm.marketValueAfter")}</div>
+                <CalcInput value={marketValue} onChange={setMarketValue} placeholder={mode === "valuation" ? t("propertyForm.marketValuePlaceholderManual") : t("propertyForm.marketValuePlaceholderDefault")} label={t("propertyForm.marketValue")} precision={2} />
+              </div>
+            ) : null}
 
             <div className="space-y-1">
               <div className="form-label">{t("detail.column.remark")}</div>

@@ -281,9 +281,16 @@ export async function loadWealthTransactionEntryLike(params: {
     ? []
     : await prisma.txRecord.findMany({
         where: { id: { in: cashEntryIds }, deletedAt: null },
-        select: { id: true, date: true },
+        select: {
+          id: true,
+          date: true,
+          EntryTag: {
+            select: { tagId: true, Tag: { select: { name: true, color: true } } },
+          },
+        },
       });
   const cashDateById = new Map(linkedCashEntries.map((entry) => [entry.id, entry.date]));
+  const entryTagsById = new Map(linkedCashEntries.map((entry) => [entry.id, entry.EntryTag]));
 
   const projectedRows = rows.map((row) => {
     const isCashIn = isCashInAction(row.action);
@@ -306,6 +313,7 @@ export async function loadWealthTransactionEntryLike(params: {
       id: row.cashEntryId ?? row.id,
       cashEntryId: row.cashEntryId,
       businessTransactionId: row.id,
+      entryTags: row.cashEntryId ? entryTagsById.get(row.cashEntryId) ?? [] : [],
       date: row.tradeDate,
       createdAt: row.createdAt,
       deletedAt: row.deletedAt,
@@ -372,6 +380,20 @@ export async function loadPreciousMetalTransactionEntryLike(params: {
     orderBy: [{ tradeDate: "desc" }, { createdAt: "desc" }],
   });
 
+  const metalCashEntryIds = Array.from(new Set(rows.map((row) => row.cashEntryId).filter((id): id is string => Boolean(id))));
+  const metalCashEntries = metalCashEntryIds.length === 0
+    ? []
+    : await prisma.txRecord.findMany({
+        where: { id: { in: metalCashEntryIds }, deletedAt: null },
+        select: {
+          id: true,
+          EntryTag: {
+            select: { tagId: true, Tag: { select: { name: true, color: true } } },
+          },
+        },
+      });
+  const entryTagsById = new Map(metalCashEntries.map((entry) => [entry.id, entry.EntryTag]));
+
   return rows.map((row) => {
     const isCashIn = isCashInAction(row.action);
     const amount = Math.abs(toNumber(row.amount));
@@ -379,6 +401,7 @@ export async function loadPreciousMetalTransactionEntryLike(params: {
       id: row.cashEntryId ?? row.id,
       cashEntryId: row.cashEntryId,
       businessTransactionId: row.id,
+      entryTags: row.cashEntryId ? entryTagsById.get(row.cashEntryId) ?? [] : [],
       date: row.tradeDate,
       createdAt: row.createdAt,
       deletedAt: row.deletedAt,

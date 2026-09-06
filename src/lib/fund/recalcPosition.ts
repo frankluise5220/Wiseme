@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db/prisma";
-import { FundCashFlowKind, FundSubtype } from "@prisma/client";
+import { FundCashFlowKind, FundSubtype, type Prisma } from "@prisma/client";
 import { toNumber } from "@/lib/date-utils";
 import { allocateBuyFailedRefunds, getEffectiveBuyUnits } from "@/lib/fund/refund-link";
 import { normalizeFundUnitsDecimals, roundFundUnits } from "@/lib/fund/unit-precision";
@@ -264,13 +264,17 @@ export function calculateFundPositionsFromEntries(
   return calcByMovingAvg(entries, fundUnitsDecimals);
 }
 
-export async function recalcFundPositions(accountId: string, fundCodes?: string[]) {
-  const account = await prisma.account.findUnique({ where: { id: accountId } });
+export async function recalcFundPositions(
+  accountId: string,
+  fundCodes?: string[],
+  client: Prisma.TransactionClient = prisma,
+) {
+  const account = await client.account.findUnique({ where: { id: accountId } });
   if (!account) return;
   if (account.kind !== "investment") return;
   const fundUnitsDecimals = normalizeFundUnitsDecimals(account.fundUnitsDecimals);
 
-  const fundTransactions = await prisma.fundTransaction.findMany({
+  const fundTransactions = await client.fundTransaction.findMany({
     where: {
       fundAccountId: accountId,
       deletedAt: null,
@@ -391,15 +395,15 @@ export async function recalcFundPositions(accountId: string, fundCodes?: string[
     if (fundCodes && e.fundCode && !fundCodes.includes(e.fundCode)) continue;
     const realizedProfit = calcResult.realizedProfitByEntryId.get(e.id) ?? null;
     if (e.fundTransactionId) {
-      await prisma.fundTransaction.update({ where: { id: e.fundTransactionId }, data: { realizedProfit } });
+      await client.fundTransaction.update({ where: { id: e.fundTransactionId }, data: { realizedProfit } });
     }
     const cashEntryId = e.cashEntryId ?? (e.fundTransactionId && e.id !== e.fundTransactionId ? e.id : null);
     if (cashEntryId) {
-      await prisma.txRecord.update({ where: { id: cashEntryId }, data: { realizedProfit } });
+      await client.txRecord.update({ where: { id: cashEntryId }, data: { realizedProfit } });
     }
   }
 
-  const navCaches = await prisma.fundNavCache.findMany({
+  const navCaches = await client.fundNavCache.findMany({
     where: { fundCode: { in: codesToCalc } },
     orderBy: { navDate: "desc" },
   });
@@ -421,11 +425,11 @@ export async function recalcFundPositions(accountId: string, fundCodes?: string[
 
   for (const code of codesToCalc) {
     const rec = symbolMap.get(code);
-    if (!rec) { await prisma.fundHolding.deleteMany({ where: { accountId, fundCode: code } }); continue; }
+    if (!rec) { await client.fundHolding.deleteMany({ where: { accountId, fundCode: code } }); continue; }
 
     const roundedUnits = roundFundUnits(rec.units, fundUnitsDecimals);
     const avgCost = roundedUnits > 0 ? rec.cost / roundedUnits : 0;
-    const latestNavFromHolding = await prisma.fundHolding.findFirst({
+    const latestNavFromHolding = await client.fundHolding.findFirst({
       where: { accountId, fundCode: code, nav: { not: null } },
       orderBy: { updatedAt: "desc" },
       select: { nav: true },
@@ -434,7 +438,7 @@ export async function recalcFundPositions(accountId: string, fundCodes?: string[
     const navFromHolding = latestNavFromHolding?.nav != null ? toNum(latestNavFromHolding.nav) : null;
     const navToUse = navFromCache ?? navFromHolding;
 
-    const existing = await prisma.fundHolding.findUnique({
+    const existing = await client.fundHolding.findUnique({
       where: { accountId_fundCode: { accountId, fundCode: code } },
     });
     const existingName = (existing?.fundName ?? "").trim();
@@ -451,9 +455,9 @@ export async function recalcFundPositions(accountId: string, fundCodes?: string[
     };
 
     if (existing) {
-      await prisma.fundHolding.update({ where: { accountId_fundCode: { accountId, fundCode: code } }, data: holdingData });
+      await client.fundHolding.update({ where: { accountId_fundCode: { accountId, fundCode: code } }, data: holdingData });
     } else {
-      await prisma.fundHolding.create({ data: { accountId, fundCode: code, ...holdingData } });
+      await client.fundHolding.create({ data: { accountId, fundCode: code, ...holdingData } });
     }
   }
 }

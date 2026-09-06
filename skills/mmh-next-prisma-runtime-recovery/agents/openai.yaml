@@ -1,4 +1,0 @@
-interface:
-  display_name: "MMH Next Prisma Runtime Recovery"
-  short_description: "Recover MMH Next.js and Prisma runtime issues."
-  default_prompt: "Use $mmh-next-prisma-runtime-recovery to diagnose and recover an MMH Next.js or Prisma runtime failure."

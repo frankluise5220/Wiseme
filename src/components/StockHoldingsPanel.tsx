@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Pencil, RefreshCcw, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Pencil, RefreshCcw, SlidersHorizontal, Trash2 } from "lucide-react";
 
 import { formatCurrencyMoney, formatMoney, formatPercent } from "@/lib/format";
 import { pnlClassFromRedUp } from "@/lib/client/colors";
@@ -12,6 +12,7 @@ import { ResizableVerticalSplit } from "@/components/ResizableVerticalSplit";
 import { StockFeeRuleSettingsButton } from "@/components/StockFeeRuleSettingsButton";
 import { AdvancedDataTable, type AdvancedDataTableColumn } from "@/components/AdvancedDataTable";
 import { BatchReplacePopoverButton, type BatchReplaceFieldConfig } from "@/components/BatchReplacePopoverButton";
+import { BusinessLinkActionButton } from "@/components/BusinessLinkActionButton";
 import { ViewExcelImportMenuButton, exportRowsToXlsx } from "@/components/ViewExcelImportMenuButton";
 
 type StockPosition = {
@@ -24,14 +25,22 @@ type StockPosition = {
   cost: number;
   nav: number | null;
   navDate?: string | null;
+  /** Last date the position was fully sold (cleared). Supplied only by stock holdings responses that compute it. */
+  clearedDate?: string | null;
   marketValue: number;
   floatingPnL: number;
   floatingPnLRate: number;
   historicalProfit?: number;
 };
 
+const STOCK_DETAIL_COLUMN_SETTINGS_EVENT = "mmh:stock-detail:column-settings";
+const STOCK_POSITION_EPSILON = 0.000001;
+
 type StockTransaction = {
   id: string;
+  linkId?: string | null;
+  linkIds?: string[] | null;
+  cashEntryId?: string | null;
   stockAccountId?: string;
   stockAccountName?: string | null;
   cashAccountId?: string | null;
@@ -68,6 +77,7 @@ type RefreshPriceHolding = {
   cost: number;
   latestPrice?: number | null;
   latestPriceDate?: string | null;
+  clearedDate?: string | null;
   marketValue: number;
   floatingPnL: number;
   floatingPnLRate: number;
@@ -90,6 +100,16 @@ type StockTransactionsResponse = {
   ok?: boolean;
   error?: string;
   data?: { transactions?: StockTransaction[] };
+};
+
+type StockHoldingsResponse = {
+  ok?: boolean;
+  error?: string;
+  data?: {
+    holdings?: RefreshPriceHolding[];
+    totalMarketValue?: number;
+    totalCost?: number;
+  };
 };
 
 function pnlClass(value: number, isRedUp: boolean) {
@@ -119,6 +139,23 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
 function actionLabel(t: (key: string) => string, action: string) {
   const key = ACTION_LABEL_KEYS[action];
   return key ? t(key) : action || "-";
+}
+
+function renderStockNameCode(name: string | null | undefined, stockCode: string | null | undefined, active = false) {
+  const displayName = String(name || stockCode || "-").trim() || "-";
+  const code = String(stockCode ?? "").trim();
+  return (
+    <div className="flex min-w-0 items-center gap-1.5" title={[displayName, code].filter(Boolean).join(" ")}>
+      <span className={`min-w-0 truncate font-medium ${active ? "text-blue-700" : "text-slate-700"}`}>
+        {displayName}
+      </span>
+      {code ? (
+        <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] leading-none text-slate-500">
+          {code}
+        </span>
+      ) : null}
+    </div>
+  );
 }
 
 function totalFee(tx: StockTransaction) {
@@ -154,6 +191,7 @@ function mapApiHolding(item: RefreshPriceHolding): StockPosition {
     cost: Number(item.cost ?? 0),
     nav: item.latestPrice == null ? null : Number(item.latestPrice),
     navDate: item.latestPriceDate ?? null,
+    clearedDate: item.clearedDate ?? null,
     marketValue: Number(item.marketValue ?? 0),
     floatingPnL: Number(item.floatingPnL ?? 0),
     floatingPnLRate: Number(item.floatingPnLRate ?? 0),
@@ -166,6 +204,8 @@ export function StockHoldingsPanel({
   accountLabel,
   currency,
   positions: initialPositions,
+  clearedPositions: initialClearedPositions = [],
+  initialShowCleared = false,
   cashBalance,
   totalMarketValue,
   totalCost,
@@ -177,6 +217,8 @@ export function StockHoldingsPanel({
   accountLabel: string;
   currency: string;
   positions: StockPosition[];
+  clearedPositions?: StockPosition[];
+  initialShowCleared?: boolean;
   cashBalance: number;
   totalMarketValue: number;
   totalCost: number;
@@ -186,6 +228,8 @@ export function StockHoldingsPanel({
 }) {
   const { t } = useI18n();
   const [positions, setPositions] = useState<StockPosition[]>(initialPositions);
+  const [clearedPositions, setClearedPositions] = useState<StockPosition[]>(initialClearedPositions);
+  const [showCleared, setShowCleared] = useState(initialShowCleared);
   const [marketValue, setMarketValue] = useState(totalMarketValue);
   const [cost, setCost] = useState(totalCost);
   const [selectedKey, setSelectedKey] = useState("");
@@ -205,13 +249,18 @@ export function StockHoldingsPanel({
 
   useEffect(() => {
     setPositions(initialPositions);
+    setClearedPositions(initialClearedPositions);
+    setShowCleared((current) => initialShowCleared || (current && initialClearedPositions.length > 0));
     setMarketValue(totalMarketValue);
     setCost(totalCost);
-  }, [initialPositions, totalCost, totalMarketValue]);
+  }, [initialClearedPositions, initialPositions, initialShowCleared, totalCost, totalMarketValue]);
+
+  const displayPositions = showCleared ? clearedPositions : positions;
+  const allPositionRows = useMemo(() => [...positions, ...clearedPositions], [clearedPositions, positions]);
 
   const selectedPosition = useMemo(
-    () => positions.find((position) => positionKey(position) === selectedKey) ?? null,
-    [positions, selectedKey],
+    () => allPositionRows.find((position) => positionKey(position) === selectedKey) ?? null,
+    [allPositionRows, selectedKey],
   );
 
   useEffect(() => {
@@ -221,8 +270,6 @@ export function StockHoldingsPanel({
       setSelectedIds(new Set());
     }
   }, [selectedKey, selectedPosition]);
-
-  const floatingPnL = marketValue - cost;
 
   const loadTransactions = useCallback(async (position: StockPosition, force = false) => {
     const market = position.market ?? "";
@@ -265,14 +312,31 @@ export function StockHoldingsPanel({
     }
   }, [accountId, t]);
 
+  const reloadHoldings = useCallback(async () => {
+    const params = new URLSearchParams({ accountId, includeZero: "1" });
+    const res = await fetch(`/api/v1/stocks/holdings?${params.toString()}`, { cache: "no-store" });
+    const data = await res.json().catch(() => null) as StockHoldingsResponse | null;
+    if (!res.ok || !data?.ok) throw new Error(data?.error ?? t("stockPanel.error.refreshPriceFailed"));
+    const holdings = (data.data?.holdings ?? []).map(mapApiHolding);
+    const nextPositions = holdings.filter((item) => item.units > STOCK_POSITION_EPSILON);
+    const nextClearedPositions = holdings.filter((item) => item.units <= STOCK_POSITION_EPSILON);
+    setPositions(nextPositions);
+    setClearedPositions(nextClearedPositions);
+    setMarketValue(nextPositions.reduce((sum, item) => sum + item.marketValue, 0));
+    setCost(nextPositions.reduce((sum, item) => sum + item.cost, 0));
+    if (showCleared && nextClearedPositions.length === 0 && nextPositions.length > 0) {
+      setShowCleared(false);
+    }
+  }, [accountId, showCleared, t]);
+
   useEffect(() => {
     function onEditSaved() {
-      if (!selectedPosition) return;
-      void loadTransactions(selectedPosition, true);
+      void reloadHoldings().catch(() => undefined);
+      if (selectedPosition) void loadTransactions(selectedPosition, true);
     }
     window.addEventListener("mmh:stock:edit:success", onEditSaved);
     return () => window.removeEventListener("mmh:stock:edit:success", onEditSaved);
-  }, [loadTransactions, selectedPosition]);
+  }, [loadTransactions, reloadHoldings, selectedPosition]);
 
   async function refreshClosingPrices() {
     if (positions.length === 0 || refreshingPrice) return;
@@ -287,7 +351,7 @@ export function StockHoldingsPanel({
       const data = await res.json().catch(() => null) as RefreshPriceResponse | null;
       if (!res.ok || !data?.ok) throw new Error(data?.error ?? t("stockPanel.error.refreshPriceFailed"));
       if (Array.isArray(data.data?.holdings)) {
-        setPositions(data.data.holdings.map(mapApiHolding));
+        setPositions(data.data.holdings.map(mapApiHolding).filter((item) => item.units > STOCK_POSITION_EPSILON));
         setMarketValue(Number(data.data.totalMarketValue ?? 0));
         setCost(Number(data.data.totalCost ?? 0));
       }
@@ -318,6 +382,7 @@ export function StockHoldingsPanel({
       setTransactions((prev) => prev.filter((tx) => tx.id !== id));
       setDeleteMessage(t("stockPanel.deletedSingle"));
       dispatchFinanceDataChanged({ reason: "stock-transaction-delete", accountIds: [accountId] });
+      void reloadHoldings().catch(() => undefined);
       if (selectedPosition) void loadTransactions(selectedPosition, true);
     } catch (error) {
       setDeleteMessage(error instanceof Error ? error.message : t("stockPanel.error.deleteFailed"));
@@ -328,7 +393,7 @@ export function StockHoldingsPanel({
         return next;
       });
     }
-  }, [accountId, deletingIds, loadTransactions, selectedPosition, t]);
+  }, [accountId, deletingIds, loadTransactions, reloadHoldings, selectedPosition, t]);
 
   async function applyBatchDelete() {
     const ids = batchTargetIds;
@@ -359,6 +424,7 @@ export function StockHoldingsPanel({
       const deletedCount = data.data?.count ?? deletedIds.length;
       setDeleteMessage(t("stockPanel.deletedCount", { count: deletedCount }));
       dispatchFinanceDataChanged({ reason: "stock-transaction-batch-delete", accountIds: [accountId] });
+      void reloadHoldings().catch(() => undefined);
       if (selectedPosition) void loadTransactions(selectedPosition, true);
     } catch {
       setDeleteMessage(t("stockPanel.error.batchDeleteFailed"));
@@ -393,6 +459,7 @@ export function StockHoldingsPanel({
       return next;
     });
     dispatchFinanceDataChanged({ reason: "stock-transaction-batch-update", accountIds: [accountId] });
+    void reloadHoldings().catch(() => undefined);
     if (selectedPosition) void loadTransactions(selectedPosition, true);
     return t("stockPanel.updatedCount", { count: data.data?.updatedCount ?? ids.length });
   }
@@ -461,6 +528,19 @@ export function StockHoldingsPanel({
   const detailSafePage = Math.min(detailPage, detailTotalPages);
   const allDetailPageSize = Math.max(1, detailTableRowCount);
 
+  function switchPositionTab(nextShowCleared: boolean) {
+    setShowCleared(nextShowCleared);
+    setSelectedKey("");
+    setTransactions([]);
+    setTransactionsError("");
+    setSelectedIds(new Set());
+    setDetailPage(1);
+    const url = new URL(window.location.href);
+    if (nextShowCleared) url.searchParams.set("showCleared", "1");
+    else url.searchParams.delete("showCleared");
+    window.history.replaceState(null, "", url.toString());
+  }
+
   const positionColumns = useMemo<AdvancedDataTableColumn<StockPosition>[]>(() => [
     {
       key: "stock",
@@ -472,14 +552,7 @@ export function StockHoldingsPanel({
       sortValue: (p) => `${p.stockCode} ${p.name}`,
       render: (p) => {
         const active = positionKey(p) === selectedKey;
-        return (
-          <div className="min-w-0">
-            <div className={`truncate text-xs font-medium ${active ? "text-blue-700" : "text-slate-700"}`} title={p.name}>
-              {p.name}
-            </div>
-            <div className="truncate text-[11px] text-slate-400">{p.stockCode}</div>
-          </div>
-        );
+        return renderStockNameCode(p.name, p.stockCode, active);
       },
     },
     {
@@ -493,7 +566,7 @@ export function StockHoldingsPanel({
       filterText: (p) => String(p.units),
       filterNumber: (p) => p.units,
       sortValue: (p) => p.units,
-      render: (p) => <span className="text-xs text-slate-700">{formatMoney(p.units)}</span>,
+      render: (p) => <span className="text-slate-700">{formatMoney(p.units)}</span>,
     },
     {
       key: "avgCost",
@@ -506,7 +579,7 @@ export function StockHoldingsPanel({
       filterText: (p) => String(p.avgCost),
       filterNumber: (p) => p.avgCost,
       sortValue: (p) => p.avgCost,
-      render: (p) => <span className="text-xs text-slate-700">{p.avgCost.toFixed(4)}</span>,
+      render: (p) => <span className="text-slate-700">{p.avgCost.toFixed(4)}</span>,
     },
     {
       key: "cost",
@@ -519,7 +592,7 @@ export function StockHoldingsPanel({
       filterText: (p) => String(p.cost),
       filterNumber: (p) => p.cost,
       sortValue: (p) => p.cost,
-      render: (p) => <span className="text-xs text-slate-700">{formatCurrencyMoney(p.cost, currency)}</span>,
+      render: (p) => <span className="text-slate-700">{formatCurrencyMoney(p.cost, currency)}</span>,
     },
     {
       key: "nav",
@@ -533,7 +606,7 @@ export function StockHoldingsPanel({
       filterNumber: (p) => p.nav ?? null,
       sortValue: (p) => p.nav ?? null,
       render: (p) => (
-        <span className="text-xs text-slate-700">
+        <span className="text-slate-700">
           {p.nav == null ? <span className="text-slate-300">-</span> : p.nav.toFixed(4)}
           {p.navDate ? <span className="ml-0.5 whitespace-nowrap text-slate-400">({compactNavDate(p.navDate)})</span> : null}
         </span>
@@ -550,7 +623,7 @@ export function StockHoldingsPanel({
       filterText: (p) => String(p.marketValue),
       filterNumber: (p) => p.marketValue,
       sortValue: (p) => p.marketValue,
-      render: (p) => <span className={`text-xs ${pnlClass(p.marketValue, isRedUp)}`}>{formatCurrencyMoney(p.marketValue, currency)}</span>,
+      render: (p) => <span className={pnlClass(p.marketValue, isRedUp)}>{formatCurrencyMoney(p.marketValue, currency)}</span>,
     },
     {
       key: "floatingPnL",
@@ -563,7 +636,7 @@ export function StockHoldingsPanel({
       filterText: (p) => String(p.floatingPnL),
       filterNumber: (p) => p.floatingPnL,
       sortValue: (p) => p.floatingPnL,
-      render: (p) => <span className={`text-xs ${pnlClass(p.floatingPnL, isRedUp)}`}>{formatCurrencyMoney(p.floatingPnL, currency)}</span>,
+      render: (p) => <span className={pnlClass(p.floatingPnL, isRedUp)}>{formatCurrencyMoney(p.floatingPnL, currency)}</span>,
     },
     {
       key: "floatingRate",
@@ -576,7 +649,7 @@ export function StockHoldingsPanel({
       filterText: (p) => String(p.floatingPnLRate),
       filterNumber: (p) => p.floatingPnLRate,
       sortValue: (p) => p.floatingPnLRate,
-      render: (p) => <span className={`text-xs ${pnlClass(p.floatingPnLRate, isRedUp)}`}>{(p.floatingPnLRate * 100).toFixed(2)}%</span>,
+      render: (p) => <span className={pnlClass(p.floatingPnLRate, isRedUp)}>{(p.floatingPnLRate * 100).toFixed(2)}%</span>,
     },
     {
       key: "historical",
@@ -590,7 +663,7 @@ export function StockHoldingsPanel({
       filterNumber: (p) => p.historicalProfit ?? 0,
       sortValue: (p) => p.historicalProfit ?? 0,
       render: (p) => (
-        <span className={`text-xs ${pnlClass(p.historicalProfit ?? 0, isRedUp)}`}>
+        <span className={pnlClass(p.historicalProfit ?? 0, isRedUp)}>
           {formatCurrencyMoney(p.historicalProfit ?? 0, currency)}
         </span>
       ),
@@ -598,26 +671,67 @@ export function StockHoldingsPanel({
   ], [currency, isRedUp, selectedKey, t]);
 
   const positionSummaryRow = useMemo(() => {
-    if (positions.length === 0) return undefined;
-    const totalFloating = marketValue - cost;
-    const totalHistorical = positions.reduce((sum, p) => sum + (p.historicalProfit ?? 0), 0);
+    if (displayPositions.length === 0) return undefined;
+    const displayMarketValue = showCleared ? 0 : marketValue;
+    const displayCost = showCleared ? 0 : cost;
+    const totalFloating = displayMarketValue - displayCost;
+    const totalHistorical = displayPositions.reduce((sum, p) => sum + (p.historicalProfit ?? 0), 0);
     return {
       cells: {
         stock: t("debtShell.summaryRow"),
-        units: <span className="tabular-nums text-slate-800">{t("stockPanel.holdingCount", { count: positions.length })}</span>,
-        cost: <span className="tabular-nums text-slate-800">{formatCurrencyMoney(cost, currency)}</span>,
-        marketValue: <span className={`tabular-nums ${pnlClass(marketValue, isRedUp)}`}>{formatCurrencyMoney(marketValue, currency)}</span>,
+        units: <span className="tabular-nums text-slate-800">{t(showCleared ? "stockPanel.clearedCount" : "stockPanel.holdingCount", { count: displayPositions.length })}</span>,
+        cost: <span className="tabular-nums text-slate-800">{formatCurrencyMoney(displayCost, currency)}</span>,
+        marketValue: <span className={`tabular-nums ${pnlClass(displayMarketValue, isRedUp)}`}>{formatCurrencyMoney(displayMarketValue, currency)}</span>,
         floatingPnL: <span className={`tabular-nums ${pnlClass(totalFloating, isRedUp)}`}>{formatCurrencyMoney(totalFloating, currency)}</span>,
-        floatingRate: <span className={`tabular-nums ${pnlClass(cost !== 0 ? totalFloating / cost : 0, isRedUp)}`}>{cost !== 0 ? formatPercent(totalFloating / cost) : "-"}</span>,
+        floatingRate: <span className={`tabular-nums ${pnlClass(displayCost !== 0 ? totalFloating / displayCost : 0, isRedUp)}`}>{displayCost !== 0 ? formatPercent(totalFloating / displayCost) : "-"}</span>,
         historical: <span className={`tabular-nums ${pnlClass(totalHistorical, isRedUp)}`}>{formatCurrencyMoney(totalHistorical, currency)}</span>,
       },
     };
-  }, [cost, currency, isRedUp, marketValue, positions, t]);
+  }, [cost, currency, displayPositions, isRedUp, marketValue, showCleared, t]);
 
   const transactionColumns = useMemo<AdvancedDataTableColumn<StockTransaction>[]>(() => {
     const numberFilterText = (value: number | null | undefined) =>
       value == null || !Number.isFinite(value) ? null : String(value);
+    const optionalNumber = (value: number | null | undefined) =>
+      value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+    const renderOptionalCurrency = (value: number | null | undefined) => {
+      const amount = optionalNumber(value);
+      return (
+        <span className="tabular-nums text-xs text-slate-600">
+          {amount == null ? <span className="text-slate-300">-</span> : formatCurrencyMoney(amount, currency)}
+        </span>
+      );
+    };
+    const feeComponentColumn = (
+      key: keyof Pick<StockTransaction, "commission" | "stampTax" | "transferFee" | "exchangeFee" | "regulatoryFee" | "otherFee">,
+      label: string,
+    ): AdvancedDataTableColumn<StockTransaction> => ({
+      key,
+      label,
+      width: 96,
+      minWidth: 76,
+      hideable: true,
+      defaultHidden: true,
+      align: "right",
+      className: "tabular-nums",
+      filterKind: "numberRange",
+      filterText: (tx) => numberFilterText(optionalNumber(tx[key])),
+      filterNumber: (tx) => optionalNumber(tx[key]),
+      sortValue: (tx) => optionalNumber(tx[key]),
+      render: (tx) => renderOptionalCurrency(tx[key]),
+    });
     return [
+      {
+        key: "stock",
+        label: t("stockHoldingReport.colStock"),
+        width: 200,
+        minWidth: 140,
+        hideable: true,
+        defaultHidden: true,
+        filterText: (tx) => [tx.stockName, tx.stockCode].filter(Boolean).join(" "),
+        sortValue: (tx) => `${tx.stockName ?? ""} ${tx.stockCode}`,
+        render: (tx) => renderStockNameCode(tx.stockName, tx.stockCode),
+      },
       {
         key: "tradeDate",
         label: t("detail.column.date"),
@@ -626,7 +740,45 @@ export function StockHoldingsPanel({
         filterKind: "dateRange",
         filterText: (tx) => tx.tradeDate || "",
         sortValue: (tx) => tx.tradeDate || null,
-        render: (tx) => <span className="tabular-nums text-xs text-slate-600">{tx.tradeDate}</span>,
+        render: (tx) => <span className="tabular-nums text-slate-600">{tx.tradeDate}</span>,
+      },
+      {
+        key: "settleDate",
+        label: t("stockTx.settleDateLabel"),
+        width: 112,
+        minWidth: 96,
+        hideable: true,
+        defaultHidden: true,
+        filterKind: "dateRange",
+        filterText: (tx) => tx.settleDate || "",
+        sortValue: (tx) => tx.settleDate || null,
+        render: (tx) => <span className="tabular-nums text-slate-600">{tx.settleDate || <span className="text-slate-300">-</span>}</span>,
+      },
+      {
+        key: "stockAccount",
+        label: t("viewImport.stockAccount"),
+        width: 160,
+        minWidth: 118,
+        hideable: true,
+        defaultHidden: true,
+        filterText: (tx) => tx.stockAccountName || "",
+        sortValue: (tx) => tx.stockAccountName || null,
+        truncate: true,
+        cellTitle: (tx) => tx.stockAccountName || "",
+        render: (tx) => tx.stockAccountName ? <span className="text-slate-600">{tx.stockAccountName}</span> : <span className="text-slate-300">-</span>,
+      },
+      {
+        key: "cashAccount",
+        label: t("viewImport.cashAccount"),
+        width: 160,
+        minWidth: 118,
+        hideable: true,
+        defaultHidden: true,
+        filterText: (tx) => tx.cashAccountName || "",
+        sortValue: (tx) => tx.cashAccountName || null,
+        truncate: true,
+        cellTitle: (tx) => tx.cashAccountName || "",
+        render: (tx) => tx.cashAccountName ? <span className="text-slate-600">{tx.cashAccountName}</span> : <span className="text-slate-300">-</span>,
       },
       {
         key: "action",
@@ -635,7 +787,18 @@ export function StockHoldingsPanel({
         minWidth: 72,
         filterText: (tx) => actionLabel(t, tx.action),
         sortValue: (tx) => actionLabel(t, tx.action),
-        render: (tx) => <span className="text-xs text-slate-700">{actionLabel(t, tx.action)}</span>,
+        render: (tx) => <span className="text-slate-700">{actionLabel(t, tx.action)}</span>,
+      },
+      {
+        key: "market",
+        label: t("reports.stock.market"),
+        width: 76,
+        minWidth: 64,
+        hideable: true,
+        defaultHidden: true,
+        filterText: (tx) => tx.market || "",
+        sortValue: (tx) => tx.market || null,
+        render: (tx) => tx.market ? <span className="text-slate-600">{tx.market}</span> : <span className="text-slate-300">-</span>,
       },
       {
         key: "quantity",
@@ -649,7 +812,7 @@ export function StockHoldingsPanel({
         filterNumber: (tx) => (tx.quantity == null ? null : Number(tx.quantity)),
         sortValue: (tx) => (tx.quantity == null ? null : Number(tx.quantity)),
         render: (tx) => (
-          <span className="whitespace-nowrap tabular-nums text-xs text-slate-700">
+          <span className="whitespace-nowrap tabular-nums text-slate-700">
             {tx.quantity == null ? <span className="text-slate-300">-</span> : formatMoney(Number(tx.quantity))}
           </span>
         ),
@@ -666,7 +829,7 @@ export function StockHoldingsPanel({
         filterNumber: (tx) => (tx.price == null ? null : Number(tx.price)),
         sortValue: (tx) => (tx.price == null ? null : Number(tx.price)),
         render: (tx) => (
-          <span className="whitespace-nowrap tabular-nums text-xs text-slate-700">
+          <span className="whitespace-nowrap tabular-nums text-slate-700">
             {tx.price == null ? <span className="text-slate-300">-</span> : Number(tx.price).toFixed(4)}
           </span>
         ),
@@ -682,7 +845,22 @@ export function StockHoldingsPanel({
         filterText: (tx) => numberFilterText(Math.abs(Number(tx.grossAmount ?? 0))),
         filterNumber: (tx) => Math.abs(Number(tx.grossAmount ?? 0)),
         sortValue: (tx) => Math.abs(Number(tx.grossAmount ?? 0)),
-        render: (tx) => <span className="tabular-nums text-xs text-slate-700">{formatCurrencyMoney(Number(tx.grossAmount ?? 0), currency)}</span>,
+        render: (tx) => <span className="tabular-nums text-slate-700">{formatCurrencyMoney(Number(tx.grossAmount ?? 0), currency)}</span>,
+      },
+      {
+        key: "netAmount",
+        label: t("stockTx.netAmountLabel"),
+        width: 120,
+        minWidth: 92,
+        hideable: true,
+        defaultHidden: true,
+        align: "right",
+        className: "tabular-nums",
+        filterKind: "numberRange",
+        filterText: (tx) => numberFilterText(optionalNumber(tx.netAmount)),
+        filterNumber: (tx) => optionalNumber(tx.netAmount),
+        sortValue: (tx) => optionalNumber(tx.netAmount),
+        render: (tx) => renderOptionalCurrency(tx.netAmount),
       },
       {
         key: "fee",
@@ -695,8 +873,14 @@ export function StockHoldingsPanel({
         filterText: (tx) => numberFilterText(totalFee(tx)),
         filterNumber: (tx) => totalFee(tx),
         sortValue: (tx) => totalFee(tx),
-        render: (tx) => <span className="tabular-nums text-xs text-slate-600">{formatCurrencyMoney(totalFee(tx), currency)}</span>,
+        render: (tx) => <span className="tabular-nums text-slate-600">{formatCurrencyMoney(totalFee(tx), currency)}</span>,
       },
+      feeComponentColumn("commission", t("stockFee.feeType.commission")),
+      feeComponentColumn("stampTax", t("stockFee.feeType.stamp_tax")),
+      feeComponentColumn("transferFee", t("stockFee.feeType.transfer_fee")),
+      feeComponentColumn("exchangeFee", t("stockFee.feeType.exchange_fee")),
+      feeComponentColumn("regulatoryFee", t("stockFee.feeType.regulatory_fee")),
+      feeComponentColumn("otherFee", t("stockFee.feeType.other")),
       {
         key: "cash",
         label: t("stockPanel.colCashFlow"),
@@ -709,7 +893,7 @@ export function StockHoldingsPanel({
         filterNumber: (tx) => cashAmount(tx),
         sortValue: (tx) => cashAmount(tx),
         render: (tx) => (
-          <span className={`tabular-nums text-xs ${pnlClass(cashAmount(tx), isRedUp)}`}>{formatCurrencyMoney(cashAmount(tx), currency)}</span>
+          <span className={`tabular-nums ${pnlClass(cashAmount(tx), isRedUp)}`}>{formatCurrencyMoney(cashAmount(tx), currency)}</span>
         ),
       },
       {
@@ -724,7 +908,7 @@ export function StockHoldingsPanel({
         filterNumber: (tx) => (tx.realizedProfit == null ? null : Number(tx.realizedProfit)),
         sortValue: (tx) => (tx.realizedProfit == null ? null : Number(tx.realizedProfit)),
         render: (tx) => (
-          <span className={`tabular-nums text-xs ${pnlClass(Number(tx.realizedProfit ?? 0), isRedUp)}`}>
+          <span className={`tabular-nums ${pnlClass(Number(tx.realizedProfit ?? 0), isRedUp)}`}>
             {tx.realizedProfit == null ? <span className="text-slate-300">-</span> : formatCurrencyMoney(Number(tx.realizedProfit), currency)}
           </span>
         ),
@@ -734,13 +918,14 @@ export function StockHoldingsPanel({
         label: t("detail.column.remark"),
         width: 180,
         minWidth: 110,
+        hideable: true,
         filterText: (tx) => String(tx.note ?? "").trim(),
         sortValue: (tx) => String(tx.note ?? "").trim() || null,
         truncate: true,
         cellTitle: (tx) => String(tx.note ?? "").trim(),
         render: (tx) => {
           const note = String(tx.note ?? "").trim();
-          return note ? <span className="text-xs text-slate-600">{note}</span> : <span className="text-slate-300">-</span>;
+          return note ? <span className="text-slate-600">{note}</span> : <span className="text-slate-300">-</span>;
         },
       },
     ];
@@ -773,8 +958,18 @@ export function StockHoldingsPanel({
 
   const transactionRowActions = useCallback((tx: StockTransaction) => {
     const deleting = deletingIds.has(tx.id);
+    const hasBusinessLink = (tx.linkIds?.length ?? 0) > 0;
+    const linkLabels = hasBusinessLink ? (tx.cashAccountName ? [tx.cashAccountName] : []) : [];
+    const linkTitle = hasBusinessLink
+      ? t("stockPanel.linkedTitle", { labels: linkLabels.join("、") || t("stockPanel.businessCashFlow") })
+      : t("stockPanel.unlinkedTitle");
     return (
       <div className="flex items-center justify-end gap-1">
+        <BusinessLinkActionButton
+          active={hasBusinessLink}
+          title={linkTitle}
+          onClick={() => undefined}
+        />
         <button
           type="button"
           onClick={() => openEditTransaction(tx)}
@@ -813,6 +1008,22 @@ export function StockHoldingsPanel({
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-left">
             <div className="flex min-w-0 items-center gap-1 text-sm font-semibold text-slate-800">
               <span className="flex h-6 min-w-0 shrink items-center truncate">{t("stockTx.holdingStock")}</span>
+              <div className="ml-2 flex items-center gap-0.5 rounded bg-slate-100 p-0.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => switchPositionTab(false)}
+                  className={`h-6 rounded px-2 ${!showCleared ? "bg-white font-medium text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                >
+                  {t("invest.filterHolding")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchPositionTab(true)}
+                  className={`h-6 rounded px-2 ${showCleared ? "bg-white font-medium text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                >
+                  {t("invest.filterCleared")}
+                </button>
+              </div>
               <span className="flex h-6 shrink-0 items-center text-xs text-slate-500">
                 <span className="ml-2">{t("stockPanel.cashBalanceLabel")}</span>
                 <span className="ml-2 font-semibold tabular-nums text-slate-800">{formatCurrencyMoney(cashBalance, currency)}</span>
@@ -870,9 +1081,10 @@ export function StockHoldingsPanel({
           <AdvancedDataTable
             storageKey="mmh_stock_shell_positions_advanced_v1"
             columns={positionColumns}
-            rows={positions}
+            resetKey={showCleared ? "cleared" : "holding"}
+            rows={displayPositions}
             rowKey={(p) => positionKey(p)}
-            emptyText={t("stockHoldingReport.empty")}
+            emptyText={showCleared ? t("stockPanel.noCleared") : t("stockHoldingReport.empty")}
             minTableWidth={900}
             rowClassName={(p) => {
               const active = positionKey(p) === selectedKey;
@@ -881,10 +1093,9 @@ export function StockHoldingsPanel({
             onRowClick={(p) => void loadTransactions(p)}
             showFilters={false}
             fillHeight
-            compactRows
             toolbarMode="none"
             draggableRows={false}
-            defaultSort={{ key: "marketValue", direction: "desc" }}
+            defaultSort={showCleared ? { key: "historical", direction: "desc" } : { key: "marketValue", direction: "desc" }}
             summaryRow={positionSummaryRow}
           />
         </div>
@@ -921,7 +1132,7 @@ export function StockHoldingsPanel({
                   </div>
                 ) : null}
                 <span className="shrink-0">{t("debtShell.tabEntries")}</span>
-                <span className="ml-2 truncate text-xs font-normal text-slate-500">{selectedPosition.name}</span>
+                <div className="ml-2 min-w-0 max-w-[16rem]">{renderStockNameCode(selectedPosition.name, selectedPosition.stockCode)}</div>
                 <span className="ml-2 text-xs font-normal text-slate-400">{t("stockPanel.entryCount", { count: transactions.length })}</span>
               </div>
               <div className="flex shrink-0 items-center gap-2 text-xs text-slate-400">
@@ -985,6 +1196,22 @@ export function StockHoldingsPanel({
                     <span className="h-6 w-6 rounded border border-slate-100 bg-slate-50 inline-flex items-center justify-center text-slate-300"><ChevronRight className="h-3 w-3" /></span>
                     <span className="h-6 w-6 rounded border border-slate-100 bg-slate-50 inline-flex items-center justify-center text-slate-300"><ChevronsRight className="h-3 w-3" /></span>
                   </>)}
+                  <span className="text-slate-300">|</span>
+                  <button
+                    type="button"
+                    data-advanced-table-column-settings
+                    onClick={(event) => {
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      window.dispatchEvent(new CustomEvent(STOCK_DETAIL_COLUMN_SETTINGS_EVENT, {
+                        detail: { anchorRect: { right: rect.right, bottom: rect.bottom } },
+                      }));
+                    }}
+                    className="h-6 w-6 rounded border border-slate-200 bg-white inline-flex items-center justify-center text-slate-500 hover:bg-slate-50"
+                    title={t("table.columnSettings")}
+                    aria-label={t("table.columnSettings")}
+                  >
+                    <SlidersHorizontal className="h-3 w-3" />
+                  </button>
                 </div>
               </div>
             </div>
@@ -993,16 +1220,14 @@ export function StockHoldingsPanel({
                 <div className="flex h-full min-h-[160px] items-center justify-center text-xs text-slate-500">{t("stockPanel.detailLoading")}</div>
               ) : transactionsError ? (
                 <div className="flex h-full min-h-[160px] items-center justify-center text-xs text-rose-600">{transactionsError}</div>
-              ) : transactions.length === 0 ? (
-                <div className="flex h-full min-h-[160px] items-center justify-center text-xs text-slate-500">{t("stockPanel.noTransactions")}</div>
               ) : (
                 <AdvancedDataTable
-                  storageKey="mmh_stock_shell_detail_advanced_table_v1"
+                  storageKey="mmh_stock_shell_detail_advanced_table_v2"
                   resetKey={`${accountId}:${selectedPosition.stockCode}`}
                   columns={transactionColumns}
                   rows={transactions}
                   rowKey={(tx) => tx.id}
-                  minTableWidth={1000}
+                  minTableWidth={1120}
                   emptyText={t("stockPanel.noTransactions")}
                   selectable
                   selectOnRowClick
@@ -1011,14 +1236,14 @@ export function StockHoldingsPanel({
                   onSelectionChange={setSelectedIds}
                   onRowDoubleClick={(tx) => openEditTransaction(tx)}
                   rowActions={transactionRowActions}
-                  rowActionsWidth={88}
-                  rowActionsMinWidth={72}
+                  rowActionsWidth={116}
+                  rowActionsMinWidth={100}
                   rowClassName={(tx) => (selectedIds.has(tx.id) ? "bg-blue-50/70 hover:bg-blue-50/70" : "hover:bg-blue-50/40")}
                   fillHeight
-                  compactRows
                   toolbarMode="none"
                   showFilters
                   showColumnVisibilityButton={false}
+                  columnVisibilityTriggerId={STOCK_DETAIL_COLUMN_SETTINGS_EVENT}
                   sortable
                   defaultSort={{ key: "tradeDate", direction: "desc" }}
                   pagination={{

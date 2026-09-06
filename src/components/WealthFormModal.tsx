@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { parseNumber } from "@/lib/investment-config";
 import { DateStepper } from "./DateStepper";
 import { CalcInput } from "./CalcInput";
+import { EntryTagsField } from "./EntryTagsField";
 import { ModalLayerProvider, getNextModalLayerZIndex, useModalLayerZIndex } from "./ModalLayer";
 import { SmartSelect, type SmartSelectOption } from "./SmartSelect";
 import { useAccountSSFilter } from "./accountSSFilter";
@@ -37,6 +38,8 @@ type Entry = {
   toAccountId?: string | null;
   toAccountName?: string | null;
   fundArrivalDate?: string | null;
+  tags?: Array<{ id?: string; tagId?: string }> | null;
+  tagIds?: string[] | null;
 };
 
 type NestedFieldData = Record<string, Array<{ id: string; name: string; type?: string }>>;
@@ -253,6 +256,11 @@ export function WealthFormModal({
   const [selectedHoldingId, setSelectedHoldingId] = useState("");
   const [editingRedeemSource, setEditingRedeemSource] = useState<EditingWealthRedeemSource | null>(null);
   const [memo, setMemo] = useState(initMemo);
+  const [selectedTagIds, setSelectedTagIds] = useState<string[]>(() =>
+    mode === "edit" && entry
+      ? (entry.tags as Array<{ id: string }> | undefined)?.map((tag) => tag.id) ?? (entry.tagIds as string[] | undefined) ?? []
+      : [],
+  );
   const [pendingAttachmentFiles, setPendingAttachmentFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [requestId, setRequestId] = useState<string | null>(null);
@@ -557,6 +565,7 @@ export function WealthFormModal({
     setSelectedHoldingId("");
     setEditingRedeemSource(null);
     setMemo("");
+    setSelectedTagIds([]);
     setPendingAttachmentFiles([]);
     setRequestId(null);
     setEditEntryId(null);
@@ -602,6 +611,11 @@ export function WealthFormModal({
       setInterestEdited(false);
       setArrivalEdited(false);
       setMemo(detail.note ?? "");
+      if (Array.isArray((detail as any).tags)) {
+        setSelectedTagIds((detail as any).tags.map((tag: { id?: string; tagId?: string }) => tag.id ?? tag.tagId ?? "").filter(Boolean));
+      } else if (Array.isArray((detail as any).tagIds)) {
+        setSelectedTagIds(((detail as any).tagIds as string[]).filter(Boolean));
+      }
       const outgoingFromWealth = nextSubtype === "redeem" || nextSubtype === "dividend_cash";
       setSubtype(nextSubtype);
       setCashAccountId(outgoingFromWealth ? (detail.toAccountId ?? "") : (detail.accountId ?? ""));
@@ -1003,6 +1017,7 @@ export function WealthFormModal({
         fd.set("toAccountId", toAccountId);
       }
       fd.set("cashAccountId", cashAccountId);
+      fd.set("tagIds", JSON.stringify(selectedTagIds));
       if (isHoldingAction) fd.set("fundArrivalDate", arrivalDate || date);
       if (unitsValue > 0) fd.set("fundUnits", String(unitsValue));
       const enteredNavValue = parseNumber(nav);
@@ -1413,6 +1428,8 @@ export function WealthFormModal({
                   <EntryAttachmentButton entryId={editEntryId} pendingFiles={pendingAttachmentFiles} onPendingFilesChange={setPendingAttachmentFiles} />
                 </div>
               </div>
+
+              <EntryTagsField value={selectedTagIds} onChange={setSelectedTagIds} />
 
               <div className="flex justify-end gap-2 pt-1">
                 {mode === "create" ? (

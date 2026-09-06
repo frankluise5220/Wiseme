@@ -27,14 +27,10 @@ function fnosFpkAssetName(version, assetSuffix) {
   return `mmh-fnos-v${version}-${assetSuffix}.fpk`;
 }
 
-function fnosVpsX86Url(version) {
-  return `http://fnapp.floatingice.win/apps/mmh-${version}.fpk`;
-}
-
 function fnosDownloadUrls(version) {
   const base = `https://github.com/frankluise5220/MMH/releases/download/v${version}`;
   return {
-    x86_64: fnosVpsX86Url(version),
+    x86_64: `${base}/${fnosFpkAssetName(version, "x86_64")}`,
     arm64: `${base}/${fnosFpkAssetName(version, "arm64")}`,
   };
 }

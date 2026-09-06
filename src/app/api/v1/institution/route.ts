@@ -9,7 +9,7 @@ import {
 import { ensureCounterpartyForInstitution } from "@/lib/server/counterparty-sync";
 import { revalidateAfterSettingsChange } from "@/lib/server/revalidate";
 
-const VALID_INSTITUTION_TYPES = ["family_member", "person", "organization", "bank", "insurance", "brokerage", "fund_company", "payment", "ewallet", "debt", "other"] as const;
+const VALID_INSTITUTION_TYPES = ["family_member", "person", "organization", "bank", "insurance", "brokerage", "fund_company", "payment", "debt", "other"] as const;
 
 /**
  * GET /api/v1/institution?type=fund_company

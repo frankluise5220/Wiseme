@@ -1,4 +1,0 @@
-interface:
-  display_name: "MMH Cross-Surface Rule Change"
-  short_description: "Guard multi-surface rule changes in MMH."
-  default_prompt: "Use $mmh-cross-surface-rule-change to safely implement an MMH business rule change across code, API, UI, and docs."

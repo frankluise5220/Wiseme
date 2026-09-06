@@ -202,6 +202,11 @@ export async function createFundTransactionWithCashFlows(
   ));
   const createdCashEntries: Array<{ entry: Awaited<ReturnType<Tx["txRecord"]["create"]>>; flow: FundCashFlowInput }> = [];
 
+  const resolvedFundName = await resolveFundDisplayNameForCashFlow(client, {
+    fundCode,
+    storedName: params.fundName ?? null,
+  });
+
   for (const flow of cashFlows) {
     const flowDate = getFundCashFlowDate({
       kind: flow.kind,
@@ -232,6 +237,10 @@ export async function createFundTransactionWithCashFlows(
         entryOrigin: flow.entryOrigin ?? params.entryOrigin ?? ENTRY_ORIGIN_MANUAL,
         categoryId: flow.categoryId ?? category?.id ?? null,
         categoryName: flow.categoryName ?? category?.name ?? categoryName ?? null,
+        fundCode,
+        fundName: resolvedFundName,
+        fundProductType: normalizeFundProductType(params.fundProductType),
+        fundSubtype: normalizeFundSubtype(params.fundSubtype),
         regularInvestPlanId: flow.regularInvestPlanId ?? params.regularInvestPlanId ?? null,
         note: flow.note ?? params.note ?? undefined,
       },
@@ -250,7 +259,7 @@ export async function createFundTransactionWithCashFlows(
       cashAccountId: primaryCashEntry?.accountId ?? null,
       cashEntryId: primaryCashEntry?.id ?? null,
       fundCode,
-      fundName: params.fundName ?? null,
+      fundName: resolvedFundName,
       fundProductType: normalizeFundProductType(params.fundProductType),
       fundSubtype: normalizeFundSubtype(params.fundSubtype),
       source: params.source ?? "manual",
@@ -382,8 +391,13 @@ export async function upsertFundTransactionRefundCashFlow(
     linkedRefundEntryId?: string | null;
     refundDate: Date;
     refundAmount: number;
+    fundAccountId: string;
+    fundAccountName?: string | null;
     cashAccountId: string;
     cashAccountName?: string | null;
+    fundCode: string;
+    fundName?: string | null;
+    fundProductType?: string | null;
     currency?: string | null;
     source?: string | null;
     note?: string | null;
@@ -391,6 +405,18 @@ export async function upsertFundTransactionRefundCashFlow(
 ) {
   const refundAmount = Math.max(0, Math.abs(toNumber(params.refundAmount)));
   if (!params.householdId || !params.fundTransactionId || !params.cashAccountId || refundAmount <= 0) return null;
+
+  const fundTransaction = await client.fundTransaction.findFirst({
+    where: { id: params.fundTransactionId, householdId: params.householdId },
+    select: {
+      fundCode: true,
+      fundName: true,
+      fundProductType: true,
+    },
+  });
+  if (!fundTransaction?.fundCode) return null;
+  const fundCode = fundTransaction.fundCode;
+  const fundName = normalizeFundDisplayName(fundCode, fundTransaction.fundName) ?? fundCode;
 
   const directCashEntry = params.linkedRefundEntryId
     ? await client.txRecord.findFirst({
@@ -420,10 +446,10 @@ export async function upsertFundTransactionRefundCashFlow(
     currency: params.currency ?? "CNY",
     source: params.source ?? "regular_invest_refund",
     note: params.note ?? undefined,
-    fundCode: null,
-    fundName: null,
-    fundProductType: null,
-    fundSubtype: null,
+    fundCode,
+    fundName,
+    fundProductType: fundTransaction?.fundProductType ?? null,
+    fundSubtype: FundSubtype.buy_failed,
     fundUnits: null,
     fundNav: null,
     fundFee: null,
@@ -511,9 +537,21 @@ export async function ensureFundTransactionCashFlowLinks(
   let count = 0;
   for (const row of rows) {
     if (row.cashFlows.length === 0) {
+      if (row.cashEntryId) {
+        const displayFundName = normalizeFundDisplayName(row.fundCode, row.fundName) ?? row.fundName ?? row.fundCode;
+        await client.txRecord.update({
+          where: { id: row.cashEntryId },
+          data: {
+            fundCode: row.fundCode,
+            fundName: displayFundName,
+            fundProductType: row.fundProductType,
+            fundSubtype: row.fundSubtype,
+          },
+        }).catch(() => undefined);
+      }
       await upsertEntryBusinessCashFlowLink(client, {
         householdId: row.householdId,
-        cashEntryId: null,
+        cashEntryId: row.cashEntryId,
         fundTransactionId: row.id,
         businessType: "fund",
         cashFlowDirection: "none",
@@ -529,6 +567,8 @@ export async function ensureFundTransactionCashFlowLinks(
     }
 
     for (const flow of row.cashFlows) {
+      const displayFundName = normalizeFundDisplayName(row.fundCode, row.fundName) ?? row.fundName ?? row.fundCode;
+      const isRefund = flow.kind === FundCashFlowKind.refund_in;
       await upsertEntryBusinessCashFlowLink(client, {
         householdId: row.householdId,
         cashEntryId: flow.txRecordId,
@@ -542,6 +582,15 @@ export async function ensureFundTransactionCashFlowLinks(
           independentBusinessTransaction: true,
         },
       });
+      await client.txRecord.update({
+        where: { id: flow.txRecordId },
+        data: {
+          fundCode: row.fundCode,
+          fundName: displayFundName,
+          fundProductType: row.fundProductType,
+          fundSubtype: isRefund ? FundSubtype.buy_failed : row.fundSubtype,
+        },
+      }).catch(() => undefined);
       count += 1;
     }
   }
@@ -552,8 +601,40 @@ export async function syncFundTransactionsFromTxRecords(entryIds: string[], clie
   const ids = Array.from(new Set(entryIds.filter(Boolean)));
   if (!ids.length) return;
 
+  const linkedFundRows = await client.fundTransaction.findMany({
+    where: {
+      deletedAt: null,
+      OR: [
+        { cashEntryId: { in: ids } },
+        { cashFlows: { some: { txRecordId: { in: ids } } } },
+        { EntryBusinessLink: { some: { deletedAt: null, cashEntryId: { in: ids } } } },
+      ],
+    },
+    select: {
+      id: true,
+      cashEntryId: true,
+      cashFlows: { select: { txRecordId: true } },
+      EntryBusinessLink: {
+        where: { deletedAt: null },
+        select: { cashEntryId: true },
+      },
+    },
+  });
+  if (linkedFundRows.length > 0) {
+    await ensureFundTransactionCashFlowLinks(client, linkedFundRows.map((row) => row.id));
+  }
+  const linkedEntryIds = new Set(
+    linkedFundRows.flatMap((row) => [
+      row.cashEntryId,
+      ...row.cashFlows.map((flow) => flow.txRecordId),
+      ...row.EntryBusinessLink.map((link) => link.cashEntryId),
+    ].filter((id): id is string => !!id)),
+  );
+  const legacyIds = ids.filter((id) => !linkedEntryIds.has(id));
+  if (!legacyIds.length) return;
+
   const seedRows = await client.txRecord.findMany({
-    where: { id: { in: ids }, fundCode: { not: null } },
+    where: { id: { in: legacyIds }, fundCode: { not: null } },
   });
   const mainIds = new Set<string>();
   for (const row of seedRows) {
@@ -775,6 +856,23 @@ export async function loadFundTransactionEntryLike(params: {
     orderBy: [{ applyDate: "desc" }, { createdAt: "desc" }],
   });
 
+  const allCashEntryIds = Array.from(new Set(rows.flatMap((row) => [
+    row.cashEntryId,
+    ...row.cashFlows.filter((flow) => flow.kind === FundCashFlowKind.refund_in).map((flow) => flow.txRecordId),
+  ]).filter((id): id is string => Boolean(id))));
+  const entryTagRows = allCashEntryIds.length > 0
+    ? await prisma.txRecord.findMany({
+        where: { id: { in: allCashEntryIds } },
+        select: {
+          id: true,
+          EntryTag: {
+            select: { tagId: true, Tag: { select: { name: true, color: true } } },
+          },
+        },
+      })
+    : [];
+  const entryTagsById = new Map(entryTagRows.map((row) => [row.id, row.EntryTag]));
+
   const fundNameByCode = await getFundProfileNameMap(rows.map((row) => row.fundCode));
   const entries: any[] = [];
   for (const row of rows) {
@@ -787,6 +885,7 @@ export async function loadFundTransactionEntryLike(params: {
     entries.push({
       id: row.cashEntryId ?? row.id,
       fundTransactionId: row.id,
+      entryTags: row.cashEntryId ? entryTagsById.get(row.cashEntryId) ?? [] : [],
       date: row.applyDate,
       createdAt: row.createdAt,
       amount: signedFundAmount(row),
@@ -820,6 +919,7 @@ export async function loadFundTransactionEntryLike(params: {
       entries.push({
         id: flow.txRecordId,
         fundTransactionId: row.id,
+        entryTags: entryTagsById.get(flow.txRecordId) ?? [],
         date: row.applyDate,
         createdAt: flow.createdAt,
         amount: -Math.abs(toNumber(flow.amount)),
@@ -849,4 +949,19 @@ export async function loadFundTransactionEntryLike(params: {
     }
   }
   return entries;
+}
+async function resolveFundDisplayNameForCashFlow(
+  client: Tx | typeof prisma,
+  params: { fundCode: string; storedName: string | null },
+) {
+  const direct = normalizeFundDisplayName(params.fundCode, params.storedName);
+  if (direct) return direct;
+  if (!/^\d{6}$/.test(params.fundCode)) return null;
+  try {
+    const profile = await client.fundProfile?.findUnique({ where: { fundCode: params.fundCode } });
+    if (!profile) return null;
+    return normalizeFundDisplayName(profile.fundCode, profile.fundName);
+  } catch {
+    return null;
+  }
 }

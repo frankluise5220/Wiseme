@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/db/prisma";
 import { decrypt, getOrCreateMasterKey, isEncrypted } from "@/lib/auth/encrypt";
+import { getCurrentUser, isAdmin } from "@/lib/server/auth";
+import { redirect } from "next/navigation";
 import AISettingsClient, { type InitialAiChannel } from "./client";
 
 export const dynamic = "force-dynamic";
@@ -38,6 +40,10 @@ async function loadInitialAiConfig(): Promise<{
 }
 
 export default async function AISettingsPage() {
+  const user = await getCurrentUser();
+  if (!isAdmin(user)) {
+    redirect("/overview");
+  }
   const initial = await loadInitialAiConfig().catch(() => ({ channels: [], activeModelId: null }));
 
   return (

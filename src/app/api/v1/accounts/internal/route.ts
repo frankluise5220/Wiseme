@@ -8,9 +8,16 @@ import { computeAccountDisplayBalances } from "@/lib/server/account-balance";
 import { computeDebtDisplaySummary } from "@/lib/server/debt-display-summary";
 import { isDepositAccount, isPureInvestmentAccount } from "@/lib/account-kind-utils";
 import { creditCardDisplayBalanceFromCurrentCycle } from "@/lib/credit/billing";
-import { buildAccountDisplayOption } from "@/lib/account-display";
+import { buildAccountDisplayOption, type AccountLabelField } from "@/lib/account-display";
+import { getServerAccountLabelFields } from "@/lib/server/account-label-fields";
 import { convertCurrencyAmounts, getHouseholdBaseCurrency } from "@/lib/server/fx-rates";
 import { normalizeCurrency } from "@/lib/currency";
+import {
+  countAccountsByCounterparty,
+  countAccountsByInstitution,
+  INSURANCE_PRODUCT_LINK_SELECT,
+  withAccountCounts,
+} from "@/lib/server/entity-account-counts";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -31,12 +38,15 @@ function withAccountDisplayFields<T extends {
   investProductType?: string | null;
   Institution?: { name: string | null; shortName?: string | null } | null;
   AccountGroup?: { id: string; name: string | null } | null;
-}>(account: T) {
+}>(account: T, fields?: AccountLabelField[] | null) {
   const normalized = normalizeReturnedAccountKind(account);
-  const display = buildAccountDisplayOption(normalized);
+  const display = buildAccountDisplayOption(normalized, undefined, { fields });
   return {
     ...normalized,
     label: display.selectorLabel || display.label,
+    // Table cells render `listLabel`, which follows the configured display
+    // fields (owner and account kind included).
+    listLabel: display.listLabel,
     selectorLabel: display.selectorLabel,
     selectorCoreLabel: display.selectorCoreLabel,
     fullLabel: display.fullLabel,
@@ -55,11 +65,12 @@ function withAccountDisplayFields<T extends {
 export async function GET(request: Request) {
   try {
     const includeBalances = request.url ? new URL(request.url).searchParams.get("balances") !== "false" : true;
+    const accountLabelFields = await getServerAccountLabelFields();
     const ctx = await getHouseholdScope();
     const { householdId, hidFilter } = ctx;
     const baseCurrency = await getHouseholdBaseCurrency(householdId);
 
-    const [accounts, groups, institutions, counterparties, users] = await Promise.all([
+    const [accounts, groups, institutions, counterparties, users, insuranceProductLinks] = await Promise.all([
       prisma.account.findMany({
         where: { ...hidFilter },
         include: { Institution: true, Counterparty: true, AccountGroup: true, AccountAlias: true },
@@ -77,10 +88,16 @@ export async function GET(request: Request) {
         // Return display fields only; never leak passwordHash
         select: { id: true, name: true, email: true, role: true, isSystem: true, householdId: true, createdAt: true },
       }),
+      // Insurance product → account links, needed for the family member / insurer account counts.
+      prisma.insuranceProduct.findMany({ where: hidFilter, select: INSURANCE_PRODUCT_LINK_SELECT }),
     ]);
 
+    // Related-account counts shown next to institution / family member / counterparty names.
+    const institutionsWithCounts = withAccountCounts(institutions, countAccountsByInstitution(accounts, insuranceProductLinks, institutions));
+    const counterpartiesWithCounts = withAccountCounts(counterparties, countAccountsByCounterparty(accounts, counterparties));
+
     if (!includeBalances) {
-      return NextResponse.json({ ok: true, baseCurrency, accounts: accounts.map(withAccountDisplayFields), groups, institutions, counterparties, users });
+      return NextResponse.json({ ok: true, baseCurrency, accounts: accounts.map((account) => withAccountDisplayFields(account, accountLabelFields)), groups, institutions: institutionsWithCounts, counterparties: counterpartiesWithCounts, users });
     }
 
     // For investment accounts, use market value instead of raw balance
@@ -136,7 +153,7 @@ export async function GET(request: Request) {
         const creditDisplayBalance = currentCreditBalanceByAccountId.get(a.id);
         if (creditDisplayBalance != null) return { ...a, balance: creditDisplayBalance };
       }
-      if (a.kind === AccountKind.loan) {
+      if (a.kind === AccountKind.loan || a.kind === AccountKind.settlement) {
         const debtDisplayBalance = debtDisplaySummary.balanceByAccountId.get(a.id);
         if (debtDisplayBalance != null) return { ...a, balance: debtDisplayBalance };
       }
@@ -173,10 +190,10 @@ export async function GET(request: Request) {
       totalConvertedBalance: conversion.total,
       missingFxCurrencies: conversion.missingCurrencies,
       rates: conversion.rates,
-      accounts: convertedAccounts.map(withAccountDisplayFields),
+      accounts: convertedAccounts.map((account) => withAccountDisplayFields(account, accountLabelFields)),
       groups,
-      institutions,
-      counterparties,
+      institutions: institutionsWithCounts,
+      counterparties: counterpartiesWithCounts,
       users,
     });
   } catch (e) {

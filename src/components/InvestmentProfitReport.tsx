@@ -27,7 +27,7 @@ type Props = {
     fundProfit: number;
     stockProfit: number;
     wealthProfit: number;
-    depositProfit: number;
+    fixedAssetProfit: number;
     totalProfit: number;
     count: number;
   };
@@ -99,13 +99,13 @@ export function InvestmentProfitReport({ period, year, month, rows, totals, isRe
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         {[
           { key: "total", label: totalLabel(t, period), value: totals.totalProfit },
           { key: "fund", label: t("investmentProfitReport.summary.fundProfit"), value: totals.fundProfit },
-          { key: "wealth", label: t("investmentProfitReport.summary.wealthProfit"), value: totals.wealthProfit },
-          { key: "deposit", label: t("investmentProfitReport.summary.depositProfit"), value: totals.depositProfit },
           { key: "stock", label: t("investmentProfitReport.summary.stockProfit"), value: totals.stockProfit },
+          { key: "wealth", label: t("investmentProfitReport.summary.wealthProfit"), value: totals.wealthProfit },
+          { key: "fixedAsset", label: t("investmentProfitReport.summary.fixedAssetProfit"), value: totals.fixedAssetProfit },
         ].map((item) => (
           <div key={item.key} className="rounded-lg border border-slate-200 bg-white p-3">
             <div className="text-[11px] text-slate-500">{item.label}</div>
@@ -169,7 +169,7 @@ export function InvestmentProfitReport({ period, year, month, rows, totals, isRe
                         {row.fundProfit !== 0 ? <div>{t("investmentProfitReport.daily.fund")} {signedMoney(row.fundProfit)}</div> : null}
                         {row.stockProfit !== 0 ? <div>{t("investmentProfitReport.daily.stock")} {signedMoney(row.stockProfit)}</div> : null}
                         {row.wealthProfit !== 0 ? <div>{t("investmentProfitReport.daily.wealth")} {signedMoney(row.wealthProfit)}</div> : null}
-                        {row.depositProfit !== 0 ? <div>{t("investmentProfitReport.daily.deposit")} {signedMoney(row.depositProfit)}</div> : null}
+                        {row.fixedAssetProfit !== 0 ? <div>{t("investmentProfitReport.daily.fixedAsset")} {signedMoney(row.fixedAssetProfit)}</div> : null}
                       </div>
                     ) : null}
                   </div>
@@ -215,8 +215,12 @@ export function InvestmentProfitReport({ period, year, month, rows, totals, isRe
                           <ProfitNumber value={row.wealthProfit} isRedUp={isRedUp} />
                         </div>
                         <div className="flex items-center justify-between gap-2">
-                          <span className="truncate">{t("investmentProfitReport.summary.depositProfit")}</span>
-                          <ProfitNumber value={row.depositProfit} isRedUp={isRedUp} />
+                          <span className="truncate">{t("investmentProfitReport.summary.stockProfit")}</span>
+                          <ProfitNumber value={row.stockProfit} isRedUp={isRedUp} />
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate">{t("investmentProfitReport.summary.fixedAssetProfit")}</span>
+                          <ProfitNumber value={row.fixedAssetProfit} isRedUp={isRedUp} />
                         </div>
                       </div>
                     ) : null}

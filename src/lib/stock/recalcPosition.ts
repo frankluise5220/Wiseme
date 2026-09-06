@@ -11,6 +11,27 @@ function roundMoney(value: number) {
   return Math.max(0, Math.round((value + Number.EPSILON) * 100) / 100);
 }
 
+type StockLot = { quantity: number; cost: number };
+
+function consumeStockLots(lots: StockLot[], toConsume: number, lifo: boolean): number {
+  let remaining = toConsume;
+  let costReduced = 0;
+  const queue = lifo ? [...lots].reverse() : lots;
+  for (const lot of queue) {
+    if (remaining <= 0) break;
+    const unitCost = lot.quantity > 0 ? lot.cost / lot.quantity : 0;
+    const take = Math.min(lot.quantity, remaining);
+    costReduced += unitCost * take;
+    lot.quantity = roundQuantity(lot.quantity - take);
+    lot.cost = roundMoney(Math.max(0, lot.cost - unitCost * take));
+    remaining -= take;
+  }
+  for (let i = lots.length - 1; i >= 0; i -= 1) {
+    if (lots[i].quantity <= 0) lots.splice(i, 1);
+  }
+  return costReduced;
+}
+
 type StockTransactionReplayRow = {
   securityId: string | null;
   market: string;
@@ -84,7 +105,7 @@ type StockPosition = {
 export async function recalcStockPositions(accountId: string, securityIds?: string[]) {
   const account = await prisma.account.findUnique({
     where: { id: accountId },
-    select: { id: true, kind: true, householdId: true, investProductType: true },
+    select: { id: true, kind: true, householdId: true, investProductType: true, costBasisMethod: true },
   });
   if (!account || account.kind !== "investment" || account.investProductType !== "stock") return;
 
@@ -102,6 +123,12 @@ export async function recalcStockPositions(accountId: string, securityIds?: stri
 
   const positions = new Map<string, StockPosition>();
   const realizedProfitById = new Map<string, number | null>();
+  const costBasisMethod = account.costBasisMethod === "fifo" || account.costBasisMethod === "lifo"
+    ? account.costBasisMethod
+    : "moving_avg";
+  const lotBased = costBasisMethod === "fifo" || costBasisMethod === "lifo";
+  const lifo = costBasisMethod === "lifo";
+  const lotsBySecurityId = new Map<string, StockLot[]>();
 
   for (const row of rows) {
     if (!row.securityId) continue;
@@ -122,8 +149,14 @@ export async function recalcStockPositions(accountId: string, securityIds?: stri
 
     if (row.action === StockTransactionAction.sell) {
       const soldQuantity = quantity > 0 ? Math.min(current.quantity, quantity) : 0;
-      const avgCost = current.quantity > 0 ? current.cost / current.quantity : 0;
-      const costReduced = avgCost * soldQuantity;
+      let costReduced: number;
+      if (lotBased) {
+        const lots = lotsBySecurityId.get(row.securityId) ?? [];
+        costReduced = consumeStockLots(lots, soldQuantity, lifo);
+      } else {
+        const avgCost = current.quantity > 0 ? current.cost / current.quantity : 0;
+        costReduced = avgCost * soldQuantity;
+      }
       const proceeds = netAmount ?? Math.max(0, grossAmount - fee);
       const realizedProfit = proceeds - costReduced;
       current.quantity = roundQuantity(current.quantity - soldQuantity);
@@ -132,7 +165,13 @@ export async function recalcStockPositions(accountId: string, securityIds?: stri
       realizedProfitById.set(row.id, realizedProfit);
     } else if (row.action === StockTransactionAction.buy) {
       current.quantity = roundQuantity(current.quantity + quantity);
-      current.cost = roundMoney(current.cost + grossAmount + fee);
+      const buyCost = grossAmount + fee;
+      current.cost = roundMoney(current.cost + buyCost);
+      if (lotBased) {
+        const lots = lotsBySecurityId.get(row.securityId) ?? [];
+        lots.push({ quantity, cost: buyCost });
+        lotsBySecurityId.set(row.securityId, lots);
+      }
       realizedProfitById.set(row.id, null);
     } else if (row.action === StockTransactionAction.dividend) {
       const profit = netAmount ?? Math.max(0, grossAmount - fee);
@@ -140,9 +179,19 @@ export async function recalcStockPositions(accountId: string, securityIds?: stri
       realizedProfitById.set(row.id, profit);
     } else if (row.action === StockTransactionAction.bonus_share || row.action === StockTransactionAction.split_share) {
       current.quantity = roundQuantity(current.quantity + quantity);
+      if (lotBased) {
+        const lots = lotsBySecurityId.get(row.securityId) ?? [];
+        lots.push({ quantity, cost: 0 });
+        lotsBySecurityId.set(row.securityId, lots);
+      }
       realizedProfitById.set(row.id, null);
     } else if (row.action === StockTransactionAction.merge_share) {
       current.quantity = roundQuantity(current.quantity - quantity);
+      if (lotBased) {
+        const lots = lotsBySecurityId.get(row.securityId) ?? [];
+        const mergeCost = consumeStockLots(lots, quantity, false);
+        current.cost = roundMoney(current.cost - mergeCost);
+      }
       realizedProfitById.set(row.id, null);
     } else {
       const adjustment = netAmount ?? grossAmount;

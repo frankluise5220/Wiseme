@@ -101,6 +101,9 @@ test_*.ps1
 test*.txt
 verify*.ps1
 debug_*.ps1
+scripts/codex-*.cjs
+scripts/mh8-csv-to-backup.cjs
+scripts/install-windows.bat
 
 # personal fetch/debug scripts
 fetch_*.ps1
@@ -178,8 +181,20 @@ mmh-doc-edit/
 .ssh-mmh/
 .tmp_fnos_key*
 .tmp_known_hosts*
+
+# local-only maintenance and reference files
+.agents/skills/
+skills/
+scripts/archive/
+scripts/caizhi/
+logo/logo.jpg
 .tmp-fnos-logo/
 backup-deleted-*.json
+.skill/
+.workbuddy-ai/
+UPGRADE_AUDIT.md
+preview-*.png
+scripts/diag-*.cjs
 
 # household backup data (never commit user financial data)
 *.mh8

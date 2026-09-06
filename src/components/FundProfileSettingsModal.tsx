@@ -10,6 +10,7 @@ import {
 } from "@/components/FundProfileSettingsClient";
 import type { ConfirmDayRow } from "@/components/FundConfirmDaysModal";
 import type { FeeRateRecord } from "@/components/FundFeeRatePanel";
+import type { RelatedScheduledTask } from "@/components/FundScheduledTasksPanel";
 import type { SmartSelectOption } from "@/components/SmartSelect";
 import { useI18n } from "@/lib/i18n";
 
@@ -23,12 +24,17 @@ type FundProfileSettingsModalProps = {
   fundCode: string;
   fallbackFundName?: string | null;
   funds?: FundProfileNavigationItem[];
+  onFundChange?: (fund: FundProfileNavigationItem) => void;
   onClose: () => void;
+  investmentAccounts?: { id: string; name: string; label: string }[];
+  cashAccounts?: { id: string; label: string; icon?: string; subLabel?: string }[];
+  investmentAccountSSOptions?: SmartSelectOption[];
+  cashAccountSSOptions?: SmartSelectOption[];
 };
 
 type ProfileListResponse = {
   ok?: boolean;
-  rows?: Array<{ fundCode: string; navDateOffset?: number }>;
+  rows?: Array<{ fundCode: string; navDateOffset?: number; tradingCalendar?: string | null }>;
   profiles?: Partial<FundProfileSettingsData>[];
   error?: string;
 };
@@ -51,6 +57,12 @@ type InstitutionResponse = {
   error?: string;
 };
 
+type ScheduledTaskListResponse = {
+  ok?: boolean;
+  plans?: RelatedScheduledTask[];
+  error?: string;
+};
+
 function fallbackProfile(fundCode: string, fundName: string | null | undefined): FundProfileSettingsData {
   return {
     fundCode,
@@ -59,6 +71,7 @@ function fallbackProfile(fundCode: string, fundName: string | null | undefined):
     custodian: null,
     manager: null,
     navDateOffset: 0,
+    tradingCalendar: "cn_fund",
   };
 }
 
@@ -71,24 +84,23 @@ function institutionOptions(rows: InstitutionResponse["institutions"] = []): Sma
   }));
 }
 
-export function FundProfileSettingsModal({ open, account, fundCode, fallbackFundName, funds = [], onClose }: FundProfileSettingsModalProps) {
+export function FundProfileSettingsModal({ open, account, fundCode, fallbackFundName, funds = [], onFundChange, onClose, investmentAccounts, cashAccounts, investmentAccountSSOptions, cashAccountSSOptions }: FundProfileSettingsModalProps) {
   const { t } = useI18n();
-  const [activeFund, setActiveFund] = useState<FundProfileNavigationItem>({ fundCode, fundName: fallbackFundName?.trim() || null });
   const [profile, setProfile] = useState<FundProfileSettingsData>(() => fallbackProfile(fundCode, fallbackFundName));
   const [fundCompanyOptions, setFundCompanyOptions] = useState<SmartSelectOption[]>([]);
   const [profilesByCode, setProfilesByCode] = useState<Record<string, FundProfileSettingsData>>({});
   const [confirmDayRows, setConfirmDayRows] = useState<ConfirmDayRow[]>([]);
   const [feeRateRows, setFeeRateRows] = useState<FeeRateRecord[]>([]);
+  const [scheduledPlans, setScheduledPlans] = useState<RelatedScheduledTask[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [editPlanOpen, setEditPlanOpen] = useState(false);
   const loadSequence = useRef(0);
   const preloadKey = useRef<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    const initial = funds.find((item) => item.fundCode === fundCode) ?? { fundCode, fundName: fallbackFundName?.trim() || null };
-    setActiveFund(initial);
     setDirty(false);
   }, [fallbackFundName, funds, fundCode, open]);
 
@@ -103,6 +115,10 @@ export function FundProfileSettingsModal({ open, account, fundCode, fallbackFund
     }
     return Array.from(map.values());
   }, [fallbackFundName, fundCode, funds]);
+  const currentFundIndex = fundItems.findIndex((item) => item.fundCode === fundCode);
+  const previousFund = currentFundIndex > 0 ? fundItems[currentFundIndex - 1] : null;
+  const nextFund = currentFundIndex >= 0 && currentFundIndex < fundItems.length - 1 ? fundItems[currentFundIndex + 1] : null;
+  const hasFundNavigation = Boolean(onFundChange) && fundItems.length > 1;
 
   const loadAllFundSettings = useCallback(async () => {
     const sequence = ++loadSequence.current;
@@ -111,16 +127,18 @@ export function FundProfileSettingsModal({ open, account, fundCode, fallbackFund
     setLoading(true);
     setLoadError("");
     try {
-      const [profileResponse, confirmResponse, feeResponse, institutionResponse] = await Promise.all([
+      const [profileResponse, confirmResponse, feeResponse, institutionResponse, scheduledResponse] = await Promise.all([
         fetch("/api/v1/fund/profile?list=1&includeProfiles=1&syncInstitution=0", { cache: "no-store" }),
         fetch("/api/v1/fund/confirm-days?accountId=" + encodeURIComponent(account.id) + "&list=1", { cache: "no-store" }),
         fetch("/api/v1/fund/fee-rate?accountId=" + encodeURIComponent(account.id) + "&list=1", { cache: "no-store" }),
         fetch("/api/v1/institution?type=fund_company", { cache: "no-store" }),
+        fetch("/api/v1/regular-invest?accountId=" + encodeURIComponent(account.id), { cache: "no-store" }),
       ]);
       const profileData = await profileResponse.json().catch(() => null) as ProfileListResponse | null;
       const confirmData = await confirmResponse.json().catch(() => null) as ConfirmDaysListResponse | null;
       const feeData = await feeResponse.json().catch(() => null) as FeeRateListResponse | null;
       const institutionData = await institutionResponse.json().catch(() => null) as InstitutionResponse | null;
+      const scheduledData = await scheduledResponse.json().catch(() => null) as ScheduledTaskListResponse | null;
       if (!profileResponse.ok || !profileData?.ok) throw new Error(profileData?.error || t("fundSettings.profileFetchFailed"));
       if (!confirmResponse.ok || !confirmData?.ok || !Array.isArray(confirmData.rows)) throw new Error(confirmData?.error || t("fundSettings.profileFetchFailed"));
       if (!feeResponse.ok || !feeData?.ok || !Array.isArray(feeData.rows)) throw new Error(feeData?.error || t("fundSettings.profileFetchFailed"));
@@ -128,6 +146,7 @@ export function FundProfileSettingsModal({ open, account, fundCode, fallbackFund
       if (sequence !== loadSequence.current) return;
 
       const offsetByCode = new Map((profileData.rows ?? []).map((row) => [row.fundCode, row.navDateOffset === 1 ? 1 : 0]));
+      const calendarByCode = new Map((profileData.rows ?? []).map((row) => [row.fundCode, row.tradingCalendar ?? "cn_fund"]));
       const profileRows = new Map((profileData.profiles ?? []).map((row) => {
         const item = fundItems.find((fund) => fund.fundCode === row.fundCode);
         const normalized = {
@@ -137,6 +156,7 @@ export function FundProfileSettingsModal({ open, account, fundCode, fallbackFund
           custodian: row.custodian ?? null,
           manager: row.manager ?? null,
           navDateOffset: row.navDateOffset === 1 ? 1 : (offsetByCode.get(row.fundCode ?? "") ?? 0),
+          tradingCalendar: row.tradingCalendar ?? calendarByCode.get(row.fundCode ?? "") ?? "cn_fund",
         } satisfies FundProfileSettingsData;
         return [normalized.fundCode, normalized] as const;
       }));
@@ -145,6 +165,7 @@ export function FundProfileSettingsModal({ open, account, fundCode, fallbackFund
           profileRows.set(item.fundCode, {
             ...fallbackProfile(item.fundCode, item.fundName),
             navDateOffset: offsetByCode.get(item.fundCode) ?? 0,
+            tradingCalendar: calendarByCode.get(item.fundCode) ?? "cn_fund",
           });
         }
       }
@@ -159,6 +180,7 @@ export function FundProfileSettingsModal({ open, account, fundCode, fallbackFund
       setProfilesByCode(Object.fromEntries(profileRows));
       setConfirmDayRows(mergedConfirmRows);
       setFeeRateRows(mergedFeeRows);
+      setScheduledPlans(scheduledData?.ok && Array.isArray(scheduledData.plans) ? scheduledData.plans : []);
       setFundCompanyOptions(institutionOptions(institutionData.institutions));
     } catch (error) {
       if (sequence === loadSequence.current) setLoadError(error instanceof Error ? error.message : t("fundSettings.profileFetchFailed"));
@@ -180,23 +202,21 @@ export function FundProfileSettingsModal({ open, account, fundCode, fallbackFund
 
   useEffect(() => {
     if (!open) return;
-    setProfile(profilesByCode[activeFund.fundCode] ?? fallbackProfile(activeFund.fundCode, activeFund.fundName));
-  }, [activeFund, open, profilesByCode]);
-
-  const currentIndex = useMemo(() => fundItems.findIndex((item) => item.fundCode === activeFund.fundCode), [activeFund.fundCode, fundItems]);
-  const previousFund = currentIndex > 0 ? fundItems[currentIndex - 1] : null;
-  const nextFund = currentIndex >= 0 && currentIndex < fundItems.length - 1 ? fundItems[currentIndex + 1] : null;
+    setProfile(profilesByCode[fundCode] ?? fallbackProfile(fundCode, fallbackFundName));
+  }, [fallbackFundName, fundCode, open, profilesByCode]);
 
   const handleClose = useCallback(() => {
+    if (editPlanOpen) return;
     if (dirty && !window.confirm(t("fundSettings.unsavedChanges"))) return;
     onClose();
-  }, [dirty, onClose, t]);
+  }, [dirty, editPlanOpen, onClose, t]);
 
-  const handleNavigate = useCallback((fund: FundProfileNavigationItem) => {
+  const handleFundNavigate = useCallback((target: FundProfileNavigationItem | null) => {
+    if (!target || !onFundChange || editPlanOpen) return;
     if (dirty && !window.confirm(t("fundSettings.unsavedChanges"))) return;
     setDirty(false);
-    setActiveFund(fund);
-  }, [dirty, t]);
+    onFundChange(target);
+  }, [dirty, editPlanOpen, onFundChange, t]);
 
   const handleProfileSaved = useCallback((savedProfile: FundProfileSettingsData) => {
     setProfilesByCode((current) => ({ ...current, [savedProfile.fundCode]: savedProfile }));
@@ -243,7 +263,7 @@ export function FundProfileSettingsModal({ open, account, fundCode, fallbackFund
       }}
     >
       <div
-        className="relative flex h-[calc(100vh-1rem)] max-h-[calc(100vh-1rem)] w-full max-w-6xl min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl sm:h-[calc(100vh-2rem)] sm:max-h-[calc(100vh-2rem)]"
+        className="app-modal-panel relative max-w-xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="fund-profile-settings-title"
@@ -255,18 +275,25 @@ export function FundProfileSettingsModal({ open, account, fundCode, fallbackFund
           onClose={handleClose}
           modal
           fundCompanyOptions={fundCompanyOptions}
-          previousFund={previousFund}
-          nextFund={nextFund}
-          onNavigate={handleNavigate}
           onDirtyChange={setDirty}
           confirmDayRows={confirmDayRows}
           feeRateRows={feeRateRows}
           onProfileSaved={handleProfileSaved}
           onConfirmDaysSaved={handleConfirmDaysSaved}
           onFeeRatesSaved={handleFeeRatesSaved}
+          preloadedPlans={scheduledPlans}
+          investmentAccounts={investmentAccounts}
+          cashAccounts={cashAccounts}
+          investmentAccountSSOptions={investmentAccountSSOptions}
+          cashAccountSSOptions={cashAccountSSOptions}
+          onEditPlanOpenChange={setEditPlanOpen}
+          previousFund={hasFundNavigation ? previousFund : null}
+          nextFund={hasFundNavigation ? nextFund : null}
+          onFundNavigate={hasFundNavigation ? handleFundNavigate : undefined}
+          fundNavigationDisabled={editPlanOpen}
         />
         {loading ? (
-          <div className="pointer-events-none absolute right-4 top-4 z-10 inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white/95 px-2.5 py-1.5 text-xs text-slate-500 shadow-sm">
+          <div className="pointer-events-none absolute right-14 top-3 z-10 inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white/95 px-2.5 py-1.5 text-xs text-slate-500 shadow-sm">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             {t("common.loading")}
           </div>

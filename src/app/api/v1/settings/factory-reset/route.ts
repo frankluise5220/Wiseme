@@ -5,8 +5,6 @@ import { getCurrentUser, isAdmin } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
 
-const LEGACY_PASSWORD_KEY = "access_password";
-
 /**
  * POST /api/v1/settings/factory-reset
  *
@@ -15,8 +13,7 @@ const LEGACY_PASSWORD_KEY = "access_password";
  *
  * Security requirements:
  * - The current signed-in user must be an administrator.
- * - The request must submit that user's current password. Legacy deployments
- *   without per-user passwords may still verify the old access password.
+ * - The request must submit that user's current password.
  * Body: { password: string }
  */
 export async function POST(req: NextRequest) {
@@ -38,9 +35,10 @@ export async function POST(req: NextRequest) {
     where: { id: currentUser.id },
     select: { passwordHash: true },
   });
-  const matched = dbUser?.passwordHash
-    ? await verifyPassword(password, dbUser.passwordHash)
-    : (await prisma.systemSetting.findUnique({ where: { key: LEGACY_PASSWORD_KEY }, select: { value: true } }))?.value === password;
+  if (!dbUser?.passwordHash) {
+    return NextResponse.json({ ok: false, code: "PASSWORD_NOT_SET", error: "Current user password is not set." }, { status: 400 });
+  }
+  const matched = await verifyPassword(password, dbUser.passwordHash);
   if (!matched) {
     return NextResponse.json({ ok: false, code: "INVALID_PASSWORD", error: "Current user password is incorrect." }, { status: 401 });
   }

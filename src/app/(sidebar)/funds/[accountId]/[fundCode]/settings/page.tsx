@@ -5,7 +5,7 @@ import { FundProfileSettingsClient, type FundProfileSettingsData } from "@/compo
 import type { SmartSelectOption } from "@/components/SmartSelect";
 import { getInvestmentAccountView } from "@/lib/account-kind-utils";
 import { prisma } from "@/lib/db/prisma";
-import { getFundProfile } from "@/lib/fund/fundProfile";
+import { fundTradingCalendarForProfile, getFundProfile } from "@/lib/fund/fundProfile";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 
 export const dynamic = "force-dynamic";
@@ -68,6 +68,7 @@ export default async function FundProfileSettingsPage({
     custodian: profile?.custodian ?? null,
     manager: profile?.manager ?? null,
     navDateOffset: profile?.navDateOffset ?? 0,
+    tradingCalendar: profile ? fundTradingCalendarForProfile(profile) : "cn_fund",
   };
   const institutionName = account.Institution?.shortName?.trim() || account.Institution?.name?.trim() || null;
   const backQuery = new URLSearchParams({ accountId: account.id, view: getInvestmentAccountView(account), fundCode });

@@ -209,6 +209,8 @@
 ### Statistics
 
 - `GET /api/v1/statistics` 返回年度收支、月度收支和分类/标签汇总。
+- 收支统计金额（含投资损益、分类、标签、月度合计）统一按账户币种和库内最新汇率折算为当前账簿本币，即使查询历史期间或单个外币账户也使用最新汇率；响应 `data` 新增 `baseCurrency` 和 `missingFxCurrencies`。缺汇率金额排除在合计外，不按 1:1 折算；查询统计不触发外部汇率刷新。
+- `/api/v1/reports/income-expense/detail` 的 `data` 同样返回 `baseCurrency` 和 `missingFxCurrencies`；`details.rows[].amount` 与 `details.total` 是本币统计值，`entries` 仍保留原币流水用于查看和编辑。收支统计表与导出共用相同折算口径。`FxRate` 按汇率日期、更新时间取正向或反向最新记录，缺缓存时仍沿用同账簿购汇记录回退规则。
 - 支出统计使用交易的业务符号：普通支出计为正支出；以正向现金流保存的退款或冲减支出计为负支出，不转换为绝对值。
 - `totalExpense`、`monthData[].expense`、`expenseCategories[].value` 和 `expenseTagGroups[].value` 使用同一统计口径。
 - 业务收益统计不额外生成现金收入流水：基金赎回、往来款利息等使用通用 `realizedProfit`，理财和存款赎回/支取可由 `depositInterest - fundFee` 推导，并归入对应系统统计类别。投资买入、本金归还等资产/债权转换不应计入收支支出统计。
@@ -247,11 +249,12 @@
 - 信用卡账单明细和汇总按账期日期窗口归属。`statementMonth` 是缓存/兼容字段，不能让一条入账日期落在其他周期内的交易进入本期，也不能把本期日期内的交易排除出去。
 - `/api/v1/institution` 新增机构时，`name` 和 `shortName` 共用同一账簿内的机构名称池。提交的全称或简称只要与任何机构的全称或简称重复，或同一机构全称和简称相同，接口返回 `{ ok:false, error }`，状态码为 `409`。
 - `GET /api/v1/institution?type=fund_company` 返回当前账簿中仅分类为 `fund_company` 的机构，供基金资料设置中的基金公司 SS 选择；识别基金公司资料时，如果当前账簿不存在对应机构，服务端会自动创建或归类为 `fund_company`。
-- `/api/v1/fund/name?code=xxxxxx` 对合法六位基金代码会先确保 `FundProfile` 记录存在，再进行外部资料查询；即使外部查询失败，也会保留仅含基金代码和默认 `navDateOffset=0` 的基金资料记录。
+- `/api/v1/fund/name?code=xxxxxx` 对合法六位基金代码会先确保 `FundProfile` 记录存在，再进行外部资料查询；即使外部查询失败，也会保留仅含基金代码、默认 `navDateOffset=0` 且待初始化 `tradingCalendar` 的基金资料记录。
 - `/api/v1/accounts` 新增或编辑账户时，同一账簿内按“所有人 + 机构 + 账户类型 + 尾号/名称”阻止不可区分的重复账户。借记卡和信用卡的 `numberMasked` 都会保存并参与查重；重复时返回 `{ ok:false, error }`，状态码为 `409`。
+- `/api/v1/accounts` 中 `settlement` 与 `loan` 是互斥账户类型：`settlement` 必须传当前账簿内的 `counterpartyId`，服务端不保存 `institutionId`、`loanType` 或 `isConsumerLoan`；`loan` 必须传当前账簿内的贷款机构 `institutionId`，可传 `loanType = home | mortgage | consumer | other`，服务端不保存 `counterpartyId`。
 - `POST /api/v1/accounts` 省略 `currency` 或传空值时，`PUT /api/v1/accounts` 传空 `currency` 时，服务端使用当前账簿 `Household.baseCurrency` 作为账户默认币种；Web 新增/编辑账户界面也使用同一套币种下拉选项，不再让用户手填币种代码。
 - 账户对象包含 `note` 作为用户自由备注；`POST /api/v1/accounts` 和 `PUT /api/v1/accounts` 接受 `note?`，空字符串按 `null` 保存，服务端不限制用户在备注里的用途。
-- 基金/货币基金类投资账户新增 `tradingCalendar` 字段，当前可选值包括 `cn_fund`、`hk_fund`、`us_fund`、`generic_weekday`。
+- 基金/货币基金类投资账户新增 `tradingCalendar` 字段，当前可选值包括 `cn_fund`、`hk_fund`、`jp_fund`、`us_fund`、`generic_weekday`。
 - `POST /api/v1/accounts` 与 `PUT /api/v1/accounts` 在这类账户上接受 `tradingCalendar`；当账户类型不支持该字段时，服务端会自动清空。
 - `/api/v1/business-transactions/integrity` 用于迁移期检查和修复资金流水与独立业务交易表的一致性。`GET` 返回各业务类型的 expected/existing/linked/missing 统计和问题列表；`POST { limit? }` 会复用正式同步逻辑补齐缺失的业务交易和 `EntryBusinessLink`，不直接清空 `TxRecord` 兼容字段。
 - `/api/v1/business-transactions/link-cash-flow` 用于从独立业务交易补建或恢复资金侧流水并建立 `EntryBusinessLink`。`POST { businessType: "wealth" | "deposit" | "insurance" | "metal" | "fund" | "stock", businessTransactionId }`，成功返回 `{ ok:true, data:{ cashEntryId, businessTransactionId, linkId? } }`；缺少资金账户、业务记录 ID 或不支持的类型时返回 `{ ok:false, error }`。
@@ -261,6 +264,7 @@
 ### Currency And FX Rates
 
 - 当前显示币种是账簿级设置，保存在 `Household.baseCurrency`。交易和账户仍保存自己的原始 `currency`。
+- `GET /api/v1/currencies?includeSystem=true` 返回系统内置币种和当前系统已添加的币种，统一形如 `{ code, nameZh, nameEn, countryZh, countryEn, source }`；系统内置币种当前包含 CNY、USD、JPY、EUR、HKD、GBP、KRW、SGD、TWD、AUD、CAD、CHF、THB、MYR、VND、INR、PHP、IDR、MOP。`POST /api/v1/currency-requests` 的 Body 为 `{ code, nameZh, nameEn, countryZh }`，保存成功后立即写入可用币种字典并返回 `{ ok:true, code, currency }`，不需要额外审核；四个字段均为必填，代码必须为 2-10 位英文字母。账户、系统显示设置和购汇窗口应复用同一套币种 SS。
 - `GET /api/v1/fx-rates?from=JPY,USD&to=CNY&refresh=1` 返回 `{ ok:true, baseCurrency, rates }`。`from` 省略时使用当前账簿启用账户中的币种；`to` 省略时使用账簿当前显示币种；未传 `refresh=1` 时，服务端先查缓存 `FxRate`，缺缓存时可用最近一次同账簿 `FxConversion` 正向或反向推导；传 `refresh=1` 时，服务端先强制获取外部最新汇率并写入缓存，失败时才回退已有缓存或购汇记录。
 - `rates[]` 形如 `{ fromCurrency, toCurrency, rate, rateDate, source, missing, refreshed? }`。`rate` 表示 `1 fromCurrency = rate toCurrency`；`source` 可为 `manual`、外部来源或 `fx_conversion`；用户主动刷新并成功获取外部最新汇率时 `refreshed=true`；`missing=true` 时客户端应提示缺少汇率，不得自行按 1:1 折算。
 - `POST /api/v1/fx-rates` 支持 `{ baseCurrency }` 修改当前显示币种，也支持 `{ fromCurrency, toCurrency?, rate, rateDate?, source? }` 写入手工汇率。手工汇率必须是正数，同币种不需要写入。
@@ -275,6 +279,7 @@
 - 信用卡与借记卡都支持 `expense | income | advance | transfer` 四种业务输入。`advance` 保存为内部 `transfer`，并写入 `source = "advance"`、往来对象快照和信用卡账期；`amount > 0` 表示资金账户流出并增加应收往来，`amount < 0` 表示往来对象返还、资金账户流入并减少应收往来。普通还款仍按上一条的“信用卡还款”转账规则处理。
 - `/api/v1/record/ingest` 的普通 `transfer` 导入必须同时提供并匹配 `fromAccount` 和 `toAccount`。任一侧缺失或未匹配时，客户端应在预览阶段阻断，服务端也会拒绝整批写入；不得把转账对向账户按空值落库。
 - `/api/v1/record/ingest` 的导入项可传 `businessType = "credit_card_repayment"`。此时 `type` 必须为 `transfer`，`fromAccount` 必须匹配借记卡/电子钱包账户，`toAccount` 必须匹配信用卡账户；服务端以转账记录落库并写入“信用卡还款”分类。
+- `/api/v1/statement/import` 的转账行同样必须提供可解析的 `fromAccount` 和 `toAccount`。请求体可传 `createDebtAccounts` 和 `forceCreateOwnedMoneyAccounts`：前者允许账户文本为 `XXX的往来款` 时创建缺失的往来对象并创建或复用对应往来款账户；后者允许账户文本明确带出现有所有人且可识别为现金、借记卡、电子钱包、基金或理财账户时创建账户。两者未开启时，对应缺失账户仍应由客户端预览阻断。
 - `/api/v1/record/ingest` 批量导入失败时返回 `{ ok:false, error, failedRow?, trace? }`。`failedRow` 包含 0 基 rowIndex、类型、账户、转出/转入、分类和错误原因，客户端应在预览界面直接显示到用户，而不是只提示整批回滚。
 - `/api/v1/record/ingest/progress?traceId=...` 返回 `{ ok:true, progress }`，用于长时间批量导入的写库进度。`progress.phase` 包含 `preparing | writing | recalculating | done | failed`，`processed/total` 表示服务端写库进度。事务超时导致的行号表示执行到该行附近，不代表预览校验漏掉了该行脏数据。
 - `/api/v1/record/ingest` 同一账簿同一时间只允许一批批量导入写库。已有导入未完成时，新的导入请求返回 409 和 `{ ok:false, error }`，客户端应提示用户等待当前导入完成，不能叠加第二批写入。
@@ -315,6 +320,7 @@
 
 - `/api/v1/transactions`
 - `/api/v1/transactions/detail`
+  - `DELETE ?id=...` 的 `id` 是 `TxRecord.id`。如果该资金流水通过 `EntryBusinessLink` 关联了基金、保险、理财、存款、贵金属、股票或房产等独立业务交易，删除会通过统一删除服务同步软删关联业务交易和关联记录，并返回 `deletedEntryIds`、`removedEntryIds`、`accountIds` 供客户端局部刷新。
 - `/api/v1/transactions/reorder` 用于同一账户明细、同一显示日期内调整记录顺序；成功返回 `orderedEntryIds` 和同日受影响记录的 `runningBalances`，客户端应以该顺序和余额作为服务端最终结果，并避免触发全局财务刷新。
 - `/api/v1/entries/batch-edit`
 - `/api/v1/entries/batch-update`
@@ -387,15 +393,15 @@
 - Path: `/api/v1/fund/profile`
 - Auth: required
 - GET query: `fundCode` 或 `list=1`；单基金查询可传 `syncInstitution=0` 以只读取资料而不创建机构
-- PATCH body: { fundCode, fundName?, fundCompany?, custodian?, manager?, navDateOffset?: 0 | 1 }；保存基金资料时会在当前账簿中确保基金公司机构存在
-- POST body: { fundCode, syncInstitution?: boolean }；重新从外部基金资料源获取并保存基金公司侧资料，不修改 `navDateOffset`、T+N 或费率。设置页获取资料时传 `syncInstitution=false`，只回填未手动修改的字段；用户点击保存后才创建未匹配的 `fund_company` 机构。外部数据源中的公司链接编号不作为基金公司代码使用。
+- PATCH body: { fundCode, fundName?, fundCompany?, custodian?, manager?, navDateOffset?: 0 | 1, tradingCalendar? }；保存基金资料时会在当前账簿中确保基金公司机构存在
+- POST body: { fundCode, syncInstitution?: boolean }；重新从外部基金资料源获取并保存基金公司侧资料。外部刷新可回填基金名称、基金公司、托管人和经理，但不修改 `navDateOffset`；只有基金资料保存/API PATCH 能显式修改净值日期偏移。T+N 和费率不由该接口修改。设置页获取资料时传 `syncInstitution=false`，只回填未手动修改的字段；用户点击保存后才创建未匹配的 `fund_company` 机构。外部数据源中的公司链接编号不作为基金公司代码使用。
 - Success: GET 单基金返回 `{ ok: true, fundCode, profile }`；列表默认返回 `{ ok: true, rows }`，传 `includeProfiles=1` 时追加 `profiles`；PATCH/POST 返回 `{ ok: true, profile }`
 
 说明：
 
-- `FundProfile` 保存按基金代码共享的基金公司侧资料，包括净值日期偏移；`navDateOffset` 只允许 `0` 或 `1`。
+- `FundProfile` 保存按基金代码共享的基金资料，包括净值日期偏移和净值交易日历；`navDateOffset` 只允许 `0` 或 `1`，`tradingCalendar` 可为 `cn_fund`、`hk_fund`、`jp_fund`、`us_fund`、`generic_weekday`。`navDateOffset` 是投资收益表、持仓最新净值刷新和 `/api/v1/invest/daily-pnl` 选择基金净值日的稳定设置：北京时间 19:00 后，`0` 使用本交易日净值，`1` 使用前一交易日净值；19:00 前在该偏移基础上再提前一个交易日。目标日休市时继续回退到上一交易日。`tradingCalendar` 是判断某只基金在哪些日期应该存在 NAV 的权威字段；名称关键字只用于初始化或字段缺失时兜底。
 - 基金公司名称识别成功后，按当前账簿自动确保对应的 `fund_company` 机构存在；如果同名机构已存在则复用，不会把已有银行、代销机构等机构强制改类型。
-- T+N 确认/到账规则仍通过 `/api/v1/fund/confirm-days` 保存当前持仓账户的生效规则；统一设置页面将它们放在基金资料区域。
+- T+N 确认/到账规则仍通过 `/api/v1/fund/confirm-days` 保存当前持仓账户的生效规则；统一设置页面将它们放在基金资料区域。`DELETE /api/v1/fund/confirm-days?accountId=...&fundCode=...` 用于删除单条持仓账户+基金代码规则。
 - 费率仍通过 `/api/v1/fund/fee-rate` 保存，属于代销机构/持仓账户侧设置。
 
 #### 基金净值查询
@@ -411,14 +417,14 @@
 - Method: `POST`
 - Path: `/api/v1/fund/nav/missing`
 - Auth: required
-- Body: `{ items: [{ fundCode, date }] }` 或 `{ ranges: [{ fundCode, startDate, endDate }] }`
-- Success: `{ ok: true, requested, rangeCount, fundCount, fetched, written, failed, ranges, resolvedItems, unresolvedItems, resolved, unresolved, skipped }`
+- Body: `{ items: [{ fundCode, date, accountId? }] }` 或 `{ ranges: [{ fundCode, startDate, endDate }] }`
+- Success: `{ ok: true, requested, rangeCount, fundCount, fetched, written, failed, ranges, resolvedItems, unresolvedItems, resolved, unresolved, skipped, skippedClosed }`
 
 说明：
 
 - 接口只补齐当前账簿已有投资交易或持仓中的基金代码，不能作为任意基金外部查询入口。
-- 调用方可传逐日缺失项，服务端会按基金代码合并成日期范围，再批量写入 `FundNavCache`。
-- 投资收益表用它补齐持仓基金工作日净值缺口；周末/非交易日仍允许沿用上一可用交易日净值。
+- 调用方可传逐日缺失项，服务端会按基金代码合并成日期范围，再批量写入 `FundNavCache`；投资收益表前端按基金+月份分批调用，避免年度视图一次请求拉取多年历史导致网关超时。补齐历史净值只写缓存，不修改 `FundProfile.navDateOffset`。
+- 投资收益表用它补齐持仓基金交易日净值缺口；服务端优先根据 `FundProfile.tradingCalendar`，再用基金账户日历兜底，二次跳过非交易日。周末/非交易日仍允许沿用上一可用交易日净值，且不应提示缺净值。
 - `resolvedItems/unresolvedItems` 用于前端判断本次补齐结果；投资收益表请求成功后应局部消隐当前提示，调用方不需要整页刷新来确认补齐结果。
 
 #### 基金视图刷新
@@ -431,7 +437,7 @@
 
 说明：
 
-- 该接口只刷新当前基金账户的未确认基金交易和当前持仓最新净值，不再按基金最早申请日批量拉取整段历史净值。
+- 该接口只刷新当前基金账户的未确认基金交易和当前持仓最新净值，不再按基金最早申请日批量拉取整段历史净值，也不改写 `FundProfile.navDateOffset`。当前持仓最新净值按基金资料的 `navDateOffset` 和 19:00 规则请求目标日期，而不是无条件请求外部来源的绝对最新日期。
 - 处理未确认交易时，先使用 `FundNavCache` 中已有的精确确认日净值；缓存记录不受日期限制。
 - 缓存没有精确净值时，只自动查询今天或往前三个交易日内的确认日；交易日历使用当前基金账户的 `tradingCalendar`。
 - 更早且缓存仍缺失的确认日计入 `entryDeferred`，不在表头刷新时自动拉取，用户可在基金明细中单独手工补净值。投资收益表的历史净值补齐仍使用 `/api/v1/fund/nav/missing`。
@@ -612,6 +618,8 @@ Request body:
 - 服务端会先重算该基金当前持仓份额，再计算 `deltaUnits = actualUnits - currentUnits`；差额为 0 时不新增记录。
 - 差额不为 0 时，服务端创建一条 `source="fund_units_reconcile"` 的无现金流基金业务交易，`fundSubtype` 按差额方向写 `buy` 或 `redeem`，`fundUnits` 写差额绝对值。
 - 份额校准不创建 `TxRecord`、`FundTransactionCashFlow` 或现金账户余额变化，只影响基金业务份额和随后重算出的持仓。
+- 当前份额读取、差额计算、校准记录及持仓更新在同一事务内完成；等待数据库后重新读取份额，不能沿用等待前的差额。原买入记录的确认/到账日期晚于校准日期不构成保存限制。
+- 每次启动事务最多等待 10 秒，只有事务回调尚未开始且发生启动超时时才自动重试一次；进入回调后出现执行或提交错误不自动重放。持续繁忙返回 HTTP 503、`code="FUND_UNITS_RECONCILE_BUSY"` 和 `Retry-After: 2`，表示本次校准尚未保存；Web 保留输入供稍后重试。其他失败返回 HTTP 500、`code="FUND_UNITS_RECONCILE_FAILED"`，详细错误只写入服务端日志。
 
 Success:
 
@@ -687,14 +695,15 @@ Notes:
 - 创建或更新股票账户时，`institutionId` 必须指向当前账簿内类型为证券/`brokerage` 的机构；缺失或选择银行、支付、保险等非证券机构时返回 `{ ok:false, error }`。校验通过后，服务端会确保同账簿、同所有人、同证券机构、同币种下存在一个现金/钱包类“证券资金账户”；不存在时自动创建，`POST /api/v1/accounts` 会在响应中返回 `brokerageCashAccount`。
 - 股票交易的 `cashAccountId` 表示买入、卖出、分红、费用或税费调整使用的证券资金账户/券商可用资金账户；它可以和同一证券公司名下的基金交易共用同一个现金/钱包类账户。`cashAccountId` 可省略，服务端会按股票账户的所有人、证券机构和币种自动确保并使用同券商资金账户；只有股票账户缺少证券机构或找不到资金账户时才兼容退回股票账户自身现金。银行卡与证券资金账户之间的资金移动应作为普通转账/银证转账创建，不应伪装成股票买入或卖出。
 - 股票不得复用 `fundCode`、`fundUnits`、`fundNav`、`fundFeeRate`、基金净值、确认天数或到账天数模块；股票导入和交易不得混同为基金 refund link。
+- 投资收益表和 `/api/v1/invest/daily-pnl` 的股票收益按 `StockTransaction` 回放历史持仓，结合 `StockPriceCache` 收盘价和股票现金流计算；卖出、现金分红、费用和税费调整都通过现金流修正计入收益，`StockHolding` 仍只负责当前持仓盈亏报表。
 
 相关路径：
 
 - `GET /api/v1/stocks/securities?market=&q=` 返回 `{ ok:true, data:{ securities:[{ id, market, stockCode, stockName, currency, exchange }] } }`；`GET /api/v1/stocks/securities?market=CN&code=600519` 只查本地 `StockSecurity`，未命中时再从该账簿的 `StockHolding` / `StockTransaction` 找已保存的名称，不触发外部股票查询 API。`GET /api/v1/stocks/securities?market=CN&code=600519&lookup=1` 才会在本地全部未命中时按股票查询 API 获取名称并缓存；交易窗口输入股票代码默认走本地查询，只有首次买入保存时由 `POST /api/v1/stocks/transactions` 内部补全名称并缓存。导入或保存时 `stockName` 为空或等于 `stockCode` 都视为未提供名称，不能覆盖服务端补全出的真实名称。`market` 可省略，服务端按股票代码优先推断 A 股、港股或美股，导入和特殊场景仍可显式传入市场。
 - `POST /api/v1/stocks/securities` 创建或返回股票标的。Body: `{ market?, stockCode, stockName?, currency?, exchange? }`；`market` 省略时按 `stockCode` 推断。
 - `GET /api/v1/stocks/transactions?accountId=&securityId=&market=&stockCode=&limit=` 返回独立股票交易列表。交易项包含 `id`、`linkId`、`cashEntryId`、`stockAccountId`、`cashAccountId`、`securityId`、`market`、`stockCode`、`action`、`tradeDate`、`settleDate`、数量、价格、费用、`realizedProfit` 和 `externalLinkId`。
-- `POST /api/v1/stocks/import` 执行上市证券 Excel 导入预览和确认导入。Body: `{ mode:"preview"|"import", context:{ stockAccountId, stockAccountName? }, items:[{ tradeDate, settleDate?, action, market?, stockCode?, stockName?, quantity?, price?, grossAmount?, netAmount?, bankAccount?, fee?, commission?, stampTax?, transferFee?, exchangeFee?, regulatoryFee?, otherFee?, note?, calculatedFields? }] }`；`fee` 表示总费用合计，填写后按该值作为总费用，不再叠加佣金、印花税等拆分费用；未填写 `fee` 但填写拆分费用时，按用户填写的拆分费用求和，不补算缺失拆分项；所有费用字段都空时，买入/卖出按 `StockFeeRule` / `StockMarketFeeRule` 估算拆分费用。买入/卖出导入行必须有 `quantity` 和可解析的 `price`：`price` 可由导入表提供，也可在预览阶段按 `tradeDate` 先查 `StockPriceCache`、再查股票 API 补全；补全价格会在 `preview.calculatedFields` 中标记。`grossAmount` 由服务端按 `quantity × price` 计算并在 `preview.calculatedFields` 中标记；导入表中的 `grossAmount` 不作为买卖行成交金额来源。`netAmount` 为空时，预览/导入按成交金额和最终总费用补算：买入为成交金额 + 总费用，卖出为成交金额 - 总费用。`stockName` 仅作为兼容 API 输入，不出现在模板中；证券名称解析先查 `StockSecurity`、现有持仓和历史 `StockTransaction`，本地没有时再查股票 API 补全；`preview` 返回 `{ ok:true, items:[..., issues, totalFee, cashAmount, calculatedFields, securityId, cashAccountId, duplicate] }`，其中 `calculatedFields` 标记由系统计算得到的数值字段，客户端应以斜体等样式区分；错误行保留在预览中但客户端默认不选中、也不能被全选选中；`import` 必须重新执行同一套服务端解析、账户匹配、费用估算和阻断校验后写入，返回 `{ ok:true, createdCount, skippedCount, ids, accountIds, items }`。普通股票动作用 `StockTransaction` + `EntryBusinessLink` 写业务和资金侧，未填证券资金账户时自动使用当前股票账户同券商下的证券资金账户；`bank_transfer` 使用同股票账户证券机构下的证券资金账户和导入行中的银行账户创建银证转账，正数为银行转入证券资金账户，负数为证券资金账户转回银行账户。`bankAccount` 表示银证转账的银行侧账户，模板显示为“银行账户”；银证转账行必须填写银行侧账户（所有人、机构、账户名称），也兼容具体账户 ID、别名或尾号；只写“借记卡”等账户类型不会匹配。上市证券导入模板不包含股票名称和成交号；服务端仅在调用方显式传入 `externalLinkId` 时做兼容去重。
-- `POST /api/v1/stocks/transactions` 创建股票交易；动作为 `buy`、`sell`、`dividend`、`fee_adjustment` 或 `tax_adjustment` 时，服务端会在 `cashAccountId` 指向的证券资金账户上创建或更新资金侧 `TxRecord`，未传 `cashAccountId` 时自动使用同券商资金账户，写入 `EntryBusinessLink`，重算 `StockHolding`，并返回 `{ ok:true, data:{ transaction, linkId, cashEntryId } }`。现金流水不生成“资金账户 ↔ 股票账户”的自转账；股票持仓变化只由 `StockTransaction` / `StockHolding` 表达。买卖交易以 `quantity` 和 `price` 为必填源字段，服务端按 `quantity × price` 写入 `grossAmount`；客户端不能直接提交 `grossAmount` 覆盖买卖成交金额。买卖交易可以省略 `commission`、`stampTax`、`transferFee`、`exchangeFee`、`regulatoryFee` 和 `otherFee`，服务端读取账户 `StockFeeRule` / 市场 `StockMarketFeeRule` 表中已保存的费率计算；账户规则未命中时再使用市场默认规则。交易保存本身不会刷新或改写费率表，只有 `GET /api/v1/stocks/fee-rules?estimate=1&refresh=1`（Web 交易窗口的“获取新费率”按钮）才刷新内置公开市场默认费率。
+- `POST /api/v1/stocks/import` 执行上市证券 Excel 导入预览和确认导入。Body: `{ mode:"preview"|"import", context:{ stockAccountId?, stockAccountName? }, items:[{ stockAccount?, stockAccountId?, accountId?, tradeDate, settleDate?, action, market?, stockCode?, stockName?, quantity?, price?, grossAmount?, netAmount?, bankAccount?, fee?, commission?, stampTax?, transferFee?, exchangeFee?, regulatoryFee?, otherFee?, note?, calculatedFields? }] }`；`context.stockAccountId` 只是当前股票账户视图的默认股票账户，不是全局必填；导入行可用 `stockAccount` / `stockAccountId` / `accountId` 覆盖，未在股票账户视图导入且行内也没有股票账户时，预览返回行级 `STOCK_ACCOUNT_REQUIRED` 等阻断错误，模板必须包含股票账户列。`fee` 表示总费用合计，填写后按该值作为总费用，不再叠加佣金、印花税等拆分费用；未填写 `fee` 但填写拆分费用时，按用户填写的拆分费用求和，不补算缺失拆分项；所有费用字段都空时，买入/卖出按 `StockFeeRule` / `StockMarketFeeRule` 估算拆分费用。买入/卖出导入行必须有 `quantity` 和可解析的 `price`：`price` 可由导入表提供，也可在预览阶段按 `tradeDate` 先查 `StockPriceCache`、再查股票 API 补全；补全价格会在 `preview.calculatedFields` 中标记。`grossAmount` 由服务端按 `quantity × price` 计算并在 `preview.calculatedFields` 中标记；导入表中的 `grossAmount` 不作为买卖行成交金额来源。`netAmount` 为空时，预览/导入按成交金额和最终总费用补算：买入为成交金额 + 总费用，卖出为成交金额 - 总费用。`stockName` 仅作为兼容 API 输入，不出现在模板中；证券名称解析先查 `StockSecurity`、现有持仓和历史 `StockTransaction`，本地没有时再查股票 API 补全；`preview` 返回 `{ ok:true, items:[..., issues, totalFee, cashAmount, calculatedFields, securityId, cashAccountId, stockAccountId, duplicate] }`，其中 `calculatedFields` 标记由系统计算得到的数值字段，客户端应以斜体等样式区分；错误行保留在预览中并允许勾选、就地编辑和批量修正，但 `import` 必须阻断仍有未解决错误的选中行，并重新执行同一套服务端解析、账户匹配、费用估算和阻断校验后写入，返回 `{ ok:true, createdCount, skippedCount, ids, accountIds, items }`。普通股票动作用 `StockTransaction` + `EntryBusinessLink` 写业务和资金侧；买入、卖出、分红、费用/税费调整的 `bankAccount` 可显式选择任意现金、借记卡或钱包资金账户，服务端必须保留该选择，只有未传资金账户时才默认使用当前股票账户同券商下的证券资金账户或自动创建的默认资金账户。`bank_transfer` 使用同股票账户证券机构下的证券资金账户和导入行中的银行账户创建银证转账，正数为银行转入证券资金账户，负数为证券资金账户转回银行账户。`bankAccount` 在普通股票动作中表示资金侧账户，在银证转账中表示银行侧账户，模板显示为“银行账户”；银证转账行必须填写银行侧账户（所有人、机构、账户名称），也兼容具体账户 ID、别名或尾号；只写“借记卡”等账户类型不会匹配。上市证券导入模板不包含股票名称和成交号；服务端仅在调用方显式传入 `externalLinkId` 时做兼容去重。
+- `POST /api/v1/stocks/transactions` 创建股票交易；动作为 `buy`、`sell`、`dividend`、`fee_adjustment` 或 `tax_adjustment` 时，服务端会在 `cashAccountId` 指向的现金、借记卡或钱包资金账户上创建或更新资金侧 `TxRecord`，用户显式传入的资金账户不受股票账户同券商/同机构限制；未传 `cashAccountId` 时才自动使用同券商默认资金账户，写入 `EntryBusinessLink`，重算 `StockHolding`，并返回 `{ ok:true, data:{ transaction, linkId, cashEntryId } }`。现金流水不生成“资金账户 ↔ 股票账户”的自转账；股票持仓变化只由 `StockTransaction` / `StockHolding` 表达。买卖交易以 `quantity` 和 `price` 为必填源字段，服务端按 `quantity × price` 写入 `grossAmount`；客户端不能直接提交 `grossAmount` 覆盖买卖成交金额。买卖交易可以省略 `commission`、`stampTax`、`transferFee`、`exchangeFee`、`regulatoryFee` 和 `otherFee`，服务端读取账户 `StockFeeRule` / 市场 `StockMarketFeeRule` 表中已保存的费率计算；账户规则未命中时再使用市场默认规则。交易保存本身不会刷新或改写费率表，只有 `GET /api/v1/stocks/fee-rules?estimate=1&refresh=1`（Web 交易窗口的“获取新费率”按钮）才刷新内置公开市场默认费率。
 - `PATCH /api/v1/stocks/transactions?id=...` 更新股票交易。Body 与 POST 相同，省略字段保留原值；动作、账户、日期、数量、价格、金额变更后，服务端同步更新关联资金侧 `TxRecord` 和 `EntryBusinessLink`（动作改为无现金的送转/拆并股时软删旧现金流水与旧 link），重算 `StockHolding` 与账户余额，返回 `{ ok:true, data:{ transaction, linkId, cashEntryId, oldCashEntryId } }`。编辑 Web 明细行通过双击行或行内编辑按钮打开股票交易弹窗，保存走该接口。
 - `POST /api/v1/stocks/transactions/batch-update` 批量修改股票交易的备注字段，Body: `{ updates: [{ id, note? }] }`，一次事务更新后统一重算受影响账户的持仓与余额，返回 `{ ok:true, data:{ updatedCount, accountIds } }`。数量/价格/金额/日期/动作等会影响资金流水与持仓重建的字段必须走单条 `PATCH`，不能循环调该接口。
 - `DELETE /api/v1/stocks/transactions?id=...` 或 `DELETE /api/v1/stocks/transactions?linkId=...` 软删除股票交易、关联现金流水和业务 link，并重算持仓。
@@ -720,10 +729,11 @@ Notes:
 - 房产账户、房产资产、房产交易和手动估值。
 - 房产归在 `Account.kind = "investment"` + `investProductType = "property"` 下，但业务表、API、字段和 UI 语义都使用独立 `property` 域。
 - 房产没有份额、净值、确认日或到账日。房产市值来自 `PropertyAsset.marketValue` 和 `PropertyValuation`，累计成本来自购入/装修/税费/手续费，房贷余额仍来自单独负债账户。
+- 投资收益表和 `/api/v1/invest/daily-pnl` 的固定资产收益只读取 `PropertyTransaction.action = sale` 的 `realizedProfit`；购入、装修投入和手动估值不产生收益，关联现金侧 `TxRecord` 不重复统计。
 
 相关路径：
 
-- `GET /api/v1/properties?accountId=` 返回 `{ ok:true, data:{ assets, transactions } }`。`assets` 包含 `id`、`accountId`、`name`、`propertyType`、`address`、`currency`、`purchaseDate`、`purchasePrice`、`cost`、`marketValue`、`latestValuationDate`、`status` 和 `note`；`transactions` 包含 `id`、`linkId/cashEntryId`、`accountId`、`cashAccountId`、`propertyAssetId`、`action`、`tradeDate`、`settlementDate`、`amount`、`fee`、`tax`、`realizedProfit` 和 `note`。
+- `GET /api/v1/properties?accountId=` 返回 `{ ok:true, data:{ assets, transactions } }`。`assets` 包含 `id`、`accountId`、`mortgageLoanAccountId`、`name`、`propertyType`、`address`、`currency`、`purchaseDate`、`purchasePrice`、`cost`、`marketValue`、`latestValuationDate`、`status` 和 `note`；`transactions` 包含 `id`、`linkId/cashEntryId`、`accountId`、`cashAccountId`、`propertyAssetId`、`action`、`tradeDate`、`settlementDate`、`amount`、`fee`、`tax`、`realizedProfit` 和 `note`。
 - `POST /api/v1/properties` 创建房产交易。Body: `{ accountId, cashAccountId?, propertyAssetId?, action, name?, propertyType?, address?, tradeDate, settlementDate?, amount, fee?, tax?, marketValue?, note? }`；`action` 为 `purchase`、`improvement` 或 `sale`。购入会创建 `PropertyAsset` 和初始 `PropertyValuation`；装修增加累计成本；出售把资产标记为 `sold` 并按净回收金额计算 `realizedProfit`。传入 `cashAccountId` 时同步创建/更新现金侧 `TxRecord` 和 `EntryBusinessLink.propertyTransactionId`。
 - `POST /api/v1/properties/valuations` 手动更新房产估值。Body: `{ propertyAssetId, valuationDate, marketValue, note? }`；只写 `PropertyValuation` 并更新 `PropertyAsset.marketValue` / `latestValuationDate`，不创建收入、支出、转账或投资现金流水。
 
@@ -825,8 +835,14 @@ Notes:
 - 定期计划任务。
 - 当前支持基金定投、还房贷、转账、保险缴费、固定收入、固定支出六类任务。
 - 任务共用计划字段：资金账户、任务类型、周期、已执行次数、开始日期、停止日期。`nextRunDate` 是服务端内部执行游标，可用于到期判断和只读展示，但客户端不能把它作为编辑字段提交。
+- `planName` 是用户可编辑的计划展示名称；创建时可省略，服务端默认使用任务内容，客户端展示时应优先使用 `planName`，空值再回退到 `taskTitle`/目标内容。
 - 任务内容按类型保存不同目标：基金代码/基金账户、贷款账户、转入账户、保险产品，或普通收入/支出的资金账户、分类和备注。
 - 一次性计划用 `totalRuns = 1` 表达。周频、双周频、月频和年频支持可选 `secondaryExecutionDay`：周频/双周频是第二个星期几（1-7，周一到周日），月频是第二个执行日（1-31），年频是第二个 `MMDD` 编码（101-1231）。两个锚点按所在周期内的日期顺序交替执行；留空时保持原有单执行日行为。
+- 贷款还款计划金额由还款表生成，PUT 更新时不允许直接修改金额；自动扣款贷款计划仍可修改 `cashAccountId`、`nextRunDate` 和 `planName`。提交不一致金额时返回 HTTP 403 `{ ok: false, code: "LOAN_REPAYMENT_AMOUNT_LOCKED", error }`。
+- 贷款账单与还款是两个状态：`loanPlanRole = bill` 生成的 `loan_bill` 只表示当期应还；正常还款转入通过 `TxRecord.regularInvestPlanId + installmentNo` 关联计划期次。`GET /api/v1/debt/repayable-loan-accounts` 返回当期剩余 `currentPrincipal`、`currentInterest` 和 `currentPayment`。客户端只能在该期关联转入累计达到应还本金与利息合计后显示“本期已经还清”，部分还款显示剩余应还；自动扣款计划生成的 `scheduled_task` 转入才可直接计作还款。
+- 贷款计划 memo 使用 `firstBillDate` 和 `firstRepaymentDate` 保存首期账单日与首期最迟还款日；自动扣款计划的 `firstRepaymentDate` 表示首期扣款日。原始贷款 `TxRecord.regularInvestPlanId` 必须关联主账单/还款计划；贷款编辑可以同步更新贷款账户名称、原始本金、期数、利率和日期规则，但不得改写已发生的真实还款交易。
+- `POST /api/v1/loan-rate-adjustments` 更新单个贷款账户的统一利率调整表。请求体可提交 `adjustments: [{ effectiveDate, annualRate }]` 覆盖整表，或提交单条 `effectiveDate` + `annualRate`；`annualRate` 可为 `0`，但不能为负数。消费贷款只接受“生效日期 + 年利率”语义，`mortgageLprDiscount` 和 `loanStartDate` 只用于房贷/住房贷款 LPR 生成。保存利率表只同步利率记录和计划备注，不直接重新均摊月供；月供在对应重定价还款期由执行器或明确的还款表重算流程更新，返回 `{ ok: true, data: { adjustments, nextAmount } }`。
+- `POST /api/v1/loan-repayment/recalculate` 用于提前还款或贷款资料变更后重算后续计划。若 `startDate` 命中提前还款记录且策略为“月供不变，缩短期限”，服务端沿用该提前还款所在还款期之前的实际/计划月供金额，只调整该时点的剩余总期数；历史重算时不能把未来提前还款后的缩期结果倒灌进来。“期限不变，减少月供”才按剩余本金和原剩余期数重算月供。
 - 执行时调用现有交易、基金、保险业务语义，不新增独立交易类型。
 - 每日自动执行扫描所有执行中计划，未到执行日的计划直接跳过。
 
@@ -853,7 +869,7 @@ Notes:
 
 - `/api/v1/settings/users`
 - `/api/v1/settings/catalog`：GET 返回 Web 和 Android 共用的设置目录；可用 `?surface=web` 或 `?surface=android` 过滤客户端可用项。返回 `{ ok: true, data }`，目录源头为 `shared/settings/catalog.json`。
-- `/api/v1/settings/app-preferences`：`sidebarHideInitialData` 是兼容保留字段名，当前产品语义为“隐藏使用向导”；为 `true` 时客户端应隐藏“使用向导”入口，并停用首次使用向导的自动和手动打开。`sidebarShowFixedAssets` 控制左侧侧边栏是否显示固定资产汇总入口，默认 `true`。`detailDateBackground` 控制明细表是否按日期使用双色背景并在同日期内交替深浅，默认 `false`。`compactRowHeight` 控制紧凑表格的行高，默认 `30`，可在 `25` 到 `35` 像素之间调整。`dateDisplayFormat` 支持 `yyyy-mm-dd`、`yyyy/mm/dd`、`mm/dd/yyyy`、`dd/mm/yyyy`，仅影响界面日期显示，不改变数据库、导入或 API 日期值。
+- `/api/v1/settings/app-preferences`：`sidebarHideInitialData` 是兼容保留字段名，当前产品语义为“隐藏使用向导”；为 `true` 时客户端应隐藏“使用向导”入口，并停用首次使用向导的自动和手动打开。`sidebarShowFixedAssets` 控制左侧侧边栏是否显示固定资产汇总入口，默认 `true`。`detailDateBackground` 控制明细表是否按日期使用双色背景并在同日期内交替深浅，默认 `false`。`rowHeightMode` 控制明细表格的行高，取值 `large`(41px)、`medium`(38px，默认)、`small`(35px)，单元格正文字号随之联动为 14px / 13px / 12px。`dateDisplayFormat` 支持 `yyyy-mm-dd`、`yyyy/mm/dd`、`mm/dd/yyyy`、`dd/mm/yyyy`，仅影响界面日期显示，不改变数据库、导入或 API 日期值。
 - `/api/v1/settings/color-scheme`
 - `/api/v1/settings/email`
 - `/api/v1/settings/email-import`：GET 返回当前账簿邮箱账单导入的邮件筛选关键词；从未设置时默认 `账单`，PUT 提交 `{ keyword }` 后保存当前账簿配置，空值表示不按关键词筛选。
@@ -882,7 +898,7 @@ Notes:
 
 移动端聚合接口可以减少请求次数，但不应复制 Web 的业务计算逻辑。聚合数据应来自同一套服务模块或统一查询口径。
 
-贷款初始记录有两种资金语义：`source = debt_borrow_in` 表示贷款资金实际进入 `toAccountId`；`source = debt_financed_purchase` 表示车贷等消费融资，只在 `accountId` 对应的贷款账户建立负债，`toAccountId` 为 `null`。后者选择的还款账户属于还款计划，不代表收到贷款资金。客户端不得把消费融资本金显示为资金账户收入。
+贷款初始记录有两种资金语义：`source = debt_borrow_in` 表示贷款资金实际进入 `toAccountId`；`source = debt_financed_purchase` 表示车贷等消费融资，只在 `accountId` 对应的贷款账户建立负债，`toAccountId` 为 `null`。后者选择的还款账户属于还款计划，不代表收到贷款资金。客户端不得把消费融资本金显示为资金账户收入。机构贷款（房贷、消费贷）一律按消费融资处理：贷款窗口的「放款/借入」不提供资金账户字段，贷款资金不进入资金账户；账户字段是「还款账户」，仅作为还款计划的扣款账户。
 
 车贷等 `debt_financed_purchase` 保存时只创建贷款负债记录和 `loan_repayment` 计划任务，不批量生成还款交易。移动端同步到的还款 `TxRecord` 应表示计划任务已到期并实际生成的记录；未到期或未执行的还款安排应从计划任务数据展示，不应伪装成交易流水。
 
@@ -894,7 +910,7 @@ Notes:
 
 移动同步返回 `propertyAssets`、`propertyTransactions`、`deletedPropertyAssetIds` 和 `deletedPropertyTransactionIds`。房产同步项来自独立 property 表，客户端不得从基金份额、净值或 `TxRecord` 余额推断房产市值；`propertyTransactions[].linkId` 是 `EntryBusinessLink` 的稳定关联 ID。
 
-移动同步的 `regularInvestPlans` 包含 `taskType`、`taskTitle`、`taskCategoryId`、`taskCategoryName` 和 `taskNote`。只有 `taskType = "fund_regular_invest"` 的计划参与基金净值刷新；固定收入和固定支出计划按普通 `TxRecord` 语义执行，客户端不得把它们当作基金代码查询净值。
+移动同步的 `regularInvestPlans` 包含 `planName`、`taskType`、`taskTitle`、`taskCategoryId`、`taskCategoryName` 和 `taskNote`。`planName` 是用户可编辑展示名，客户端展示时优先使用它，空值再回退到 `taskTitle`/目标内容。只有 `taskType = "fund_regular_invest"` 的计划参与基金净值刷新；固定收入和固定支出计划按普通 `TxRecord` 语义执行，客户端不得把它们当作基金代码查询净值。
 
 账户同步项包含 `creditBillMode`，值为 `separate` 或 `consolidated`，也包含用户自由备注 `note`。合并账单按同一账簿、同一机构下标记为 `consolidated` 的有效信用卡归组；交易的 `accountId` / `toAccountId` 仍指向具体信用卡，不改写为代表账户。
 
@@ -981,3 +997,4 @@ Notes:
 
 - 说明排序、日期、金额、刷新影响等特殊规则。
 ````
+- Account kind contract: `settlement` represents counterparty/person/company settlement accounts (往来款); `loan` represents institution-backed loans. Both are exposed through the existing debt/settlement workspace and sidebar entry.

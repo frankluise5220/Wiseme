@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
 import { formatResendSendError, getEnvResendConfig } from "@/lib/mail/resend";
+import { getCurrentUser, isAdmin } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
 
@@ -10,11 +11,15 @@ export const runtime = "nodejs";
  * Body: { apiKey: string, from: string } (optional: falls back to the saved configuration when omitted)
  */
 export async function POST(req: NextRequest) {
+  const user = await getCurrentUser();
+  if (!isAdmin(user)) {
+    return NextResponse.json({ ok: false, code: "ADMIN_ONLY", error: "Administrator access required." }, { status: 403 });
+  }
+
   const body = await req.json().catch(() => ({}));
   let apiKey = String(body.apiKey ?? "").trim();
   let from = String(body.from ?? "").trim();
 
-  // When no config is passed, read it from SystemSetting
   if (!apiKey || !from) {
     const setting = await prisma.systemSetting.findUnique({ where: { key: "resend_config" } });
     if (setting) {
@@ -46,7 +51,7 @@ export async function POST(req: NextRequest) {
     },
     body: JSON.stringify({
       from,
-      to: from, // Send the test to yourself
+      to: from,
       subject: "MMH Resend 测试邮件",
       text: "如果你收到这封邮件，说明 Resend 发件配置正确。",
       html: "<div><h2>MMH Resend 测试邮件</h2><p>如果你收到这封邮件，说明 Resend 发件配置正确。</p></div>",

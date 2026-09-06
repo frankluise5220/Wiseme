@@ -8,12 +8,16 @@ import { formatMoneyYuan, formatPercent } from "@/lib/format";
 import { pnlClassFromRedUp } from "@/lib/client/colors";
 import { getInvestmentAccountView } from "@/lib/account-kind-utils";
 import { getHouseholdScope } from "@/lib/server/household-scope";
+import { ACCOUNT_LABEL_FIELDS_COOKIE, accountLabelFieldsFromCookieValue } from "@/lib/server/account-label-fields";
 import { getServerT } from "@/lib/server/i18n";
 import { getInvestmentStatisticItems } from "@/lib/transaction-statistics";
 import { cookies } from "next/headers";
 import Link from "next/link";
 import StatisticsCharts from "@/components/StatisticsCharts";
+import FundPortfolioTrendChart from "@/components/FundPortfolioTrendChart";
 import { DailyPnlCalendar } from "@/components/DailyPnlCalendar";
+import { InvestAccountSummaryTable, type InvestAccountSummaryRow } from "@/components/InvestAccountSummaryTable";
+import { loadFundPortfolioTrendData } from "@/lib/server/fund-portfolio-trend";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +43,7 @@ const investProductTypeLabel = (type: string | null, t: (key: string) => string)
   const pageSizeParam = typeof params?.pageSize === "string" ? parseInt(params.pageSize, 10) : 10;
   const pageSize = [10, 20, 40].includes(pageSizeParam) ? pageSizeParam : 10;
   const cookieStore = await cookies();
+  const accountLabelFields = accountLabelFieldsFromCookieValue(cookieStore.get(ACCOUNT_LABEL_FIELDS_COOKIE)?.value);
   const colorScheme = (cookieStore.get("colorScheme")?.value ?? "red_up_green_down") as "red_up_green_down" | "green_up_red_down";
   const creditCardLabelMode = cookieStore.get("mmh_credit_card_label_mode")?.value === "full_name" ? "full_name" : "short_last4";
   const creditCardLabelTemplate = normalizeCreditCardLabelTemplate(
@@ -106,12 +111,13 @@ const investProductTypeLabel = (type: string | null, t: (key: string) => string)
 
       for (const item of getInvestmentStatisticItems(e)) {
         const signedProfit = item.type === "income" ? item.amount : -item.amount;
-        row.investPnL += signedProfit;
         if (item.type === "income") {
           incomeByCat.set(item.categoryName, (incomeByCat.get(item.categoryName) ?? 0) + item.amount);
         } else {
           expenseByCat.set(item.categoryName, (expenseByCat.get(item.categoryName) ?? 0) + item.amount);
         }
+        if (item.productKind === "deposit") continue;
+        row.investPnL += signedProfit;
         const costBase = Math.abs(amt);
         profitItems.push({
           id: e.id,
@@ -146,29 +152,7 @@ const investProductTypeLabel = (type: string | null, t: (key: string) => string)
     return { monthData, incCats, expCats, profitItems };
   })();
 
-  type AccountRow = {
-    id: string;
-    label: string;
-    hoverTitle: string;
-    groupName: string;
-    investProductType: string | null;
-    productTypeLabel: string;
-    balance: number;
-    marketValue: number;
-    totalCost: number;
-    floatingPnL: number;
-    floatingPnLRate: number;
-    totalBuy: number;
-    totalSell: number;
-    totalDividend: number;
-    totalFee: number;
-    realizedPnL: number;
-    totalReturn: number;
-    totalReturnRate: number;
-    txCount: number;
-    buyCount: number;
-    sellCount: number;
-  };
+  type AccountRow = InvestAccountSummaryRow;
 
   const accountRows: AccountRow[] = accounts.map((a) => {
     const entries = allEntries.filter((e) => e.accountId === a.id || e.toAccountId === a.id);
@@ -215,7 +199,7 @@ const investProductTypeLabel = (type: string | null, t: (key: string) => string)
       investProductType: a.investProductType,
       Institution: a.Institution,
       AccountGroup: a.AccountGroup,
-    }, creditCardLabelTemplate);
+    }, creditCardLabelTemplate, { fields: accountLabelFields });
     const label = display.label;
     const groupName = a.AccountGroup?.name?.trim() || t("invest.noOwner");
     const productTypeLabel = investProductTypeLabel(a.investProductType, t);
@@ -242,6 +226,7 @@ const investProductTypeLabel = (type: string | null, t: (key: string) => string)
       txCount: entries.length,
       buyCount,
       sellCount,
+      detailHref: `/?accountId=${encodeURIComponent(a.id)}&view=${getInvestmentAccountView({ investProductType: a.investProductType })}`,
     };
   });
 
@@ -332,68 +317,19 @@ const investProductTypeLabel = (type: string | null, t: (key: string) => string)
             </div>
             <span className="text-xs text-slate-400">{t("invest.accountCount", { count: filteredRows.length })}</span>
           </div>
-          <div className="overflow-auto">
-            <table className="w-full table-fixed border-separate border-spacing-0">
-              <thead className="sticky top-0 z-10 bg-white">
-                <tr>
-                  <th className="text-left text-xs font-semibold text-slate-600 px-4 py-2 border-b border-slate-200">{t("invest.colAccount")}</th>
-                  <th className="text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">{t("invest.totalCost")}</th>
-                  <th className="text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">{t("invest.colMarketValue")}</th>
-                  <th className="text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">{t("invest.floatingPnL")}</th>
-                  <th className="text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">{t("invest.colFloatingRate")}</th>
-                  <th className="text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">{t("invest.historicalReturn")}</th>
-                  <th className="text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">{t("invest.totalBuy")}</th>
-                  <th className="text-right text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">{t("invest.totalFee")}</th>
-                  <th className="text-center text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">{t("invest.colTransactions")}</th>
-                  <th className="text-left text-xs font-semibold text-slate-600 px-3 py-2 border-b border-slate-200">{t("invest.colActions")}</th>
-                </tr>
-              </thead>
-              <tbody className="text-sm">
-                {pagedRows.length === 0 ? (
-                  <tr><td className="px-4 py-6 text-xs text-slate-500 text-center" colSpan={10}>{t("invest.noData")}</td></tr>
-                ) : pagedRows.map((r) => (
-                  <tr key={r.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-2.5 border-b border-slate-100">
-                      <div className="max-w-[240px]">
-                        <div className="truncate text-xs font-semibold text-slate-800" title={r.hoverTitle}>{r.label}</div>
-                        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400">
-                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-500">{r.groupName}</span>
-                          <span>{r.productTypeLabel}</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums text-slate-600">{r.totalCost > 0 ? fmt(r.totalCost) : <span className="text-slate-300">-</span>}</td>
-                    <td className={`px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums ${pnlClass(r.marketValue)}`}>{r.marketValue > 0 ? fmt(r.marketValue) : <span className="text-slate-300">-</span>}</td>
-                    <td className={`px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums ${pnlClass(r.floatingPnL)}`}>{r.marketValue > 0 ? fmt(r.floatingPnL) : <span className="text-slate-300">-</span>}</td>
-                    <td className={`px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums ${pnlClass(r.floatingPnLRate)}`}>{r.marketValue > 0 ? fmtRate(r.floatingPnLRate) : <span className="text-slate-300">-</span>}</td>
-                    <td className={`px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums ${pnlClass(r.realizedPnL)}`}>{r.realizedPnL !== 0 ? fmt(r.realizedPnL) : <span className="text-slate-300">-</span>}</td>
-                    <td className="px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums text-slate-600">{r.totalBuy > 0 ? fmt(r.totalBuy) : <span className="text-slate-300">-</span>}</td>
-                    <td className="px-3 py-2 border-b border-slate-100 text-right text-xs tabular-nums text-slate-500">{r.totalFee > 0 ? fmt(r.totalFee) : <span className="text-slate-300">-</span>}</td>
-                    <td className="px-3 py-2 border-b border-slate-100 text-center text-xs text-slate-500">{r.txCount > 0 ? r.txCount : <span className="text-slate-300">-</span>}</td>
-                    <td className="px-3 py-2 border-b border-slate-100">
-                      <a href={`/?accountId=${r.id}&view=${getInvestmentAccountView(r)}`} className="text-xs text-blue-600 hover:text-blue-800">{t("invest.detail")}</a>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              {pagedRows.length > 0 && (
-                <tfoot className="sticky bottom-0 bg-slate-50">
-                  <tr>
-                    <td className="px-4 py-2 border-t border-slate-200 text-xs font-semibold text-slate-700">{t("invest.totalLabel")}</td>
-                    <td className="px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums text-slate-600">{fmt(totalCostAll)}</td>
-                    <td className={`px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums font-semibold ${pnlClass(totalMarketValue)}`}>{fmt(totalMarketValue)}</td>
-                    <td className={`px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums font-semibold ${pnlClass(totalFloatingPnL)}`}>{fmt(totalFloatingPnL)}</td>
-                    <td className={`px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums ${pnlClass(totalFloatingRate)}`}>{fmtRate(totalFloatingRate)}</td>
-                    <td className={`px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums font-semibold ${pnlClass(totalRealizedPnL)}`}>{fmt(totalRealizedPnL)}</td>
-                    <td className="px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums text-slate-600">{fmt(totalBuyAll)}</td>
-                    <td className="px-3 py-2 border-t border-slate-200 text-right text-xs tabular-nums text-slate-500">{fmt(totalFeeAll)}</td>
-                    <td className="px-3 py-2 border-t border-slate-200"></td>
-                    <td className="px-3 py-2 border-t border-slate-200"></td>
-                  </tr>
-                </tfoot>
-              )}
-            </table>
-          </div>
+          <InvestAccountSummaryTable
+            rows={pagedRows}
+            totals={{
+              totalCost: totalCostAll,
+              marketValue: totalMarketValue,
+              floatingPnL: totalFloatingPnL,
+              floatingRate: totalFloatingRate,
+              realizedPnL: totalRealizedPnL,
+              totalBuy: totalBuyAll,
+              totalFee: totalFeeAll,
+            }}
+            isRedUp={isRedUp}
+          />
           {/* Pagination */}
           {totalPageCount > 1 && (
             <div className="px-4 py-2 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-1 text-xs shrink-0">

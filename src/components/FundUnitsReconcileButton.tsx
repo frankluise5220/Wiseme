@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Scale } from "lucide-react";
 import { DateStepper } from "./DateStepper";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
@@ -41,6 +41,7 @@ export function FundUnitsReconcileButton({
   const [actualUnits, setActualUnits] = useState(() => formatFundUnitsValue(currentRoundedUnits, decimals));
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
 
@@ -61,10 +62,12 @@ export function FundUnitsReconcileButton({
   }
 
   async function submit() {
+    if (submittingRef.current) return;
     if (parsedActualUnits == null) {
       setError(t("fundUnitsReconcile.enterValidUnits"));
       return;
     }
+    submittingRef.current = true;
     setSubmitting(true);
     setError("");
     setInfo("");
@@ -82,7 +85,12 @@ export function FundUnitsReconcileButton({
         }),
       });
       const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.ok) throw new Error(data?.error || t("fundUnitsReconcile.failed"));
+      if (!res.ok || !data?.ok) {
+        setError(t(data?.code === "FUND_UNITS_RECONCILE_BUSY"
+          ? "fundUnitsReconcile.busy"
+          : "fundUnitsReconcile.failed"));
+        return;
+      }
       const payload = data.data ?? {};
       setInfo(payload.noChange ? t("fundUnitsReconcile.successNoChange") : t("fundUnitsReconcile.successCreated", {
         units: formatFundUnitsValue(Math.abs(Number(payload.deltaUnits ?? deltaUnits ?? 0)), decimals),
@@ -94,9 +102,10 @@ export function FundUnitsReconcileButton({
       });
       onSaved?.();
       window.setTimeout(() => setOpen(false), 450);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("fundUnitsReconcile.failed"));
+    } catch {
+      setError(t("fundUnitsReconcile.failed"));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }

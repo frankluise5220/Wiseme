@@ -224,6 +224,9 @@ private fun GroupHeader(text: String) {
     )
 }
 
+private fun RegularInvestPlanDto.displayPlanName(): String =
+    planName?.takeIf { it.isNotBlank() } ?: fundName.ifEmpty { fundCode }
+
 @Composable
 private fun PlanCard(
     plan: RegularInvestPlanDto,
@@ -243,7 +246,7 @@ private fun PlanCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = plan.fundName.ifEmpty { plan.fundCode },
+                    text = plan.displayPlanName(),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f)
@@ -323,6 +326,7 @@ private fun RegularInvestEditDialog(
     onDismiss: () -> Unit,
     onSave: (UpdateRegularInvestRequest) -> Unit
 ) {
+    var planName by remember(plan.id) { mutableStateOf(plan.planName.orEmpty()) }
     var amount by remember(plan.id) { mutableStateOf(trimNumber(plan.amount)) }
     var intervalUnit by remember(plan.id) { mutableStateOf(plan.intervalUnit.ifBlank { "month" }) }
     var intervalValue by remember(plan.id) { mutableStateOf(plan.intervalValue.toString()) }
@@ -352,6 +356,7 @@ private fun RegularInvestEditDialog(
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold
                 )
+                EditTextField(label = "计划名称", value = planName, onValueChange = { planName = it })
                 EditTextField(
                     label = "定投金额",
                     value = amount,
@@ -434,6 +439,7 @@ private fun RegularInvestEditDialog(
                             accountId = plan.accountId,
                             cashAccountId = plan.cashAccountId,
                             fundName = plan.fundName,
+                            planName = planName.ifBlank { null },
                             amount = amount.toDoubleOrNull(),
                             intervalUnit = intervalUnit,
                             intervalValue = intervalValue.toIntOrNull()?.coerceAtLeast(1),

@@ -23,15 +23,7 @@ jobs:
           TAG="${GITHUB_REF_NAME:-manual}"
           ZIP="mmh-nas-${TAG}.zip"
           rm -f "$ZIP"
-          zip -r "$ZIP" . \
-            -x ".git/*" \
-            -x ".github/*" \
-            -x "**/node_modules/*" \
-            -x "**/.next/*" \
-            -x "**/.turbo/*" \
-            -x "**/.DS_Store" \
-            -x ".env" \
-            -x "*.log"
+          git archive --format=zip --output "$ZIP" HEAD
           echo "ZIP_NAME=$ZIP" >> "$GITHUB_ENV"
 
       - name: Upload artifact

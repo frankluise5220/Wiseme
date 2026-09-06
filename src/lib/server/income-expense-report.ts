@@ -7,10 +7,12 @@ import {
   SYSTEM_INSURANCE_EXPENSE_CATEGORY,
   SYSTEM_INSURANCE_RETURN_CATEGORY,
 } from "@/lib/default-categories";
-import { loadWealthStatisticSourceEntries } from "@/lib/server/investment-statistic-sources";
+import { loadFundStatisticSourceEntries, loadWealthStatisticSourceEntries } from "@/lib/server/investment-statistic-sources";
 import type { HouseholdContext } from "@/lib/server/household-scope";
 import { getBusinessResultStatisticItems, getIncomeExpenseStatisticAmount, getInvestmentStatisticItems } from "@/lib/transaction-statistics";
 import { BALANCE_INITIALIZATION_SOURCE, BALANCE_RECONCILE_SOURCE } from "@/lib/balance-reconcile";
+import { buildStatisticsCurrencyConverter } from "@/lib/server/statistics-currency";
+import { getServerT } from "@/lib/server/i18n";
 
 export type IncomeExpenseGroupBy = "month" | "year";
 
@@ -67,6 +69,8 @@ export type IncomeExpenseReportDetails = {
 };
 
 export type IncomeExpenseReport = {
+  baseCurrency: string;
+  missingFxCurrencies: string[];
   start: string;
   end: string;
   groupBy: IncomeExpenseGroupBy;
@@ -213,6 +217,7 @@ export async function getIncomeExpenseReport(
     };
   },
 ): Promise<IncomeExpenseReport> {
+  const t = await getServerT();
   const parsedStart = parseDateOnlyUtc(params.start) ?? startOfDayUtc(new Date());
   const parsedEnd = parseDateOnlyUtc(params.end) ?? parsedStart;
   const rangeStart = parsedStart.getTime() <= parsedEnd.getTime() ? parsedStart : parsedEnd;
@@ -227,7 +232,7 @@ export async function getIncomeExpenseReport(
       ...hidFilter,
       isActive: true,
       counterpartyId: null,
-      kind: { notIn: ["loan", "insurance"] },
+      kind: { notIn: ["loan", "settlement", "insurance"] },
       ...((params.institutionIds?.length || params.institutionId) ? { institutionId: { in: params.institutionIds?.length ? params.institutionIds : [params.institutionId!] } } : {}),
       ...(params.userIds?.length ? { groupId: { in: params.userIds } } : {}),
       ...(params.accountIds?.length ? { id: { in: params.accountIds } } : {}),
@@ -241,7 +246,13 @@ export async function getIncomeExpenseReport(
 
   await normalizeDefaultCategoryHierarchyForHousehold(prisma, ctx.householdId);
 
-  const [categories, records, investmentRecords, businessResultRecords, wealthStatisticRecords] = await Promise.all([
+  const hasScopedAccountFilter = Boolean(
+    params.institutionIds?.length ||
+    params.institutionId ||
+    params.userIds?.length ||
+    params.accountIds?.length,
+  );
+  const [categories, records, fundStatisticRecords, investmentRecords, businessResultRecords, wealthStatisticRecords] = await Promise.all([
     prisma.category.findMany({
       where: {
         ...hidFilter,
@@ -284,6 +295,11 @@ export async function getIncomeExpenseReport(
         createdAt: true,
       },
       orderBy: [{ date: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+    }),
+    loadFundStatisticSourceEntries(ctx, {
+      start: rangeStart,
+      endExclusive,
+      accountIds: hasScopedAccountFilter ? scopedAccountIds : undefined,
     }),
     prisma.txRecord.findMany({
       where: {
@@ -401,7 +417,7 @@ export async function getIncomeExpenseReport(
   const uncategorized: Record<ReportCategoryType, ReportCategoryNode> = {
     income: {
       id: "__uncategorized_income__",
-      name: "未分类收入",
+      name: t("systemCategory.uncategorizedIncome"),
       type: "income",
       parentId: null,
       count: 0,
@@ -412,7 +428,7 @@ export async function getIncomeExpenseReport(
     },
     expense: {
       id: "__uncategorized_expense__",
-      name: "未分类支出",
+      name: t("systemCategory.uncategorizedExpenses"),
       type: "expense",
       parentId: null,
       count: 0,
@@ -446,7 +462,7 @@ export async function getIncomeExpenseReport(
     return record.categoryName ? findCategoryByName(record.type, [record.categoryName]) : null;
   }
 
-  const statisticRecords: ReportStatisticRecord[] = records.flatMap((record) => {
+  let statisticRecords: ReportStatisticRecord[] = records.flatMap((record) => {
     const isInsurance = record.source === "insurance";
     if (
       record.source === BALANCE_RECONCILE_SOURCE ||
@@ -480,9 +496,21 @@ export async function getIncomeExpenseReport(
     }];
   });
 
-  const representedInvestmentEntryIds = new Set(investmentRecords.map((record) => record.id));
+  const independentFundEntryIds = new Set(
+    fundStatisticRecords.flatMap((record) => [record.id, record.entryId]),
+  );
+  const representedLegacyInvestmentEntryIds = new Set(
+    investmentRecords
+      .filter((record) => getInvestmentStatisticItems(record).length > 0)
+      .map((record) => record.id),
+  );
+  const representedStatisticEntryIds = new Set([
+    ...independentFundEntryIds,
+    ...representedLegacyInvestmentEntryIds,
+  ]);
 
   for (const record of investmentRecords) {
+    if (independentFundEntryIds.has(record.id)) continue;
     const investmentName = record.fundName?.trim() || record.fundCode?.trim() || "";
     for (const item of getInvestmentStatisticItems(record)) {
       const category = findCategoryByName(item.type, item.categoryCandidates);
@@ -497,6 +525,28 @@ export async function getIncomeExpenseReport(
         categoryName: category?.name ?? item.categoryName,
         accountId: record.accountId,
         accountName: accountDisplayName(record.account, record.accountName),
+        counterpartyName: investmentName || item.label,
+        note: record.note,
+        createdAt: record.createdAt,
+      });
+    }
+  }
+
+  for (const record of fundStatisticRecords) {
+    const investmentName = record.fundName?.trim() || record.fundCode?.trim() || "";
+    for (const item of getInvestmentStatisticItems(record)) {
+      const category = findCategoryByName(item.type, item.categoryCandidates);
+      statisticRecords.push({
+        id: `${record.id}:${item.idSuffix}`,
+        entryId: record.entryId,
+        canEdit: false,
+        date: record.date,
+        type: item.type,
+        amount: item.amount,
+        categoryId: category?.id ?? null,
+        categoryName: category?.name ?? item.categoryName,
+        accountId: record.accountId,
+        accountName: record.accountName,
         counterpartyName: investmentName || item.label,
         note: record.note,
         createdAt: record.createdAt,
@@ -528,7 +578,7 @@ export async function getIncomeExpenseReport(
   }
 
   for (const record of wealthStatisticRecords) {
-    if (representedInvestmentEntryIds.has(record.id) || representedInvestmentEntryIds.has(record.entryId)) continue;
+    if (representedStatisticEntryIds.has(record.id) || representedStatisticEntryIds.has(record.entryId)) continue;
     const investmentName = record.fundName?.trim() || record.fundCode?.trim() || record.counterpartyName?.trim() || "";
     for (const item of getInvestmentStatisticItems(record)) {
       const category = findCategoryByName(item.type, item.categoryCandidates);
@@ -549,6 +599,9 @@ export async function getIncomeExpenseReport(
       });
     }
   }
+
+  const fx = await buildStatisticsCurrencyConverter(ctx.householdId, statisticRecords);
+  statisticRecords = statisticRecords.flatMap((record) => fx.convertItems(record, [record]));
 
   statisticRecords.sort((a, b) =>
     b.date.getTime() - a.date.getTime() ||
@@ -643,11 +696,11 @@ export async function getIncomeExpenseReport(
           date: formatDateUtc(record.date),
           type: recordType,
           accountId: record.accountId,
-          accountName: record.accountName.trim() || "未指定账户",
+          accountName: record.accountName.trim() || t("investments.unspecified"),
           categoryName:
             validRecordNode?.name ??
             record.categoryName ??
-            (recordType === "income" ? "未分类收入" : "未分类支出"),
+            uncategorized[recordType].name,
           counterpartyName: record.counterpartyName?.trim() ?? "",
           note: record.note?.trim() ?? "",
           amount: displayAmount,
@@ -656,10 +709,10 @@ export async function getIncomeExpenseReport(
 
       const typeLabel =
         detailSelection.type === "income"
-          ? "收入"
+          ? t("stats.income")
           : detailSelection.type === "expense"
-            ? "支出"
-            : "净收支";
+            ? t("stats.expense")
+            : t("stats.netIncome");
       details = {
         type: detailSelection.type,
         typeLabel,
@@ -667,8 +720,8 @@ export async function getIncomeExpenseReport(
         categoryName:
           categoryKey === uncategorizedKey
             ? categoryType === "income"
-              ? "未分类收入"
-              : "未分类支出"
+              ? uncategorized.income.name
+              : uncategorized.expense.name
             : selectedCategory?.name ?? null,
         columnKey: selectedColumn?.key ?? null,
         columnLabel: selectedColumn?.label ?? `${formatDateUtc(rangeStart)} ~ ${formatDateUtc(rangeEnd)}`,
@@ -680,12 +733,14 @@ export async function getIncomeExpenseReport(
 
   return {
     start: formatDateUtc(rangeStart),
+    baseCurrency: fx.baseCurrency,
+    missingFxCurrencies: fx.missingFxCurrencies,
     end: formatDateUtc(rangeEnd),
     groupBy: params.groupBy,
     columns,
     income: {
       type: "income",
-      label: "收入",
+      label: t("stats.income"),
       count: sectionPeriodCounts.income.reduce((sum, value) => sum + value, 0),
       periodCounts: sectionPeriodCounts.income,
       total: incomeTotal,
@@ -694,7 +749,7 @@ export async function getIncomeExpenseReport(
     },
     expense: {
       type: "expense",
-      label: "支出",
+      label: t("stats.expense"),
       count: sectionPeriodCounts.expense.reduce((sum, value) => sum + value, 0),
       periodCounts: sectionPeriodCounts.expense,
       total: expenseTotal,

@@ -9,6 +9,7 @@ const KIND_LABEL_KEYS: Record<string, string> = {
   deposit: "account.kind.deposit",
   investment: "account.kind.investment",
   fixed_asset: "account.kind.fixed_asset",
+  settlement: "account.kind.settlement",
   loan: "account.kind.loan",
   insurance: "account.kind.insurance",
   other: "account.kind.other",
@@ -25,7 +26,8 @@ const KIND_LABEL_FALLBACK: Record<string, string> = {
   deposit: "存款",
   investment: "投资",
   fixed_asset: "固定资产",
-  loan: "债务/债权",
+  settlement: "往来款",
+  loan: "贷款",
   insurance: "保险",
   other: "其他",
   bank_savings: "储蓄卡",
@@ -37,6 +39,34 @@ export function kindLabel(k: string, t?: I18nT): string {
   return KIND_LABEL_FALLBACK[k] || k;
 }
 
+// Catalog keys for investment-product-category labels; keep in sync with the
+// investment.product.* entries in i18n-core.ts.
+const INVEST_PRODUCT_TYPE_LABEL_KEYS: Record<string, string> = {
+  fund: "investment.product.fund",
+  money: "investment.product.money",
+  wealth: "investment.product.wealth",
+  metal: "investment.product.metal",
+  stock: "investment.product.stock",
+  property: "investment.product.property",
+};
+
+// Legacy investment-product-category labels as fallback data for callers
+// without a `t` function (server pages and shared libs).
+const INVEST_PRODUCT_TYPE_LABEL_FALLBACK: Record<string, string> = {
+  fund: "开放式基金",
+  money: "货币基金",
+  wealth: "银行理财",
+  metal: "贵金属",
+  stock: "股票",
+  property: "固定资产",
+};
+
+export function investProductTypeLabel(p: string | null, t?: I18nT): string {
+  const key = INVEST_PRODUCT_TYPE_LABEL_KEYS[p ?? ""];
+  if (t && key) return t(key);
+  return INVEST_PRODUCT_TYPE_LABEL_FALLBACK[p ?? ""] ?? t?.("account.kind.investment") ?? "投资";
+}
+
 export function kindColor(k: string): string {
   if (k === "bank_credit") return "bg-amber-50 text-amber-700 border-amber-200";
   if (k === "bank_debit") return "bg-slate-50 text-slate-700 border-slate-200";
@@ -45,7 +75,7 @@ export function kindColor(k: string): string {
   if (k === "deposit") return "bg-cyan-50 text-cyan-700 border-cyan-200";
   if (k === "investment") return "bg-purple-50 text-purple-700 border-purple-200";
   if (k === "fixed_asset") return "bg-orange-50 text-orange-700 border-orange-200";
-  if (k === "loan") return "bg-red-50 text-red-700 border-red-200";
+  if (k === "loan" || k === "settlement") return "bg-red-50 text-red-700 border-red-200";
   if (k === "insurance") return "bg-indigo-50 text-indigo-700 border-indigo-200";
   return "bg-slate-50 text-slate-700 border-slate-200";
 }
@@ -58,7 +88,7 @@ export function kindHex(k: string): string {
   if (k === "deposit") return "#06B6D4";
   if (k === "investment") return "#8B5CF6";
   if (k === "fixed_asset") return "#F97316";
-  if (k === "loan") return "#EF4444";
+  if (k === "loan" || k === "settlement") return "#EF4444";
   if (k === "insurance") return "#6366F1";
   return "#64748B";
 }
@@ -72,6 +102,7 @@ export function kindIconName(k: string): string {
   if (k === "investment") return "piggy-bank";
   if (k === "fixed_asset") return "building-2";
   if (k === "loan") return "building-2";
+  if (k === "settlement") return "hand-coins";
   if (k === "insurance") return "shield";
   return "building-2";
 }
@@ -86,7 +117,6 @@ const INSTITUTION_TYPE_LABEL_KEYS: Record<string, string> = {
   brokerage: "institution.type.brokerage",
   fund_company: "institution.type.fund_company",
   payment: "institution.type.payment",
-  ewallet: "institution.type.ewallet",
   debt: "institution.type.debt",
   other: "institution.type.other",
 };
@@ -101,7 +131,6 @@ const INSTITUTION_TYPE_LABEL_FALLBACK: Record<string, string> = {
   brokerage: "证券",
   fund_company: "Fund Company",
   payment: "第三方支付",
-  ewallet: "钱包",
   debt: "债权债务",
   other: "其他",
 };
@@ -118,7 +147,6 @@ export function institutionTypeIconName(t: string | null): string {
   if (t === "brokerage") return "building-2";
   if (t === "fund_company") return "building-2";
   if (t === "payment") return "credit-card";
-  if (t === "ewallet") return "wallet";
   if (t === "debt") return "hand-coins";
   return "building-2";
 }
@@ -132,6 +160,7 @@ export const kindOrder: string[] = [
   "investment",
   "fixed_asset",
   "insurance",
+  "settlement",
   "loan",
   "other",
 ];

@@ -19,11 +19,15 @@ appname=mmh
 - 飞牛包必须在 Linux/fnOS 构建环境生成，不能用 Windows 构建产物冒充正式包。
 - 数据目录必须持久化，升级不得删除用户的 SQLite 数据库文件；SQLite 数据库必须位于飞牛应用数据目录，不允许回退到应用安装目录。
 - 飞牛版正常更新必须是同一 `appname=mmh` 的覆盖升级，走 `cmd/upgrade_init` / `cmd/upgrade_callback`；不要把先卸载旧包再安装新版作为常规升级方案。
-- FN 软仓更新必须静默执行直到成功，并沿用已安装 MMH 的在用端口；包内只保留首次安装向导 `wizard/install`，不包含 `wizard/upgrade`、`wizard/config` 或 `wizard/uninstall`。端口解析顺序必须是已持久化 `.port` -> 已持久化 `mmh.env` 中的 `PORT` -> 首次安装 `wizard_port` -> `TRIM_SERVICE_PORT` -> 默认 `7777`，避免覆盖升级时把已确认端口重置为向导默认值。
+- FN 软仓更新必须静默执行直到成功，并沿用已安装 MMH 的在用端口；包内不得包含安装类向导，`wizard/install`、`wizard/upgrade`、`wizard/uninstall` 都不允许。原因已实测确认：FN 软仓客户端（`fn-appstores-client`）只解析 `wizard/install`，只要该文件存在，更新时就会渲染向导、等待用户输入服务端口，并通过 `--env <extract>/wizard.env` 把输入传给 `appcenter-cli install-fpk`；没有该文件时客户端跳过向导直接安装，静默更新才成立。端口沿用顺序必须是已持久化 `.port` -> 已持久化 `mmh.env` 中的 `PORT` -> `TRIM_SERVICE_PORT` -> 默认 `7777`，避免重装时把已确认端口重置为包默认值。
+- 改端口只能走 `wizard/config`（应用设置），不能走安装向导。软仓客户端不解析 `wizard/config`，它只在用户在应用中心主动打开 MMH 设置时显示；保存后由 `cmd/config_callback` 校验端口、停服、写入新端口并重启。因为 `resolve_port()` 优先读已持久化的 `.port`，`config_callback` 必须把向导值**显式**传给 `write_env_file`，否则新端口会被旧值覆盖。
+- 没有安装向导后，首次安装不能再用固定的 `7777`。`resolve_port()` 在没有持久化端口时改为从 `TRIM_SERVICE_PORT` / `7777` 开始用 `/dev/tcp` 探测空闲端口，被占用则顺延，避免安装时卡在已被占用的默认端口上。重装和更新会命中持久化端口，不会走到探测分支。
+- FN 软仓客户端的“更新”实测是**先卸载再带向导重装**，而不是覆盖升级（客户端日志：`卸载: mmh` -> `向导安装命令: ... install-fpk ... --env .../wizard.env` -> `安装完成: mmh 带向导安装`）。因此端口沿用依赖卸载时保留的 `var` 目录（`.port` / `mmh.env`）；`uninstall_init` 的 appdata 备份必须继续保留，不能假设升级会走 `upgrade_init` / `upgrade_callback`。
+- `cmd/main` 启动服务时读的是 `mmh.env` 里的 `PORT`（`export PORT="${PORT:-${env_port:-7777}}"`），**不读** `.port`；`.port` 是安装/改端口时 `resolve_port()` 的持久化依据。改端口后必须两者都写入，否则服务仍会按 `mmh.env` 的旧值启动。
 - 飞牛版数据库升级不能依赖备份恢复来避免丢数据。新增字段必须通过幂等 SQLite 迁移补列；字段重命名、拆分、类型调整或表重组必须写显式迁移和数据回填，不能重建库、清空表或让旧库停留在不兼容结构。
 - 飞牛包生命周期脚本不能默认以 `mmh` 包用户执行。安装、升级和卸载初始化需要应用中心/root 权限处理包目录、权限和同级备份；真正启动服务时再降权到 `mmh` 用户运行 Node。
 - `config/privilege` 只声明 `username`/`groupname`，不声明 `defaults: { "run-as": "package" }`。fnOS 应用中心下载暂存目录会把 `cmd/*` 解压为 `700 root`；若生命周期脚本以包用户执行，`install_init` 会因无法读取 root 拥有的脚本而报 `fork/exec ... permission denied`（0.1.8、0.1.33 均因此失败）。移除 `run-as: package` 后脚本以 root 执行，暂存权限不再影响安装；服务启动时才降权到 `mmh`（`restart_start_as_package_user`）。
-- 通过 FN 软仓客户端（fn-appstores-client，下载地址：`https://gitee.com/hhxs2025/fn-appstores/releases/latest`）或 `appcenter-cli install-fpk` 安装时，CLI 需要 `--volume` 或已配置的默认卷。若 NAS 未设置默认卷，会返回 `Use --volume to specify the volume index, or configure a default using appcenter-cli default-volume [index]`，且退出码仍可能为 0，客户端因此会误判为“安装成功”。请先执行 `sudo appcenter-cli default-volume 1`（或对应当前存储卷的索引）修复；排查安装失败时优先查看应用中心 error.log 与 FN 软仓 app.log 中的 CLI 输出。
+- 通过 FN 软仓客户端（fn-appstores-client，下载地址：`https://gitee.com/hhxs2025/fn-appstores-client/releases/download/2.5.2/fn-appstores-client-2.5.2-x86.fpk`）或 `appcenter-cli install-fpk` 安装时，CLI 需要 `--volume` 或已配置的默认卷。若 NAS 未设置默认卷，会返回 `Use --volume to specify the volume index, or configure a default using appcenter-cli default-volume [index]`，且退出码仍可能为 0，客户端因此会误判为“安装成功”。请先执行 `sudo appcenter-cli default-volume 1`（或对应当前存储卷的索引）修复；排查安装失败时优先查看应用中心 error.log 与 FN 软仓 app.log 中的 CLI 输出。
 - 默认安全边界清楚：只暴露 Web 端口，不包含本机 `.env`、私有 token、SSH 信息、邮箱授权码、AI key 或数据库备份。
 
 ## 已落地
@@ -48,7 +52,7 @@ appname=mmh
 2. 脚本定位应用目录和持久化数据目录；数据目录优先使用 `TRIM_DATADEST`，其次使用 `TRIM_PKGVAR/data`，再兜底到 `/vol*/@appdata/mmh/data`。
 3. 设置 `DATABASE_URL=file:$DATA_DEST/mmh.db`。
 4. 设置 `PRISMA_SCHEMA_PATH=$SERVER_DIR/prisma/schema.native.prisma`。
-5. 读取持久端口文件 `.port` 或持久环境文件 `mmh.env`，导出 `PORT`；`MMH_SYSTEM_PASSWORD` 仅作兼容保留（未设置时首次启动随机生成并保存到 `mmh-system-password.txt`），敏感操作验证不再使用。
+5. 读取持久端口文件 `.port` 或持久环境文件 `mmh.env`，导出 `PORT`；`MMH_SYSTEM_PASSWORD` 仅作兼容保留（未设置时首次启动随机生成并保存到 `mmh-system-password.txt`），同时生成并持久化 `MMH_SESSION_SECRET` 到 `mmh-session-secret.txt`，用于签名登录 Cookie；敏感操作验证不再使用系统密码。
 6. 如果 `cmd/main start` 是由应用中心/root 调起，先修正应用数据目录为 `mmh:mmh`，再降权到 `mmh` 用户继续启动。
 7. 使用包内 Node 运行 SQLite 初始化脚本；仅在数据库没有用户表时创建初始结构，已有数据库不会被重建，但会继续执行幂等运行时迁移并记录到 `_mmh_native_schema`，随后按 `native-init.sql` 补齐缺失的新表、可安全新增字段和可兼容索引。
 8. 启动包内 Next standalone `server.js`，对外暴露 `7777`。
@@ -75,7 +79,7 @@ appname=mmh
 ## 待确认
 
 - 飞牛 `.fpk` 的正式 manifest 字段、签名方式和目录结构。
-- 飞牛手动 `.fpk` 覆盖升级在 `manualInstall` 状态下即使误触发 `wizard/install`，也必须复用已安装端口，不能把向导端口写回覆盖。
+- ~~飞牛手动 `.fpk` 覆盖升级在 `manualInstall` 状态下即使误触发 `wizard/install`，也必须复用已安装端口，不能把向导端口写回覆盖。~~ **已确认并解决（0.1.47）**：FN 软仓客户端只解析 `wizard/install`，因此直接不打包 `wizard/install`、`wizard/upgrade`、`wizard/uninstall`，让客户端跳过向导；端口沿用的依据是卸载时保留的 `var` 目录里的 `.port` / `mmh.env`，改端口改由 `wizard/config` 承担。已在 5.149 实测：无安装向导的包 `fnpack build` 正常，`appcenter-cli install-fpk` 在 stdin 为 `/dev/null` 时不需要任何输入；通过 `wizard/config` 把端口改成 8888 再改回 7777 均生效。
 - 系统更新页在 `MMH_DEPLOY_TARGET=fnos` 时显示飞牛包更新方式，而不是 Docker updater。
 
 ## 下一步清单

@@ -9,15 +9,21 @@ import { supportsTradingCalendarForAccount, TRADING_CALENDARS } from "@/lib/fund
 import { DateStepper } from "@/components/DateStepper";
 import { ModalLayerProvider, getNextModalLayerZIndex, useModalLayerZIndex } from "@/components/ModalLayer";
 import { notifySmartSelectOptionCreated, SmartSelect, type SmartSelectOption } from "@/components/SmartSelect";
+import { CurrencySmartSelect } from "@/components/CurrencySmartSelect";
 import { notifySettingsDataChanged, type SettingsDataScope } from "@/lib/client/settingsCache";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { CURRENCY_OPTIONS, normalizeCurrency } from "@/lib/currency";
 import {
+  accountInstitutionTypeIsAllowed,
+  accountRequiresInstitution,
+  allowedInstitutionTypesForAccount,
+  isConsumerLoanInstitutionType,
   isStockAccountInstitutionType,
   isStockInvestmentAccount,
 } from "@/lib/account-institution-rules";
 import { useI18n } from "@/lib/i18n";
 import { FIXED_ASSET_TYPES, isFixedAssetAccountLike } from "@/lib/fixed-asset";
+import { LOAN_TYPES } from "@/lib/loan-type";
 
 /* ---- Types ---- */
 
@@ -35,6 +41,8 @@ type EntityCreatedExtra = {
   counterpartyId?: string;
   counterpartyName?: string;
   debtDirection?: "payable" | "receivable" | null;
+  loanType?: string | null;
+  isConsumerLoan?: boolean | null;
   currency?: string;
   brokerageCashAccount?: {
     id: string;
@@ -176,7 +184,6 @@ const ALL_INSTITUTION_TYPES = [
   { value: "brokerage", labelKey: "institution.type.brokerage" },
   { value: "fund_company", labelKey: "institution.type.fund_company" },
   { value: "payment", labelKey: "institution.type.payment" },
-  { value: "ewallet", labelKey: "institution.type.ewallet" },
   { value: "debt", labelKey: "institution.type.debt" },
   { value: "other", labelKey: "institution.type.other" },
 ];
@@ -187,7 +194,6 @@ const INSTITUTION_TYPES = ALL_INSTITUTION_TYPES.filter((option) => (
   option.value === "brokerage" ||
   option.value === "fund_company" ||
   option.value === "payment" ||
-  option.value === "ewallet" ||
   option.value === "other"
 ));
 
@@ -211,14 +217,22 @@ const COST_BASIS_OPTIONS = [
 
 /* ---- Account kind options (from account-kinds.ts) ---- */
 
-const ACCOUNT_KIND_OPTIONS = kindOrder.map((k) => ({ value: k, labelKey: `account.kind.${k}` }));
+const ACCOUNT_KIND_OPTIONS = kindOrder
+  .map((k) => ({ value: k, labelKey: `account.kind.${k}` }));
+
+const LOAN_TYPE_OPTIONS = LOAN_TYPES.map((value) => ({
+  value,
+  labelKey: `loan.type.${value}`,
+}));
 
 /* ---- Investment product type options (from investment-config.ts) ---- */
 
-const INVEST_PRODUCT_OPTIONS = PRODUCT_TYPES.map((pt) => ({
-  value: pt,
-  labelKey: `investment.product.${pt}`,
-}));
+const INVEST_PRODUCT_OPTIONS = PRODUCT_TYPES
+  .filter((pt) => pt !== "deposit")
+  .map((pt) => ({
+    value: pt,
+    labelKey: `investment.product.${pt}`,
+  }));
 
 /* ---- Fixed asset type options ---- */
 
@@ -308,7 +322,23 @@ const ENTITY_CONFIG = {
       { key: "fundUnitsDecimals", labelKey: "settings.accounts.fundUnitsDecimals", type: "text", defaultValue: "2", placeholderKey: "settings.accounts.defaultUnitsDecimals", condition: (f) => f.kind === "investment" && (f.investProductType ?? "fund") === "fund" },
       { key: "tradingCalendar", labelKey: "settings.accounts.tradingCalendar", type: "select", options: TRADING_CALENDAR_OPTIONS, defaultValue: "cn_fund", condition: (f) => supportsTradingCalendarForAccount(f.kind, f.investProductType ?? "fund") },
       { key: "groupId", labelKey: "settings.accounts.owner", type: "select", optionsFromData: "groupId", nestedCreate: "group" },
-      { key: "institutionId", labelKey: "settings.accounts.institution", type: "select", optionsFromData: "institutionId", nestedCreate: "institution" },
+      {
+        key: "institutionId",
+        labelKey: "settings.accounts.institution",
+        type: "select",
+        optionsFromData: "institutionId",
+        nestedCreate: "institution",
+        condition: (f) => f.kind !== "settlement" && allowedInstitutionTypesForAccount(f.kind, f.investProductType ?? "fund").length > 0,
+      },
+      {
+        key: "counterpartyId",
+        labelKey: "txForm.counterparty",
+        type: "select",
+        optionsFromData: "counterpartyId",
+        nestedCreate: "counterparty",
+        condition: (f) => f.kind === "settlement",
+      },
+      { key: "loanType", labelKey: "settings.accounts.loanType", type: "select", options: LOAN_TYPE_OPTIONS, defaultValue: "home", condition: (f) => f.kind === "loan" },
       { key: "currency", labelKey: "detail.column.currency", type: "select", options: CURRENCY_OPTION_KEYS, defaultValue: "CNY" },
       { key: "billingDay", labelKey: "settings.accounts.billingDayLabel", type: "text", placeholderKey: "entityForm.dayRangePlaceholder", condition: (f) => f.kind === "bank_credit" },
       { key: "repaymentDay", labelKey: "settings.accounts.repaymentDayLabel", type: "text", placeholderKey: "entityForm.dayRangePlaceholder", condition: (f) => f.kind === "bank_credit" },
@@ -390,6 +420,13 @@ function getSmartSelectCreateLabel(t: (key: string) => string, entityType: Neste
   if (entityType === "group") return t("settings.accounts.addOwner");
   if (entityType === "category") return t("entityForm.categoryTitle");
   return t("entityForm.add");
+}
+
+function smartSelectPlaceholder(t: (key: string) => string, fieldKey: string) {
+  if (fieldKey === "groupId") return t("settings.accounts.selectOwner");
+  if (fieldKey === "counterpartyId") return t("debtTx.placeholder.selectCounterparty");
+  if (fieldKey === "institutionId") return t("settings.accounts.selectInstitution");
+  return t("txForm.selectPlaceholder");
 }
 
 function settingsScopeForEntity(entityType: NestedEntityType): SettingsDataScope {
@@ -680,13 +717,7 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
     if (isStockInvestmentAccount(accountKind, investProductType)) {
       return dataList.filter((item) => isStockAccountInstitutionType(item.type));
     }
-    if (accountKind === "loan") {
-      const isConsumerLoan = form.isConsumerLoan === "true" || extraFields?.isConsumerLoan === "true";
-      return dataList.filter((item) => isConsumerLoan
-        ? item.type === "debt"
-        : ["person", "organization"].includes(item.type ?? ""));
-    }
-    return dataList.filter((item) => ["bank", "insurance", "brokerage", "fund_company", "payment", "ewallet", "other"].includes(item.type ?? ""));
+    return dataList.filter((item) => accountInstitutionTypeIsAllowed(accountKind, investProductType, item.type));
   }
 
   function institutionTypeMatchesCurrentAccount(type?: string) {
@@ -697,19 +728,20 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
       return isStockAccountInstitutionType(type);
     }
     if (accountKind === "loan") {
-      const isConsumerLoan = form.isConsumerLoan === "true" || extraFields?.isConsumerLoan === "true";
-      return isConsumerLoan ? type === "debt" : ["person", "organization", "bank", "insurance", "brokerage", "fund_company", "payment", "ewallet", "debt", "other"].includes(type ?? "");
+      return isConsumerLoanInstitutionType(type);
     }
-    return ["bank", "insurance", "brokerage", "fund_company", "payment", "ewallet", "other"].includes(type ?? "");
+    return accountInstitutionTypeIsAllowed(accountKind, investProductType, type);
   }
 
   function nestedInstitutionDefaultType() {
     if (entityType !== "account" || nestedEntityType !== "institution") return undefined;
     const accountKind = form.kind || form.type || extraFields?.kind || defaultType;
     const investProductType = form.investProductType || extraFields?.investProductType || "fund";
+    const allowedTypes = allowedInstitutionTypesForAccount(accountKind, investProductType);
     if (isStockInvestmentAccount(accountKind, investProductType)) return "brokerage";
     if (accountKind === "investment" && (investProductType === "fund" || investProductType === "money")) return "fund_company";
-    if (accountKind === "loan") return (form.isConsumerLoan === "true" || extraFields?.isConsumerLoan === "true") ? "debt" : "person";
+    if (accountKind === "loan") return "bank";
+    if (allowedTypes.length === 1) return allowedTypes[0];
     return undefined;
   }
 
@@ -718,8 +750,9 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
     const accountKind = form.kind || form.type || extraFields?.kind || defaultType;
     const investProductType = form.investProductType || extraFields?.investProductType || "fund";
     if (isStockInvestmentAccount(accountKind, investProductType)) return ["brokerage"];
-    if (accountKind === "loan") return (form.isConsumerLoan === "true" || extraFields?.isConsumerLoan === "true") ? ["debt"] : ["person", "organization"];
-    return undefined;
+    if (accountKind === "loan") return ["bank", "payment", "other"];
+    const allowedTypes = allowedInstitutionTypesForAccount(accountKind, investProductType);
+    return allowedTypes.length > 0 ? allowedTypes : undefined;
   }
 
   const shouldShowInitialBalanceFields =
@@ -826,6 +859,12 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
     const patch: Record<string, string> = { [field.key]: value };
     if (field.key === "kind") {
       patch.institutionId = "";
+      patch.counterpartyId = "";
+      patch.loanType = value === "loan" ? (current.loanType || "home") : "";
+      patch.isConsumerLoan = value === "loan" && current.loanType === "consumer" ? "true" : "false";
+    }
+    if (field.key === "loanType") {
+      patch.isConsumerLoan = value === "consumer" ? "true" : "false";
     }
     if (field.key === "investProductType") {
       const accountKind = current.kind || current.type || extraFields?.kind || defaultType;
@@ -853,6 +892,27 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
       const selectedInstitution = (nestedFieldData.institutionId ?? []).find((item) => item.id === form.institutionId);
       if (!form.institutionId || (selectedInstitution && !isStockAccountInstitutionType(selectedInstitution.type))) {
         setError(t("entityForm.error.stockAccountInstitution"));
+        return;
+      }
+    }
+    if (entityType === "account") {
+      const accountKind = form.kind || extraFields?.kind || defaultType;
+      const investProductType = form.investProductType || extraFields?.investProductType || "fund";
+      const selectedInstitution = (nestedFieldData.institutionId ?? []).find((item) => item.id === form.institutionId);
+      if (accountKind === "settlement" && !form.counterpartyId) {
+        setError(t("debtTx.placeholder.selectCounterparty"));
+        return;
+      }
+      if (accountKind === "loan" && !form.institutionId) {
+        setError(t("settings.accounts.import.institutionRequired"));
+        return;
+      }
+      if (accountRequiresInstitution(accountKind, investProductType) && !form.institutionId) {
+        setError(t("settings.accounts.import.institutionRequired"));
+        return;
+      }
+      if (form.institutionId && !accountInstitutionTypeIsAllowed(accountKind, investProductType, selectedInstitution?.type)) {
+        setError(t("settings.accounts.import.institutionNotAllowed"));
         return;
       }
     }
@@ -884,6 +944,16 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
         body.investProductType = "property";
         body.institutionId = "";
         body.fixedAssetType = form.fixedAssetType || "property";
+      }
+      if (entityType === "account" && body.kind === "settlement") {
+        body.institutionId = "";
+        body.loanType = "";
+        body.isConsumerLoan = "false";
+      }
+      if (entityType === "account" && body.kind === "loan") {
+        body.counterpartyId = "";
+        body.loanType = body.loanType || "home";
+        body.isConsumerLoan = body.loanType === "consumer" ? "true" : "false";
       }
       if (shouldShowInitialBalanceFields && form.initialBalance?.trim()) {
         body.initialBalance = form.initialBalance.trim();
@@ -930,6 +1000,8 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
           counterpartyId: entityType === "account" ? created.counterpartyId ?? form.counterpartyId ?? undefined : undefined,
           counterpartyName: entityType === "account" ? created.Counterparty?.name : undefined,
           debtDirection: entityType === "account" ? created.debtDirection ?? undefined : undefined,
+          loanType: entityType === "account" ? created.loanType ?? form.loanType ?? undefined : undefined,
+          isConsumerLoan: entityType === "account" ? created.isConsumerLoan ?? form.isConsumerLoan === "true" : undefined,
           currency: entityType === "account" ? created.currency ?? form.currency ?? undefined : undefined,
           brokerageCashAccount: entityType === "account" ? data.brokerageCashAccount ?? null : undefined,
           type: entityType === "institution" || entityType === "counterparty" || entityType === "category" ? selectedTypeValue : undefined,
@@ -970,6 +1042,12 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
         groupId: [...(prev.groupId ?? []), { id, name }],
       }));
       setForm(prev => ({ ...prev, groupId: id }));
+    } else if (nestedEntityType === "counterparty") {
+      setNestedFieldData(prev => ({
+        ...prev,
+        counterpartyId: [...(prev.counterpartyId ?? []), { id, name, type: extra?.type }],
+      }));
+      setForm(prev => ({ ...prev, counterpartyId: id }));
     }
     // Notify the parent so shared option data stays fresh across dialog instances.
     onNestedCreated?.(id, name, extra);
@@ -1050,7 +1128,7 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
                         id: item.id,
                         label: item.name,
                       }));
-                  const selectPlaceholder = field.key === "groupId" ? t("settings.accounts.selectOwner") : t("settings.accounts.selectInstitution");
+                  const selectPlaceholder = smartSelectPlaceholder(t, field.key);
                   if (isReadOnlyField) {
                     const label = ssOptions.find((option) => option.id === (form[field.key] ?? ""))?.label
                       || (form[field.key] ? t("entityForm.specified") : selectPlaceholder);
@@ -1077,6 +1155,30 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
                         onCreateClick={() => { setNestedEntityType(field.nestedCreate!); setNestedOpen(true); }}
                         createLabel={getSmartSelectCreateLabel(t, field.nestedCreate)}
                       />
+                    </div>
+                  );
+                }
+
+                // Currency uses SmartSelect with system + user-added currencies.
+                if (field.key === "currency" && field.type === "select") {
+                  const current = form[field.key] ?? defaultValueForField(field);
+                  return (
+                    <div key={field.key} className="space-y-1">
+                      <div className="form-label">{t(field.labelKey)}</div>
+                      {isReadOnlyField ? (
+                        <div className="form-input flex h-9 items-center bg-slate-50 text-slate-500">
+                          {current ? t(`entityForm.currency.${String(current).toLowerCase()}`, { defaultValue: current }) : t("entityForm.ledgerDefaultCurrency")}
+                        </div>
+                      ) : (
+                        <CurrencySmartSelect
+                          value={current}
+                          onChange={(id) => setForm((prev) => ({
+                            ...prev,
+                            ...selectFieldPatch(field, id, prev),
+                          }))}
+                          labelSystem={(code) => t(`entityForm.currency.${code.toLowerCase()}`, { defaultValue: code })}
+                        />
+                      )}
                     </div>
                   );
                 }
@@ -1193,6 +1295,21 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
             // Select field
             const opts = selectOptionsForField(field);
             if (opts.length === 0) return null; // No data yet for dynamic select
+            if (field.key === "currency" && field.type === "select") {
+              const current = form[field.key] ?? defaultValueForField(field);
+              return (
+                <div key={field.key} className="min-w-[160px] flex-1">
+                  <CurrencySmartSelect
+                    value={current}
+                    onChange={(id) => setForm((prev) => ({
+                      ...prev,
+                      ...selectFieldPatch(field, id, prev),
+                    }))}
+                    labelSystem={(code) => t(`entityForm.currency.${code.toLowerCase()}`, { defaultValue: code })}
+                  />
+                </div>
+              );
+            }
             return (
               <select
                 key={field.key}
@@ -1298,7 +1415,7 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
                           id: d.id,
                           label: d.name,
                         }));
-                    const selectPlaceholder = field.key === "groupId" ? t("settings.accounts.selectOwner") : t("settings.accounts.selectInstitution");
+                    const selectPlaceholder = smartSelectPlaceholder(t, field.key);
 
                     return (
                       <div key={field.key}>
@@ -1312,6 +1429,24 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
                           searchable={field.key === "institutionId"}
                           onCreateClick={() => { setNestedEntityType(field.nestedCreate!); setNestedOpen(true); }}
                           createLabel={getSmartSelectCreateLabel(t, field.nestedCreate)}
+                        />
+                      </div>
+                    );
+                  }
+
+                  // Currency uses SmartSelect with system + user-added currencies.
+                  if (field.key === "currency" && field.type === "select") {
+                    const current = form[field.key] ?? defaultValueForField(field);
+                    return (
+                      <div key={field.key}>
+                        <label className="form-label mb-1 block">{t(field.labelKey)}</label>
+                        <CurrencySmartSelect
+                          value={current}
+                          onChange={(id) => setForm((prev) => ({
+                            ...prev,
+                            ...selectFieldPatch(field, id, prev),
+                          }))}
+                          labelSystem={(code) => t(`entityForm.currency.${code.toLowerCase()}`, { defaultValue: code })}
                         />
                       </div>
                     );
@@ -1426,7 +1561,7 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
                   }
 
                   // Placeholder text for the SmartSelect (no empty option in the list)
-                  const selectPlaceholder = field.key === "groupId" ? t("settings.accounts.selectOwner") : t("settings.accounts.selectInstitution");
+                  const selectPlaceholder = smartSelectPlaceholder(t, field.key);
 
                   return (
                     <div key={field.key}>
@@ -1440,6 +1575,24 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
                         searchable={field.key === "institutionId"}
                         onCreateClick={() => { setNestedEntityType(field.nestedCreate!); setNestedOpen(true); }}
                         createLabel={getSmartSelectCreateLabel(t, field.nestedCreate)}
+                      />
+                    </div>
+                  );
+                }
+
+                // Currency uses SmartSelect with system + user-added currencies.
+                if (field.key === "currency" && field.type === "select") {
+                  const current = form[field.key] ?? defaultValueForField(field);
+                  return (
+                    <div key={field.key}>
+                      <label className="form-label mb-1 block">{t(field.labelKey)}</label>
+                      <CurrencySmartSelect
+                        value={current}
+                        onChange={(id) => setForm((prev) => ({
+                          ...prev,
+                          ...selectFieldPatch(field, id, prev),
+                        }))}
+                        labelSystem={(code) => t(`entityForm.currency.${code.toLowerCase()}`, { defaultValue: code })}
                       />
                     </div>
                   );

@@ -35,6 +35,7 @@ export type BatchReplaceFieldConfig<Field extends string> = {
   options?: BatchReplaceOption[];
   placeholder?: string;
   allowEmpty?: boolean;
+  precision?: number;
   smartSelectBehavior?: BatchReplaceSmartSelectBehavior;
 };
 
@@ -244,7 +245,7 @@ export function BatchReplacePopoverButton<Field extends string>({
                     behavior={fieldConfig.smartSelectBehavior ?? { search: true }}
                   />
                 ) : fieldConfig?.kind === "number" ? (
-                  <CalcInput value={value} onChange={setValue} placeholder={fieldConfig?.placeholder ?? t("batchReplace.numberPlaceholder")} precision={2} />
+                  <CalcInput value={value} onChange={setValue} placeholder={fieldConfig?.placeholder ?? t("batchReplace.numberPlaceholder")} precision={fieldConfig?.precision ?? 2} />
                 ) : (
                   <input
                     type={fieldConfig?.kind === "date" ? "date" : "text"}

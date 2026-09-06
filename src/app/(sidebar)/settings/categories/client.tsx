@@ -4,7 +4,8 @@ import { useEffect, useState, useRef, type DragEvent } from "react";
 import { ArrowRight, ChevronRight, ChevronDown, GripVertical, Plus, Save, X } from "lucide-react";
 import { EntityCreateForm } from "@/components/EntityCreateForm";
 import { SmartSelect, type SmartSelectOption } from "@/components/SmartSelect";
-import { SettingsActionButton } from "@/components/settings/SettingsPageScaffold";
+import { BasicDataImportExport } from "@/components/settings/BasicDataImportExport";
+import { SettingsActionButton, SettingsPageHeader } from "@/components/settings/SettingsPageScaffold";
 import { fetchSettingsCategories, getCachedSettingsCategories, notifySettingsDataChanged, setSettingsCategories } from "@/lib/client/settingsCache";
 import { useI18n } from "@/lib/i18n";
 import { systemCategoryLabel } from "@/lib/system-category-labels";
@@ -33,8 +34,15 @@ const typeLabel = (t: I18nT, type: string) =>
  * System root category name per main type, as stored in the database (user
  * data). Used only to match the system root category by its stored name.
  */
-const typeSystemRootName = (type: string) =>
-  type === "expense" ? "支出" : type === "income" ? "收入" : type === "advance" ? "代付" : type === "transfer" ? "转账" : type === "investment" ? "投资" : type;
+const SYSTEM_ROOT_NAME_BY_TYPE: Record<string, string> = {
+  expense: "\u652f\u51fa",
+  income: "\u6536\u5165",
+  advance: "\u4ee3\u4ed8",
+  transfer: "\u8f6c\u8d26",
+  investment: "\u6295\u8d44",
+};
+
+const typeSystemRootName = (type: string) => SYSTEM_ROOT_NAME_BY_TYPE[type] ?? type;
 
 const typeColor = (type: string) =>
   type === "expense" ? "text-red-600" : type === "income" ? "text-emerald-600" : type === "advance" ? "text-amber-600" : "text-blue-600";
@@ -74,10 +82,13 @@ export default function SettingsCategoriesClient({
     }
     const cached = getCachedSettingsCategories();
     if (cached) setCategories(cached as Category[]);
-    fetchSettingsCategories()
-      .then((next) => setCategories(next as Category[]))
-      .catch(() => null);
+    void refreshCategories();
   }, [initialCategories, initialLoaded]);
+
+  async function refreshCategories(options?: { force?: boolean }) {
+    const next = await fetchSettingsCategories(options).catch(() => null);
+    if (next) setCategories(next as Category[]);
+  }
 
   useEffect(() => {
     const category = selectedId ? categories.find(c => c.id === selectedId) : null;
@@ -652,67 +663,75 @@ export default function SettingsCategoriesClient({
   const hasPendingMoveTarget = !!selectedCategory && moveParentValue !== currentMoveParentValue;
 
   return (
-    <div className="flex" style={{ height: "calc(100vh - 8.5rem)" }}>
-      {/* Left: category tree */}
-      <div className="w-64 flex flex-col shrink-0 border-r border-slate-200 bg-white">
-        <div className="px-4 py-3 border-b border-slate-200 shrink-0">
-          <div className="text-sm font-semibold text-slate-800">{t("settings.categories")}</div>
-        </div>
-        <div className="flex-1 overflow-y-auto py-2">
-          {TYPE_ORDER.map(type => {
-            const typeKey = `type:${type}`;
-            const typeRoots = roots.filter(c => c.type === type);
-            const systemTypeRoot = typeRoots.find(root => root.isSystem && root.name === typeSystemRootName(type));
-            const visibleRoots = systemTypeRoot ? getChildren(systemTypeRoot.id) : typeRoots;
-            const addParentId = systemTypeRoot?.id ?? "__root__";
-            const isExpanded = expanded.has(typeKey);
+    <div className="space-y-4">
+      <SettingsPageHeader
+        title={t("settings.categories")}
+        description={t("settings.categories.description")}
+        count={categories.length}
+        actions={<BasicDataImportExport onImported={() => void refreshCategories({ force: true })} />}
+      />
 
-            return (
-              <div key={type} className="mb-0.5">
-                <div
-                  onClick={() => {
-                    if (visibleRoots.length > 0 || systemTypeRoot) toggleExpand(typeKey);
-                    else openAdd(addParentId, type);
-                  }}
-                  className="flex items-center gap-1 px-3 py-1.5 cursor-pointer hover:bg-slate-50 rounded">
-                  {visibleRoots.length > 0 || systemTypeRoot ? (
-                    isExpanded ? <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" /> : <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />
-                  ) : <span className="w-3" />}
-                  <span className={`text-xs font-semibold ${typeColor(type)} flex-1`}>{typeLabel(t, type)}</span>
-                  <span className="text-[10px] text-slate-400">{visibleRoots.length}</span>
-                  <SettingsActionButton
-                    label={t("settings.categories.client.createTopLevel")}
-                    variant="add"
-                    size="sm"
-                    icon={<Plus className="w-3 h-3" />}
-                    onClick={(e) => { e.stopPropagation(); openAdd(addParentId, type); }}
-                  />
-                </div>
+      <div className="flex min-h-[32rem]" style={{ height: "calc(100vh - 13rem)" }}>
+        {/* Left: category tree */}
+        <div className="w-64 flex flex-col shrink-0 border-r border-slate-200 bg-white">
+          <div className="px-4 py-3 border-b border-slate-200 shrink-0">
+            <div className="text-sm font-semibold text-slate-800">{t("settings.categories")}</div>
+          </div>
+          <div className="flex-1 overflow-y-auto py-2">
+            {TYPE_ORDER.map(type => {
+              const typeKey = `type:${type}`;
+              const typeRoots = roots.filter(c => c.type === type);
+              const systemTypeRoot = typeRoots.find(root => root.isSystem && root.name === typeSystemRootName(type));
+              const visibleRoots = systemTypeRoot ? getChildren(systemTypeRoot.id) : typeRoots;
+              const addParentId = systemTypeRoot?.id ?? "__root__";
+              const isExpanded = expanded.has(typeKey);
 
-                {addingUnder === addParentId && addingType === type && (
-                  <div className="px-3 py-1">
-                    <EntityCreateForm
-                      mode="full" layout="inline" entityType="category"
-                      defaultParentId={systemTypeRoot?.id}
-                      defaultType={type}
-                      parentCategories={parentCategoryOptions}
-                      extraFields={{ type }}
-                      hiddenFields={["type", "parentId"]}
-                      onCreated={handleCategoryCreated}
-                      existingNames={allCategoryNamesExcept()}
+              return (
+                <div key={type} className="mb-0.5">
+                  <div
+                    onClick={() => {
+                      if (visibleRoots.length > 0 || systemTypeRoot) toggleExpand(typeKey);
+                      else openAdd(addParentId, type);
+                    }}
+                    className="flex items-center gap-1 px-3 py-1.5 cursor-pointer hover:bg-slate-50 rounded">
+                    {visibleRoots.length > 0 || systemTypeRoot ? (
+                      isExpanded ? <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" /> : <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />
+                    ) : <span className="w-3" />}
+                    <span className={`text-xs font-semibold ${typeColor(type)} flex-1`}>{typeLabel(t, type)}</span>
+                    <span className="text-[10px] text-slate-400">{visibleRoots.length}</span>
+                    <SettingsActionButton
+                      label={t("settings.categories.client.createTopLevel")}
+                      variant="add"
+                      size="sm"
+                      icon={<Plus className="w-3 h-3" />}
+                      onClick={(e) => { e.stopPropagation(); openAdd(addParentId, type); }}
                     />
                   </div>
-                )}
 
-                {isExpanded && visibleRoots.map(root => renderCategory(root, 1))}
-              </div>
-            );
-          })}
+                  {addingUnder === addParentId && addingType === type && (
+                    <div className="px-3 py-1">
+                      <EntityCreateForm
+                        mode="full" layout="inline" entityType="category"
+                        defaultParentId={systemTypeRoot?.id}
+                        defaultType={type}
+                        parentCategories={parentCategoryOptions}
+                        extraFields={{ type }}
+                        hiddenFields={["type", "parentId"]}
+                        onCreated={handleCategoryCreated}
+                        existingNames={allCategoryNamesExcept()}
+                      />
+                    </div>
+                  )}
+
+                  {isExpanded && visibleRoots.map(root => renderCategory(root, 1))}
+                </div>
+              );
+            })}
+          </div>
         </div>
-      </div>
 
-      {/* Right: details */}
-      <div className="flex-1 bg-slate-50 p-6 min-w-0">
+        {/* Right: details */}
+        <div className="flex-1 bg-slate-50 p-6 min-w-0">
         {selectedCategory ? (
           <div className="space-y-4">
             <div className="bg-white border border-slate-200 rounded-xl">
@@ -944,6 +963,7 @@ export default function SettingsCategoriesClient({
             {t("settings.categories.client.selectCategoryHint")}
           </div>
         )}
+        </div>
       </div>
     </div>
   );

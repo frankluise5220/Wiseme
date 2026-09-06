@@ -3,6 +3,7 @@ import { connectAndOpenBox, closeImap } from "@/lib/mail/imap-client";
 import { prisma } from "@/lib/db/prisma";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 import { isAdmin } from "@/lib/server/auth";
+import { isValidSender } from "@/lib/mail/address";
 
 export const runtime = "nodejs";
 
@@ -16,7 +17,7 @@ export const runtime = "nodejs";
 export async function POST(req: NextRequest) {
   const { householdId, user } = await getHouseholdScope();
   if (!user || !isAdmin(user)) {
-    return NextResponse.json({ ok: false, code: "ADMIN_REQUIRED", error: "仅管理员可操作" }, { status: 403 });
+    return NextResponse.json({ ok: false, code: "ADMIN_REQUIRED", error: "Administrator permission is required" }, { status: 403 });
   }
 
   const body = await req.json().catch(() => ({}));
@@ -37,7 +38,19 @@ export async function POST(req: NextRequest) {
   }
 
   if (!imapHost || !username || !password) {
-    return NextResponse.json({ ok: false, code: "INCOMPLETE_CONFIG", error: "请填写完整配置；新账户必须填写授权码，修改账户如需重新测试也要保留或填写授权码" }, { status: 400 });
+    return NextResponse.json({ ok: false, code: "INCOMPLETE_CONFIG", error: "Complete configuration is required; new accounts need an authorization code, and edited accounts need to keep or provide one for retesting" }, { status: 400 });
+  }
+
+  const smtpFrom = String(body.smtpFrom ?? "").trim();
+  if (smtpFrom && !isValidSender(smtpFrom)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "INVALID_SMTP_FROM",
+        error: "Invalid sender address. Enter a full email address; QQ/163 usually require it to match the login account.",
+      },
+      { status: 400 }
+    );
   }
 
   const results: string[] = [];
@@ -47,12 +60,12 @@ export async function POST(req: NextRequest) {
     const client = connectAndOpenBox({ host: imapHost, port: imapPort, secure: imapSecure, user: username, password, mailbox }, []);
     const imapResult = await Promise.race([
       client,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("IMAP 连接超时")), 15000)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("IMAP connection timed out")), 15000)),
     ]);
-    results.push(`IMAP 连接成功 (${imapResult.mailbox})`);
+    results.push(`IMAP connected (${imapResult.mailbox})`);
     closeImap(imapResult.client);
   } catch (e) {
-    results.push(`IMAP 失败: ${e instanceof Error ? e.message : "未知错误"}`);
+    results.push(`IMAP failed: ${e instanceof Error ? e.message : "Unknown error"}`);
     return NextResponse.json({ ok: false, code: "IMAP_CONNECT_FAILED", error: results.join("; ") });
   }
 
@@ -60,7 +73,6 @@ export async function POST(req: NextRequest) {
   const smtpHost = String(body.smtpHost ?? "").trim();
   const smtpPort = Number(body.smtpPort) || 465;
   const smtpSecure = body.smtpSecure === undefined ? smtpPort === 465 : body.smtpSecure !== false;
-  const smtpFrom = String(body.smtpFrom ?? "").trim();
   if (smtpHost && smtpFrom) {
     try {
       const nodemailer = await import("nodemailer");
@@ -69,9 +81,9 @@ export async function POST(req: NextRequest) {
         auth: { user: username, pass: password },
       });
       await transporter.verify();
-      results.push("SMTP 连接成功");
+      results.push("SMTP connected");
     } catch (e) {
-      results.push(`SMTP 失败: ${e instanceof Error ? e.message : "未知错误"}`);
+      results.push(`SMTP failed: ${e instanceof Error ? e.message : "Unknown error"}`);
       return NextResponse.json({ ok: false, code: "SMTP_CONNECT_FAILED", error: results.join("; ") });
     }
   }

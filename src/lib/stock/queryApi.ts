@@ -61,14 +61,18 @@ function exchangeFromSuggestItem(item: Record<string, unknown>, fallback?: strin
   return fallback ?? null;
 }
 
+// Bound each quote request so a hung external call cannot stall an import
+// (or any other flow) until a reverse-proxy gateway timeout kicks in.
+const QUOTE_FETCH_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_FETCH_TIMEOUT_MS ?? 10_000);
+
 async function fetchJson(url: string) {
-  const response = await fetch(url, { headers, cache: "no-store" });
+  const response = await fetch(url, { headers, cache: "no-store", signal: AbortSignal.timeout(QUOTE_FETCH_TIMEOUT_MS) });
   if (!response.ok) return null;
   return response.json().catch(() => null);
 }
 
 async function fetchText(url: string) {
-  const response = await fetch(url, { headers, cache: "no-store" });
+  const response = await fetch(url, { headers, cache: "no-store", signal: AbortSignal.timeout(QUOTE_FETCH_TIMEOUT_MS) });
   if (!response.ok) return null;
   return response.text().catch(() => null);
 }

@@ -10,6 +10,7 @@ import { toNumber } from "@/lib/date-utils";
 import { amountToneClass as amountClass } from "@/lib/client/colors";
 import { getInsuranceDisplayTypeLabel, getInsuranceMetricLabel, getInsuranceMetricMode, type InsuranceMetricMode } from "@/lib/insurance/display";
 import { getInsuranceAction, insuranceCashValueDelta, isInsuranceRefund } from "@/lib/insurance/transaction";
+import { ACCOUNT_LABEL_FIELDS_COOKIE, accountLabelFieldsFromCookieValue } from "@/lib/server/account-label-fields";
 import { getServerT } from "@/lib/server/i18n";
 import { TopEntryLauncher } from "@/components/TopEntryLauncher";
 
@@ -77,6 +78,7 @@ export default async function InsurancePage() {
   const t = await getServerT();
   const { hidFilter } = await getHouseholdScope();
   const cookieStore = await cookies();
+  const accountLabelFields = accountLabelFieldsFromCookieValue(cookieStore.get(ACCOUNT_LABEL_FIELDS_COOKIE)?.value);
   const creditCardLabelMode = cookieStore.get("mmh_credit_card_label_mode")?.value === "full_name" ? "full_name" : "short_last4";
   const creditCardLabelTemplate = normalizeCreditCardLabelTemplate(
     cookieStore.get("mmh_credit_card_label_template")?.value,
@@ -128,7 +130,7 @@ export default async function InsurancePage() {
       investProductType: account.investProductType,
       Institution: account.Institution,
       AccountGroup: account.AccountGroup,
-    }, creditCardLabelTemplate);
+    }, creditCardLabelTemplate, { fields: accountLabelFields });
 
     const relatedEntries = entries.filter((entry) => entry.insuranceProductId === product.id);
     const balance = relatedEntries.reduce((sum, entry) => sum + insuranceCashValueDelta(entry), 0);

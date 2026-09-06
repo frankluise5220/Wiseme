@@ -28,25 +28,32 @@ jobs:
       - name: Detect Android release scope
         id: android
         shell: bash
+        env:
+          RELEASE_BODY: ${{ github.event.release.body }}
         run: |
           set -euo pipefail
           SHOULD_PUBLISH="true"
           if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-            PREV_TAG="$(git describe --tags --match 'v0.1.*' --abbrev=0 "${TAG}^" 2>/dev/null || true)"
-            ANDROID_RELEASE_PATHS=(
-              "android/app/"
-              "android/build.gradle.kts"
-              "android/settings.gradle.kts"
-              "android/gradle.properties"
-              "android/gradle/"
-              "android/gradlew"
-              "android/gradlew.bat"
-              "docs/android-release.md"
-            )
-            if [ -n "${PREV_TAG}" ] && git diff --quiet "${PREV_TAG}" "${TAG}" -- "${ANDROID_RELEASE_PATHS[@]}"; then
+            if printf '%s' "${RELEASE_BODY:-}" | grep -Fq "不发布 APK"; then
               SHOULD_PUBLISH="false"
-              echo "::notice::Skipping Android APK for ${TAG}; no Android app, build, or release-doc changes since ${PREV_TAG}."
+              echo "::notice::Skipping Android APK because the release notes explicitly say no APK should be published."
+            else
+              TAG="${{ github.event.release.tag_name }}"
+              PREV_TAG="$(git describe --tags --match 'v0.1.*' --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+              ANDROID_RELEASE_PATHS=(
+                "android/app/"
+                "android/build.gradle.kts"
+                "android/settings.gradle.kts"
+                "android/gradle.properties"
+                "android/gradle/"
+                "android/gradlew"
+                "android/gradlew.bat"
+                "docs/android-release.md"
+              )
+              if [ -n "${PREV_TAG}" ] && git diff --quiet "${PREV_TAG}" "${TAG}" -- "${ANDROID_RELEASE_PATHS[@]}"; then
+                SHOULD_PUBLISH="false"
+                echo "::notice::Skipping Android APK for ${TAG}; no Android app, build, or release-doc changes since ${PREV_TAG}."
+              fi
             fi
           fi
           echo "publish=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"

@@ -1,6 +1,10 @@
 import { AccountKind, TransactionType } from "@prisma/client";
 
-import { buildAccountDisplayOption, DEFAULT_CREDIT_CARD_LABEL_TEMPLATE } from "@/lib/account-display";
+import {
+  buildAccountDisplayOption,
+  DEFAULT_CREDIT_CARD_LABEL_TEMPLATE,
+  type AccountLabelField,
+} from "@/lib/account-display";
 import { normalizeCurrency } from "@/lib/currency";
 import { toNumber } from "@/lib/date-utils";
 import { prisma } from "@/lib/db/prisma";
@@ -15,6 +19,7 @@ import type { HouseholdContext } from "@/lib/server/household-scope";
 import { isLegacyDepositAccount, isPureInvestmentAccount } from "@/lib/account-kind-utils";
 import { getIncomeExpenseStatisticAmount } from "@/lib/transaction-statistics";
 import type { DisplayLanguage } from "@/lib/client/appPreferences";
+import { isLoanOrSettlementAccountKind } from "@/lib/debt";
 
 export const DAILY_KIND_ORDER: string[] = [
   AccountKind.cash,
@@ -194,7 +199,7 @@ async function buildFxConverter(householdId: string, currencies: Iterable<string
   const sources = Array.from(new Set(Array.from(currencies).map((currency) => normalizeCurrency(currency))));
   const rateRows = await Promise.all(
     sources.map((fromCurrency) =>
-      getConversionRate({ householdId, fromCurrency, toCurrency: baseCurrency, refreshMissing: true }),
+      getConversionRate({ householdId, fromCurrency, toCurrency: baseCurrency }),
     ),
   );
   const rateByCurrency = new Map(rateRows.map((row) => [row.fromCurrency, row]));
@@ -252,8 +257,10 @@ export async function computeOverviewSummary(
   ctx: HouseholdContext,
   creditCardLabelTemplate: string = DEFAULT_CREDIT_CARD_LABEL_TEMPLATE,
   language: DisplayLanguage = "zh-CN",
+  options?: { accountLabelFields?: AccountLabelField[] | null },
 ): Promise<OverviewSummary> {
   const { hidFilter } = ctx;
+  const accountLabelFields = options?.accountLabelFields ?? null;
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
@@ -295,7 +302,7 @@ export async function computeOverviewSummary(
   const fixedAssetAccounts = pureInvestmentAccounts.filter(isFixedAssetAccountLike);
   const investmentOnlyAccounts = pureInvestmentAccounts.filter((account) => !isFixedAssetAccountLike(account));
   const creditAccounts = accounts.filter((account) => account.kind === AccountKind.bank_credit);
-  const debtAccounts = accounts.filter((account) => account.kind === AccountKind.loan);
+  const debtAccounts = accounts.filter((account) => isLoanOrSettlementAccountKind(account.kind));
   const insuranceAccounts = accounts.filter((account) => account.kind === AccountKind.insurance);
 
   const dailyBaseAccounts = accounts.filter(
@@ -303,7 +310,7 @@ export async function computeOverviewSummary(
       !isPureInvestmentAccount(account) &&
       !isLegacyDepositAccount(account) &&
       account.kind !== AccountKind.bank_credit &&
-      account.kind !== AccountKind.loan &&
+      !isLoanOrSettlementAccountKind(account.kind) &&
       account.kind !== AccountKind.insurance,
   );
 
@@ -369,6 +376,7 @@ export async function computeOverviewSummary(
         AccountGroup: account.AccountGroup ? { id: "", name: account.AccountGroup.name } : null,
       },
       creditCardLabelTemplate,
+      { fields: accountLabelFields },
     );
 
     const accountCurrency = currencyOf(account);
@@ -456,6 +464,7 @@ export async function computeOverviewSummary(
         AccountGroup: storageAccount.AccountGroup ? { id: "", name: storageAccount.AccountGroup.name } : null,
       },
       creditCardLabelTemplate,
+      { fields: accountLabelFields },
     );
     const groupCurrency = currencyOf(storageAccount);
     const groupRate = fx.rateOf(groupCurrency);
@@ -514,6 +523,7 @@ export async function computeOverviewSummary(
         AccountGroup: account.AccountGroup ? { id: "", name: account.AccountGroup.name } : null,
       },
       creditCardLabelTemplate,
+      { fields: accountLabelFields },
     );
     const accountCurrency = currencyOf(account);
     const balance =
@@ -582,6 +592,7 @@ export async function computeOverviewSummary(
           AccountGroup: account.AccountGroup ? { id: "", name: account.AccountGroup.name } : null,
         },
         creditCardLabelTemplate,
+        { fields: accountLabelFields },
       );
       return {
         accountId: account.id,
@@ -628,6 +639,7 @@ export async function computeOverviewSummary(
           AccountGroup: account.AccountGroup ? { id: "", name: account.AccountGroup.name } : null,
         },
         creditCardLabelTemplate,
+        { fields: accountLabelFields },
       );
       return {
         accountId: account.id,

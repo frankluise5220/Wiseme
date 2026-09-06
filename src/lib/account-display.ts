@@ -15,6 +15,146 @@ export type AccountDisplaySource = {
 
 export type CreditCardLabelMode = "short_last4" | "full_name";
 
+/**
+ * Selectable pieces of a non-sidebar account display label. The stored order is
+ * the render order: the user builds the label by clicking fields in sequence.
+ */
+export const ACCOUNT_LABEL_FIELD_KEYS = [
+  "owner",
+  "institution",
+  "institutionShort",
+  "name",
+  "last4",
+  "kind",
+] as const;
+
+export type AccountLabelField = (typeof ACCOUNT_LABEL_FIELD_KEYS)[number];
+
+export const ACCOUNT_LABEL_SEPARATOR = "·";
+export const EMPTY_ACCOUNT_LABEL_FIELDS_VALUE = "__empty";
+
+/**
+ * Default selection matches the documented non-sidebar format:
+ * account name · card last four, with the institution added only when the
+ * account name does not already contain it.
+ */
+export const DEFAULT_ACCOUNT_LABEL_FIELDS: AccountLabelField[] = ["institutionShort", "name", "last4"];
+
+/** Full and short institution fields are two faces of the same selector slot. */
+const ACCOUNT_LABEL_FIELD_CONFLICTS: Record<string, AccountLabelField[]> = {
+  institution: ["institutionShort"],
+  institutionShort: ["institution"],
+};
+
+export function normalizeAccountLabelFields(
+  input: unknown,
+  fallback: AccountLabelField[] = DEFAULT_ACCOUNT_LABEL_FIELDS,
+): AccountLabelField[] {
+  const raw = Array.isArray(input)
+    ? input
+    : typeof input === "string"
+      ? // Field keys contain digits (`last4`), so split on separators only.
+        // Splitting on "everything that is not a letter" silently drops `last4`.
+        input.split(/[\s,;]+/)
+      : null;
+  if (!raw) return [...fallback];
+
+  const result: AccountLabelField[] = [];
+  for (const item of raw) {
+    const key = String(item ?? "").trim() as AccountLabelField;
+    if (!ACCOUNT_LABEL_FIELD_KEYS.includes(key)) continue;
+
+    // Picking the full institution while the short institution is selected replaces it in place
+    // instead of moving it to the end, so swapping the two faces of the
+    // institution keeps the click order the user already built.
+    let replaced = false;
+    for (const conflict of ACCOUNT_LABEL_FIELD_CONFLICTS[key] ?? []) {
+      const index = result.indexOf(conflict);
+      if (index < 0) continue;
+      if (!replaced) {
+        result[index] = key;
+        replaced = true;
+      } else {
+        result.splice(index, 1);
+      }
+    }
+    if (replaced) continue;
+
+    if (result.includes(key)) continue;
+    result.push(key);
+  }
+  return result;
+}
+
+export function serializeAccountLabelFields(fields: AccountLabelField[]) {
+  const normalized = normalizeAccountLabelFields(fields, []);
+  return normalized.length === 0 ? EMPTY_ACCOUNT_LABEL_FIELDS_VALUE : normalized.join(",");
+}
+
+export function parseAccountLabelFields(value: unknown): AccountLabelField[] {
+  if (typeof value !== "string" || !value.trim()) return [...DEFAULT_ACCOUNT_LABEL_FIELDS];
+  if (value.trim() === EMPTY_ACCOUNT_LABEL_FIELDS_VALUE) return [];
+  return normalizeAccountLabelFields(value);
+}
+
+export type AccountLabelRenderInput = {
+  accountName: string;
+  institution?: { name: string | null; shortName?: string | null } | null;
+  numberMasked?: string | null;
+  ownerName?: string | null;
+  /**
+   * Already-resolved account-kind text. `renderAccountLabel` stays free of i18n
+   * wiring, so callers pass `kindLabel(kind, t)` when they have a translator.
+   */
+  kindLabelText?: string | null;
+  fields?: AccountLabelField[] | null;
+};
+
+/**
+ * Renders an account label from the configured field list. Repeated content is
+ * merged: the institution is dropped when the account name already contains it,
+ * the last four digits are dropped when the account name already shows them,
+ * and identical fragments never repeat.
+ */
+export function renderAccountLabel(input: AccountLabelRenderInput) {
+  const accountName = input.accountName.trim();
+  const institutionShort = input.institution?.shortName?.trim() ?? "";
+  const institutionFull = input.institution?.name?.trim() ?? "";
+  const ownerName = input.ownerName?.trim() ?? "";
+  const last4Raw = (input.numberMasked ?? "").trim();
+  const last4 = last4Raw && accountName.includes(last4Raw) ? "" : last4Raw;
+  const institutionSuppressed = accountNameContainsInstitution(accountName, input.institution);
+  const fields = normalizeAccountLabelFields(input.fields);
+
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  const push = (text: string) => {
+    const value = text.trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    parts.push(value);
+  };
+
+  for (const field of fields) {
+    if (field === "owner") {
+      push(ownerName);
+    } else if (field === "institution") {
+      push(institutionSuppressed ? "" : institutionFull || institutionShort);
+    } else if (field === "institutionShort") {
+      push(institutionSuppressed ? "" : institutionShort || institutionFull);
+    } else if (field === "name") {
+      push(accountName);
+    } else if (field === "last4") {
+      push(last4);
+    } else if (field === "kind") {
+      push(input.kindLabelText ?? "");
+    }
+  }
+
+  if (parts.length > 0) return parts.join(ACCOUNT_LABEL_SEPARATOR);
+  return accountName || institutionShort || institutionFull || last4Raw || ownerName;
+}
+
 export const DEFAULT_CREDIT_CARD_LABEL_TEMPLATE = "{机构简称}·{信用卡后4位}";
 export const FULL_NAME_CREDIT_CARD_LABEL_TEMPLATE = "{机构名称}·{信用卡名称}";
 export const SIDEBAR_CREDIT_CARD_LABEL_TEMPLATE = "{机构简称}·{信用卡名称}·{信用卡后4位}";
@@ -24,6 +164,14 @@ export type AccountDisplayOption = {
   name: string;
   kind: string;
   label: string;
+  /**
+   * Label for data lists and table cells. It follows the configured display
+   * fields exactly, so it includes the owner and the account kind when the user
+   * selected them. Dropdowns keep using `selectorLabel`, which omits them
+   * because the owner is already rendered as a group header and the account
+   * kind as a sub-label.
+   */
+  listLabel: string;
   selectorLabel: string;
   selectorCoreLabel: string;
   groupId: string;
@@ -37,6 +185,13 @@ export type AccountDisplayOption = {
 
 export type AccountTableDisplaySource = {
   name?: string | null;
+  /**
+   * Configured list/table label produced by `buildAccountDisplayOption`. It is
+   * preferred over `selectorLabel`/`label` because those may be the
+   * dropdown-oriented labels, which intentionally drop the owner and the
+   * account kind.
+   */
+  listLabel?: string | null;
   label?: string | null;
   selectorLabel?: string | null;
   fullLabel?: string | null;
@@ -79,7 +234,7 @@ export function formatAccountHoverTitle(input: {
 }
 
 function accountUsesOwnerInDisplay(account: { kind?: string | null }) {
-  return account.kind !== "loan";
+  return account.kind !== "loan" && account.kind !== "settlement";
 }
 
 function accountNameContainsInstitution(accountName: string, institution?: { name: string | null; shortName?: string | null } | null) {
@@ -113,14 +268,16 @@ export function formatAccountSelectorLabel(input: {
   accountName: string;
   institution?: { name: string | null; shortName?: string | null } | null;
   numberMasked?: string | null;
+  fields?: AccountLabelField[] | null;
 }) {
-  const accountName = input.accountName.trim();
-  const institutionName = input.institution?.shortName?.trim() || input.institution?.name?.trim() || "";
-  const last4 = (input.numberMasked ?? "").trim();
-  const shouldShowInstitution = institutionName && !accountNameContainsInstitution(accountName, input.institution);
-  const parts = [shouldShowInstitution ? institutionName : "", accountName];
-  if (last4 && !accountName.includes(last4)) parts.push(last4);
-  return parts.filter(Boolean).join("·").trim() || accountName;
+  // The default field list reproduces the historical selector label exactly, so
+  // callers that do not pass a configuration keep their current output.
+  return renderAccountLabel({
+    accountName: input.accountName,
+    institution: input.institution,
+    numberMasked: input.numberMasked,
+    fields: input.fields,
+  });
 }
 
 export function formatAccountSelectorCoreLabel(input: {
@@ -134,8 +291,16 @@ export function formatAccountSelectorCoreLabel(input: {
   return parts.filter(Boolean).join("·").trim() || accountName;
 }
 
-export function formatAccountTableLabel(account: AccountTableDisplaySource, fallback = "") {
-  const provided = firstTrimmedText([account.selectorLabel, account.label]);
+export function formatAccountTableLabel(
+  account: AccountTableDisplaySource,
+  fallback = "",
+  fields?: AccountLabelField[] | null,
+) {
+  // `listLabel` is the configured label and wins when present. `selectorLabel`
+  // is the dropdown label: it follows the configured institution/name/last-four
+  // order but never contains the owner or the account kind, so preferring it
+  // here silently dropped those two fields from every table.
+  const provided = firstTrimmedText([account.listLabel, account.selectorLabel, account.label]);
   if (provided) return provided;
   const accountName = account.name?.trim();
   if (accountName) {
@@ -148,13 +313,18 @@ export function formatAccountTableLabel(account: AccountTableDisplaySource, fall
           }
         : null,
       numberMasked: account.numberMasked,
+      fields,
     });
   }
   return fallback.trim();
 }
 
-export function formatAccountTableTitle(account: AccountTableDisplaySource, fallback = "") {
-  const visibleLabel = formatAccountTableLabel(account, fallback);
+export function formatAccountTableTitle(
+  account: AccountTableDisplaySource,
+  fallback = "",
+  fields?: AccountLabelField[] | null,
+) {
+  const visibleLabel = formatAccountTableLabel(account, fallback, fields);
   return firstTrimmedText([account.hoverTitle, account.title, account.fullLabel, visibleLabel]);
 }
 
@@ -235,35 +405,50 @@ export function formatCreditCardDisplayName(input: {
 export function buildAccountDisplayOption(
   account: AccountDisplaySource,
   creditCardLabelTemplateOrMode: string | CreditCardLabelMode = DEFAULT_CREDIT_CARD_LABEL_TEMPLATE,
-  options?: { suppressDuplicateCreditCardLast4?: boolean },
+  options?: { suppressDuplicateCreditCardLast4?: boolean; fields?: AccountLabelField[] | null },
 ): AccountDisplayOption {
+  // `fields` is the global "account display format" setting. Sidebar callers do
+  // not pass it and keep the sidebar's own shape; every other list passes the
+  // configured fields so all of them render identically.
+  const labelFields = options?.fields ?? null;
   const isFixedAsset = isFixedAssetAccountLike(account);
   const institutionName = isFixedAsset ? "" : formatDisplayInstitutionName(account.Institution, true);
   const showOwner = accountUsesOwnerInDisplay(account);
   const groupId = showOwner ? account.groupId ?? account.AccountGroup?.id ?? "" : "";
   const groupName = showOwner ? account.AccountGroup?.name?.trim() ?? "" : "";
-  const creditCardLabelTemplate = normalizeCreditCardLabelTemplate(
-    creditCardLabelTemplateOrMode,
-    creditCardLabelTemplateOrMode === "full_name" ? "full_name" : "short_last4",
-  );
+  // `creditCardLabelTemplateOrMode` is kept for call-site compatibility only.
+  // The rendered label is now driven by `options.fields` (the account display
+  // format setting), so the credit-card template string is no longer consumed
+  // here; see `formatCreditCardDisplayName` for the retained template renderer.
+  void creditCardLabelTemplateOrMode;
 
+  // Insurance policies and fixed assets keep their product-name-only shape; the
+  // institution/card-last-four expansion does not apply to them.
   const label =
-    account.kind === "bank_credit"
-      ? formatAccountSelectorLabel({
-          accountName: account.name,
-          institution: account.Institution,
-          numberMasked: account.numberMasked,
-        })
-      : account.kind === "insurance"
-        ? account.name.trim()
-      : isFixedAsset
-        ? account.name.trim()
-      : formatAccountDisplayName(account.name, institutionName);
+    account.kind === "insurance" || isFixedAsset
+      ? account.name.trim()
+      : labelFields
+        ? renderAccountLabel({
+            accountName: account.name,
+            institution: isFixedAsset ? null : account.Institution,
+            numberMasked: account.numberMasked,
+            ownerName: groupName,
+            kindLabelText: kindLabel(account.kind),
+            fields: labelFields,
+          })
+        : account.kind === "bank_credit"
+          ? formatAccountSelectorLabel({
+              accountName: account.name,
+              institution: account.Institution,
+              numberMasked: account.numberMasked,
+            })
+          : formatAccountDisplayName(account.name, institutionName);
 
   const selectorLabel = formatAccountSelectorLabel({
     accountName: account.name,
     institution: isFixedAsset ? null : account.Institution,
     numberMasked: account.numberMasked,
+    fields: labelFields,
   });
   const selectorCoreLabel = formatAccountSelectorCoreLabel({
     accountName: account.name,
@@ -274,13 +459,21 @@ export function buildAccountDisplayOption(
       ? label
       : isFixedAsset
         ? joinAccountSubLabel([groupName, account.name, FIXED_ASSET_EXPENSE_CATEGORY_NAME])
-      : formatOwnerQualifiedAccountLabel({
-          accountName: account.name,
-          kind: account.kind,
-          institution: account.Institution,
-          numberMasked: account.numberMasked,
-          ownerName: groupName,
-        });
+        : labelFields
+          ? joinAccountSubLabel([
+              // Owner and kind are already part of the configured label when
+              // selected, so appending them again would repeat the text.
+              labelFields.includes("owner") ? "" : groupName,
+              label,
+              labelFields.includes("kind") ? "" : kindLabel(account.kind),
+            ])
+          : formatOwnerQualifiedAccountLabel({
+              accountName: account.name,
+              kind: account.kind,
+              institution: account.Institution,
+              numberMasked: account.numberMasked,
+              ownerName: groupName,
+            });
 
   const subLabel = isFixedAsset ? FIXED_ASSET_EXPENSE_CATEGORY_NAME : kindLabel(account.kind);
   const hoverTitle = formatAccountHoverTitle({
@@ -294,6 +487,9 @@ export function buildAccountDisplayOption(
     name: account.name,
     kind: account.kind,
     label,
+    // `label` already renders the configured fields, including the owner and
+    // the account kind. Insurance policies and fixed assets stay name-only.
+    listLabel: label,
     selectorLabel,
     selectorCoreLabel,
     groupId,

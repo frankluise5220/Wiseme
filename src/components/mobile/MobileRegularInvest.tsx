@@ -11,6 +11,7 @@ type MobilePlan = {
   taskType?: ScheduledTaskType;
   taskTypeLabel?: string | null;
   taskTitle?: string | null;
+  planName?: string | null;
   targetName?: string | null;
   taskCategoryName?: string | null;
   fundName?: string | null;
@@ -26,6 +27,8 @@ type MobilePlan = {
   nextRunDate?: string | null;
   executedCount?: number;
   status: string;
+  /** Mortgage "bill" plans are system-generated and read-only. */
+  isSystemTask?: boolean;
 };
 
 type Filter = "active" | "paused" | "all";
@@ -87,12 +90,12 @@ export function MobileRegularInvest({ plans }: { plans: MobilePlan[] }) {
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <h2 className="truncate text-sm font-semibold text-slate-900">{plan.taskTitle || plan.targetName || plan.taskCategoryName || plan.fundName || plan.fundCode}</h2>
+                    <h2 className="truncate text-sm font-semibold text-slate-900">{plan.planName || plan.taskTitle || plan.targetName || plan.taskCategoryName || plan.fundName || plan.fundCode}</h2>
                     <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium ${active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{active ? t("regularInvest.client.status.active") : statusLabel(plan.status, t)}</span>
                   </div>
                   <p className="mt-1 truncate text-xs text-slate-500">{taskTypeLabel(plan, t)} · {plan.accountLabel || t("mobileRegularInvest.noTargetAccount")}</p>
                 </div>
-                <button type="button" disabled={busyId === plan.id || (plan.status !== "active" && plan.status !== "paused")} onClick={() => updateStatus(plan)} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-600 disabled:opacity-40" aria-label={t(active ? "mobileRegularInvest.pausePlan" : "mobileRegularInvest.resumePlan")}>
+                <button type="button" disabled={busyId === plan.id || plan.isSystemTask === true || (plan.status !== "active" && plan.status !== "paused")} onClick={() => updateStatus(plan)} title={plan.isSystemTask ? t("regularInvest.client.systemTask.title") : undefined} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-600 disabled:opacity-40" aria-label={t(active ? "mobileRegularInvest.pausePlan" : "mobileRegularInvest.resumePlan")}>
                   {active ? <Pause size={18} /> : <Play size={18} />}
                 </button>
               </div>

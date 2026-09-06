@@ -15,6 +15,7 @@ type FixedAssetEditValue = {
   purchaseDate: string;
   purchasePrice: string;
   note: string;
+  status: string;
 };
 
 type FixedAssetEditMeta = {
@@ -233,6 +234,22 @@ export function FixedAssetEditModal({
                   className="form-input"
                 />
               </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="flex cursor-pointer select-none items-start gap-2 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={draft.status === "mortgaged"}
+                  onChange={(event) => {
+                    const next = { ...draft, status: event.target.checked ? "mortgaged" : "active" };
+                    setDraft(next);
+                    onChange?.(next);
+                  }}
+                  className="mt-0.5 h-3.5 w-3.5 accent-indigo-600"
+                />
+                <span>{t("fixedAssetEdit.status.mortgaged")}</span>
+              </label>
             </div>
           </div>
 

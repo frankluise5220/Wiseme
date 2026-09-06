@@ -26,7 +26,7 @@ function parsePositiveAmount(value: unknown) {
 }
 
 function isFxAllowedAccountKind(kind: AccountKind) {
-  return kind !== AccountKind.bank_credit && kind !== AccountKind.loan;
+  return kind !== AccountKind.bank_credit && kind !== AccountKind.loan && kind !== AccountKind.settlement;
 }
 
 function isForeignCurrency(currency: string) {

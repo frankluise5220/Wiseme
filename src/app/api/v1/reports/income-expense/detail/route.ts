@@ -23,7 +23,10 @@ export const runtime = "nodejs";
  * - detailColumnKey?: report column key, such as YYYY-MM
  *
  * Returns:
- * - { ok: true, data: { details, entries } }
+ * - details amounts use the household base currency at the latest stored rates;
+ *   entries retain their original transaction currency and amounts for editing.
+ * - Missing-rate currencies are excluded from details and its totals.
+ * - { ok: true, data: { details, entries, baseCurrency, missingFxCurrencies } }
  * - { ok: false, error }
  */
 export async function GET(req: Request) {
@@ -46,7 +49,7 @@ export async function GET(req: Request) {
         : null;
 
     if (!detailType) {
-      return NextResponse.json({ ok: false, code: "INVALID_DETAIL_TYPE", error: "明细类型不正确" }, { status: 400 });
+      return NextResponse.json({ ok: false, code: "INVALID_DETAIL_TYPE", error: "Invalid detail type" }, { status: 400 });
     }
 
     const ctx = await getHouseholdScope();
@@ -75,10 +78,12 @@ export async function GET(req: Request) {
       data: {
         details: report.details,
         entries,
+        baseCurrency: report.baseCurrency,
+        missingFxCurrencies: report.missingFxCurrencies,
       },
     });
   } catch (error) {
     console.error("GET /api/v1/reports/income-expense/detail error:", error);
-    return NextResponse.json({ ok: false, code: "FETCH_FAILED", error: "查询报表明细失败" }, { status: 500 });
+    return NextResponse.json({ ok: false, code: "FETCH_FAILED", error: "Failed to fetch report details" }, { status: 500 });
   }
 }

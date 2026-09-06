@@ -1,19 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
-import { verifyPassword } from "@/lib/auth/password";
+import { getApiKeyPolicyDecision } from "@/lib/api-key-policy";
+import { verifyAccessKey } from "@/lib/server/access-key-auth";
 import {
   extractAccessHostnames,
   isAccessHostnameAllowed,
+  normalizeAccessHostname,
   parseAllowedAccessList,
 } from "@/lib/access-whitelist";
 import {
   HOUSEHOLD_COOKIE,
   USER_ID_COOKIE,
   USERNAME_COOKIE,
+  VERIFIED_COOKIE,
+  verifyVerifiedSessionValue,
 } from "@/lib/server/session-cookies";
 
-const VERIFIED_KEY = "mmh_access_password_verified";
-const LEGACY_ACCESS_PASSWORD_KEY = "access_password";
 const CACHE_TTL = 5_000;
 const LOOKUP_TIMEOUT_MS = 1_200;
 
@@ -44,6 +46,27 @@ let allowedOriginsCacheTime = 0;
 let originCheckEnabledCache: boolean | null = null;
 let originCheckEnabledCacheTime = 0;
 
+type SettingState<T> = { ok: true; value: T } | { ok: false };
+
+async function lookupSystemSetting(key: string): Promise<{ ok: true; value: string | null } | { ok: false }> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ ok: false }>((resolve) => {
+    timeoutId = setTimeout(() => resolve({ ok: false }), LOOKUP_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([
+      prisma.systemSetting
+        .findUnique({ where: { key }, select: { value: true } })
+        .then((row) => ({ ok: true as const, value: row?.value ?? null }))
+        .catch(() => ({ ok: false as const })),
+      timeout,
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T | null> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<null>((resolve) => {
@@ -59,34 +82,76 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise
   }
 }
 
-async function isOriginCheckEnabled(): Promise<boolean> {
+async function getOriginCheckEnabledState(): Promise<SettingState<boolean>> {
   if (originCheckEnabledCache !== null && Date.now() - originCheckEnabledCacheTime < CACHE_TTL) {
-    return originCheckEnabledCache;
+    return { ok: true, value: originCheckEnabledCache };
   }
 
-  const row = await withTimeout(
-    prisma.systemSetting.findUnique({ where: { key: "origin_check_enabled" } }),
-    LOOKUP_TIMEOUT_MS,
-  );
-  originCheckEnabledCache = row?.value === "true";
+  const row = await lookupSystemSetting("origin_check_enabled");
+  if (!row.ok) {
+    if (originCheckEnabledCache !== null) return { ok: true, value: originCheckEnabledCache };
+    return { ok: false };
+  }
+  originCheckEnabledCache = row.value === "true";
   originCheckEnabledCacheTime = Date.now();
-  return originCheckEnabledCache;
+  return { ok: true, value: originCheckEnabledCache };
+}
+
+async function getAllowedOriginsState(): Promise<SettingState<string[]>> {
+  if (allowedOriginsCache && Date.now() - allowedOriginsCacheTime < CACHE_TTL) {
+    return { ok: true, value: allowedOriginsCache };
+  }
+
+  const row = await lookupSystemSetting("allowed_dev_origins");
+  if (!row.ok) {
+    if (allowedOriginsCache) return { ok: true, value: allowedOriginsCache };
+    return { ok: false };
+  }
+
+  allowedOriginsCache = parseAllowedAccessList(row.value);
+
+  allowedOriginsCacheTime = Date.now();
+  return { ok: true, value: allowedOriginsCache };
 }
 
 async function getAllowedOrigins(): Promise<string[]> {
-  if (allowedOriginsCache && Date.now() - allowedOriginsCacheTime < CACHE_TTL) {
-    return allowedOriginsCache;
-  }
+  const state = await getAllowedOriginsState();
+  return state.ok ? state.value : [];
+}
 
-  const row = await withTimeout(
-    prisma.systemSetting.findUnique({ where: { key: "allowed_dev_origins" } }),
-    LOOKUP_TIMEOUT_MS,
-  );
+function splitHeaderValues(value: string | null): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
 
-  allowedOriginsCache = parseAllowedAccessList(row?.value);
+function extractForwardedHostnames(value: string | null): string[] {
+  return splitHeaderValues(value)
+    .flatMap((entry) => entry.split(";").map((part) => part.trim()))
+    .filter((part) => part.toLowerCase().startsWith("host="))
+    .map((part) => part.slice("host=".length).replace(/^"|"$/g, ""));
+}
 
-  allowedOriginsCacheTime = Date.now();
-  return allowedOriginsCache;
+function extractRequestHostnames(req: NextRequest): string[] {
+  const candidates = [
+    ...extractForwardedHostnames(req.headers.get("forwarded")),
+    ...splitHeaderValues(req.headers.get("x-forwarded-host")),
+  ];
+  const host = req.headers.get("host");
+  if (host) candidates.push(host);
+  candidates.push(req.nextUrl.hostname);
+  return Array.from(new Set(candidates.map(normalizeAccessHostname).filter(Boolean)));
+}
+
+async function isBrowserApiOriginAllowed(req: NextRequest): Promise<boolean> {
+  if (!req.nextUrl.pathname.startsWith("/api/")) return true;
+  const origin = req.headers.get("origin");
+  if (!origin) return true;
+  const originHostname = normalizeAccessHostname(origin);
+  if (!originHostname) return false;
+  if (extractRequestHostnames(req).includes(originHostname)) return true;
+  return isAccessHostnameAllowed(originHostname, await getAllowedOrigins());
 }
 
 function getProvidedApiKey(req: NextRequest): string | null {
@@ -95,36 +160,11 @@ function getProvidedApiKey(req: NextRequest): string | null {
   return req.headers.get("x-api-key")?.trim() || null;
 }
 
-/**
- * Validate an X-Api-Key / Bearer credential the same way src/lib/server/api-auth.ts does:
- * bcrypt-compare against the admin user's password hash, with a legacy
- * plaintext `access_password` fallback. Without this check, merely *having* an
- * api-key header would bypass the auth gate.
- */
 async function isValidApiKey(key: string): Promise<boolean> {
-  const adminUser = await withTimeout(
-    prisma.user.findFirst({
-      where: { OR: [{ role: "admin" }, { isSystem: true }] },
-      orderBy: [{ isSystem: "desc" }, { createdAt: "asc" }],
-      select: { passwordHash: true },
-    }),
-    LOOKUP_TIMEOUT_MS,
-  );
-  if (adminUser?.passwordHash) {
-    try {
-      return await verifyPassword(key, adminUser.passwordHash);
-    } catch {
-      return false;
-    }
-  }
-  const legacy = await withTimeout(
-    prisma.systemSetting.findUnique({ where: { key: LEGACY_ACCESS_PASSWORD_KEY }, select: { value: true } }),
-    LOOKUP_TIMEOUT_MS,
-  );
-  return !!legacy?.value && key === legacy.value;
+  return Boolean(await withTimeout(verifyAccessKey(key), LOOKUP_TIMEOUT_MS));
 }
 
-async function isReadOnlySession(req: NextRequest): Promise<boolean> {
+async function getSessionWriteRole(req: NextRequest): Promise<"readOnly" | "writeable" | "unknown"> {
   const userId = req.cookies.get(USER_ID_COOKIE)?.value?.trim();
   const username = req.cookies.get(USERNAME_COOKIE)?.value?.trim();
   const householdId = req.cookies.get(HOUSEHOLD_COOKIE)?.value?.trim();
@@ -148,10 +188,11 @@ async function isReadOnlySession(req: NextRequest): Promise<boolean> {
             orderBy: { createdAt: "asc" },
           }),
           LOOKUP_TIMEOUT_MS,
-        )
-      : null;
+      )
+    : null;
 
-  return user?.role === "viewer" && user.isSystem !== true;
+  if (!user) return "unknown";
+  return user.role === "viewer" && user.isSystem !== true ? "readOnly" : "writeable";
 }
 
 function isAllowedReadOnlyMutation(req: NextRequest): boolean {
@@ -175,35 +216,62 @@ function isAllowedReadOnlyMutation(req: NextRequest): boolean {
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  const enabled = await isOriginCheckEnabled();
-  if (enabled) {
-    const allowed = await getAllowedOrigins();
-    const hostnames = extractAccessHostnames(req.headers, req.nextUrl.hostname);
-    const hasDisallowedHost =
-      hostnames.length === 0 || hostnames.some((hostname) => !isAccessHostnameAllowed(hostname, allowed));
-    if (hasDisallowedHost) {
-      console.error("[proxy] Access denied - hostnames:", hostnames, "allowed:", allowed);
-      return new NextResponse("Access Denied - 请联系管理员将您访问的域名或 IP 添加到访问白名单中", { status: 403 });
-    }
+  if (!(await isBrowserApiOriginAllowed(req))) {
+    return NextResponse.json(
+      { ok: false, code: "CROSS_ORIGIN_DENIED", error: "Cross-origin browser API requests are not allowed." },
+      { status: 403 },
+    );
   }
 
   if (isPublicPath(pathname)) {
     return NextResponse.next();
   }
 
-  const verified = req.cookies.get(VERIFIED_KEY)?.value;
-  if (verified === "ok") {
-    if (
-      req.method !== "GET" &&
-      req.method !== "HEAD" &&
-      req.method !== "OPTIONS" &&
-      !isAllowedReadOnlyMutation(req) &&
-      await isReadOnlySession(req)
-    ) {
+  const originCheck = await getOriginCheckEnabledState();
+  if (!originCheck.ok && pathname.startsWith("/api/")) {
+    return NextResponse.json(
+      { ok: false, code: "ACCESS_SETTINGS_UNAVAILABLE", error: "Access-control settings are temporarily unavailable." },
+      { status: 503 },
+    );
+  }
+  if (originCheck.ok && originCheck.value) {
+    const allowedState = await getAllowedOriginsState();
+    if (!allowedState.ok) {
       return NextResponse.json(
-        { ok: false, code: "READ_ONLY", error: "Read-only users cannot modify data." },
+        { ok: false, code: "ACCESS_SETTINGS_UNAVAILABLE", error: "Access allowlist settings are temporarily unavailable." },
+        { status: 503 },
+      );
+    }
+    const allowed = allowedState.value;
+    const hostnames = extractAccessHostnames(req.headers, req.nextUrl.hostname);
+    const hasDisallowedHost =
+      hostnames.length === 0 || hostnames.some((hostname) => !isAccessHostnameAllowed(hostname, allowed));
+    if (hasDisallowedHost) {
+      console.error("[proxy] Access denied - hostnames:", hostnames, "allowed:", allowed);
+      return NextResponse.json(
+        { ok: false, code: "ACCESS_HOST_DENIED", error: "Access host is not on the allowlist." },
         { status: 403 },
       );
+    }
+  }
+
+  const cookieUserId = req.cookies.get(USER_ID_COOKIE)?.value?.trim();
+  const verified = verifyVerifiedSessionValue(req.cookies.get(VERIFIED_COOKIE)?.value, cookieUserId);
+  if (verified.ok) {
+    if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" && !isAllowedReadOnlyMutation(req)) {
+      const role = await getSessionWriteRole(req);
+      if (role === "unknown") {
+        return NextResponse.json(
+          { ok: false, code: "SESSION_ROLE_UNAVAILABLE", error: "Unable to verify the current user's write permission." },
+          { status: 503 },
+        );
+      }
+      if (role === "readOnly") {
+        return NextResponse.json(
+          { ok: false, code: "READ_ONLY", error: "Read-only users cannot modify data." },
+          { status: 403 },
+        );
+      }
     }
     return NextResponse.next();
   }
@@ -211,9 +279,23 @@ export async function proxy(req: NextRequest) {
   if (pathname.startsWith("/api/")) {
     const apiKey = getProvidedApiKey(req);
     if (apiKey && (await isValidApiKey(apiKey))) {
+      const policy = getApiKeyPolicyDecision(pathname, req.method);
+      if (!policy.ok) {
+        return NextResponse.json(
+          { ok: false, code: policy.code ?? "API_KEY_SCOPE_DENIED", error: policy.error ?? "API key access is not allowed for this endpoint." },
+          { status: 403 },
+        );
+      }
       return NextResponse.next();
     }
-    return NextResponse.json({ ok: false, error: apiKey ? "API Key 无效" : "未登录" }, { status: 401 });
+    return NextResponse.json(
+      {
+        ok: false,
+        code: apiKey ? "INVALID_API_KEY" : "UNAUTHORIZED",
+        error: apiKey ? "Invalid API key." : "Sign in first.",
+      },
+      { status: 401 },
+    );
   }
 
   const loginUrl = req.nextUrl.clone();

@@ -7,6 +7,7 @@ import {
 } from "@/lib/server/institution-name-unique";
 import { SettingsInstitutionsClient } from "../institutions/client";
 import { revalidateAfterSettingsChange } from "@/lib/server/revalidate";
+import { loadInstitutionAccountCounts, withAccountCounts } from "@/lib/server/entity-account-counts";
 
 export const dynamic = "force-dynamic";
 
@@ -45,14 +46,17 @@ async function updateFamilyMemberRow(formData: FormData) {
 
 export default async function SettingsFamilyMembersPage() {
   const { hidFilter } = await getHouseholdScope();
-  const familyMembers = await prisma.institution.findMany({
-    where: { ...hidFilter, type: "family_member" },
-    orderBy: [{ name: "asc" }],
-  });
+  const [familyMembers, accountCounts] = await Promise.all([
+    prisma.institution.findMany({
+      where: { ...hidFilter, type: "family_member" },
+      orderBy: [{ name: "asc" }],
+    }),
+    loadInstitutionAccountCounts(hidFilter),
+  ]);
 
   return (
     <SettingsInstitutionsClient
-      institutions={familyMembers.map(i => ({ id: i.id, name: i.name, shortName: i.shortName, type: i.type }))}
+      institutions={withAccountCounts(familyMembers, accountCounts).map(i => ({ id: i.id, name: i.name, shortName: i.shortName, type: i.type, accountCount: i.accountCount }))}
       updateAction={updateFamilyMemberRow}
       mode="family"
     />

@@ -8,7 +8,23 @@ import { useI18n } from "@/lib/i18n";
 import { SettingsCatalogIcon } from "@/components/settings/SettingsCatalogIcon";
 import { getSettingsItemsForSurface, localizeSettingsItem } from "@/lib/settings/catalog";
 
-const navItems = getSettingsItemsForSurface("web").filter((item) => item.webHref);
+const BASIC_DATA_SECONDARY_IDS = new Set(["family-members", "counterparties", "institutions", "tags"]);
+const BASIC_DATA_SECONDARY_HREFS = new Set(["/settings/family-members", "/settings/counterparties", "/settings/institutions", "/settings/tags"]);
+const BASIC_DATA_PRIMARY_HREF = "/settings/family-members";
+const rawNavItems = getSettingsItemsForSurface("web").filter((item) => item.webHref);
+const navItems = rawNavItems.flatMap((item) => {
+  if (item.id === "institutions") {
+    return [{
+      ...item,
+      id: "basic-data",
+      label: "Basic Data",
+      description: "Family members, counterparties, institutions, and tags",
+      icon: "database",
+      webHref: BASIC_DATA_PRIMARY_HREF,
+    }];
+  }
+  return BASIC_DATA_SECONDARY_IDS.has(item.id) ? [] : [item];
+});
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -32,7 +48,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
             const href = item.webHref ?? "/settings";
             const localized = localizeSettingsItem(t, item);
             const pending = pendingHref === href && pathname !== href;
-            const active = pathname === href || pending;
+            const active = pathname === href || pending || (item.id === "basic-data" && BASIC_DATA_SECONDARY_HREFS.has(pathname));
             return (
               <Link
                 key={item.id}

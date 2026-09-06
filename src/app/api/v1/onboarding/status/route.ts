@@ -34,6 +34,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
 import { buildAccountDisplayOption } from "@/lib/account-display";
+import { getServerAccountLabelFields } from "@/lib/server/account-label-fields";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 import { BALANCE_INITIALIZATION_SOURCE } from "@/lib/balance-reconcile";
 
@@ -47,6 +48,7 @@ const DEFAULT_MONEY_ACCOUNT_KIND_ORDER = new Map<string, number>([
 export async function GET() {
   try {
     const { householdId, hidFilter } = await getHouseholdScope();
+  const accountLabelFields = await getServerAccountLabelFields();
     const [household, defaultOwner, familyMemberCount, accounts] = await Promise.all([
       prisma.household.findUnique({ where: { id: householdId }, select: { name: true } }),
       prisma.accountGroup.findFirst({
@@ -85,7 +87,7 @@ export async function GET() {
       return a.name.localeCompare(b.name, "zh-CN");
     })[0] ?? null;
     const defaultMoneyAccountDisplay = defaultMoneyAccount
-      ? buildAccountDisplayOption(defaultMoneyAccount)
+      ? buildAccountDisplayOption(defaultMoneyAccount, undefined, { fields: accountLabelFields })
       : null;
     const investmentAccountIds = accounts
       .filter((account) => account.kind === "investment")
@@ -148,7 +150,7 @@ export async function GET() {
         creditAccountCount: accounts.filter((account) => account.kind === "bank_credit").length,
         investmentAccountCount: investmentAccountIds.length,
         insuranceAccountCount: accounts.filter((account) => account.kind === "insurance").length,
-        settlementAccountCount: accounts.filter((account) => account.kind === "loan").length,
+        settlementAccountCount: accounts.filter((account) => account.kind === "loan" || account.kind === "settlement").length,
         initializationEntryCount,
         transactionCount,
         fundHoldingCount,

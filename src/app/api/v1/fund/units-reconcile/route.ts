@@ -4,9 +4,14 @@
  * Creates a fund-side units reconciliation transaction without a cash flow.
  * Body: { accountId, fundCode, date, actualUnits, fundName?, note? }
  * Success: { ok: true, data: { entryId?, currentUnits, actualUnits, deltaUnits, noChange } }
+ * Busy before any transaction callback starts: HTTP 503,
+ * { ok: false, code: "FUND_UNITS_RECONCILE_BUSY", error }.
+ * Waits up to 10 seconds per start attempt, with one retry only before the callback starts.
+ * Other failures: HTTP 500, { ok: false, code: "FUND_UNITS_RECONCILE_FAILED", error }.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { FundSubtype } from "@prisma/client";
+import { FundSubtype, Prisma } from "@prisma/client";
+import { setTimeout as delay } from "node:timers/promises";
 import { prisma } from "@/lib/db/prisma";
 import { recalcFundPositions } from "@/lib/fund/recalcPosition";
 import { createFundTransactionWithCashFlows } from "@/lib/fund/transactions";
@@ -19,6 +24,30 @@ import {
   TRANSACTION_SOURCE_FUND_UNITS_RECONCILE,
 } from "@/lib/transaction-semantics";
 import { toNumber } from "@/lib/date-utils";
+import { logger } from "@/lib/logger";
+
+class ReconciliationBusyError extends Error {}
+
+async function withReconciliationTransaction<T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    let started = false;
+    try {
+      return await prisma.$transaction((tx) => {
+        started = true;
+        return work(tx);
+      }, { maxWait: 10_000, timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      // A P2028 can also mean expiry or a commit failure. Never replay a callback that ran.
+      const startTimedOut = !started && error instanceof Error &&
+        "code" in error && error.code === "P2028" &&
+        error.message.includes("Unable to start a transaction in the given time");
+      if (!startTimedOut) throw error;
+      if (attempt === 1) throw new ReconciliationBusyError("Database is busy; fund units reconciliation was not saved", { cause: error });
+      logger.warn("Retrying fund units reconciliation after transaction start timeout", "fund-units-reconcile", error);
+      await delay(100);
+    }
+  }
+}
 
 function parseBusinessDate(value: unknown) {
   const text = typeof value === "string" ? value.trim() : "";
@@ -77,51 +106,50 @@ export async function POST(req: NextRequest) {
     }
 
     const fundUnitsDecimals = normalizeFundUnitsDecimals(account.fundUnitsDecimals, 2);
-    await recalcFundPositions(accountId, [fundCode]);
+    // Source transactions and target units -> delta -> reconciliation and holding.
+    // Read again after acquiring the transaction so waiting requests cannot reuse a stale delta.
+    const result = await withReconciliationTransaction(async (tx) => {
+      await recalcFundPositions(accountId, [fundCode], tx);
 
-    const holding = await prisma.fundHolding.findUnique({
-      where: { accountId_fundCode: { accountId, fundCode } },
-      select: { units: true, fundName: true },
-    });
-    const currentUnits = roundFundUnits(toNumber(holding?.units ?? 0), fundUnitsDecimals);
-    const actualUnits = roundFundUnits(actualUnitsInput, fundUnitsDecimals);
-    const deltaUnits = roundFundUnits(actualUnits - currentUnits, fundUnitsDecimals);
+      const holding = await tx.fundHolding.findUnique({
+        where: { accountId_fundCode: { accountId, fundCode } },
+        select: { units: true, fundName: true },
+      });
+      const currentUnits = roundFundUnits(toNumber(holding?.units ?? 0), fundUnitsDecimals);
+      const actualUnits = roundFundUnits(actualUnitsInput, fundUnitsDecimals);
+      const deltaUnits = roundFundUnits(actualUnits - currentUnits, fundUnitsDecimals);
 
-    if (deltaUnits === 0) {
-      return NextResponse.json({
-        ok: true,
-        data: {
+      if (deltaUnits === 0) {
+        return {
           entryId: null,
           currentUnits,
           actualUnits,
           deltaUnits,
           noChange: true,
-        },
-      });
-    }
+        };
+      }
 
-    const latestNameRows = await Promise.all([
-      prisma.fundNavCache.findFirst({
-        where: { fundCode },
-        orderBy: { navDate: "desc" },
-        select: { name: true },
-      }),
-      prisma.fundTransaction.findFirst({
-        where: { fundAccountId: accountId, fundCode, deletedAt: null },
-        orderBy: [{ applyDate: "desc" }, { createdAt: "desc" }],
-        select: { fundName: true },
-      }),
-    ]);
-    const fundName =
-      usefulFundName(body.fundName, fundCode) ??
-      usefulFundName(holding?.fundName, fundCode) ??
-      usefulFundName(latestNameRows[0]?.name, fundCode) ??
-      usefulFundName(latestNameRows[1]?.fundName, fundCode);
-    const isIncrease = deltaUnits > 0;
-    const absoluteDelta = Math.abs(deltaUnits);
+      const latestNameRows = await Promise.all([
+        tx.fundNavCache.findFirst({
+          where: { fundCode },
+          orderBy: { navDate: "desc" },
+          select: { name: true },
+        }),
+        tx.fundTransaction.findFirst({
+          where: { fundAccountId: accountId, fundCode, deletedAt: null },
+          orderBy: [{ applyDate: "desc" }, { createdAt: "desc" }],
+          select: { fundName: true },
+        }),
+      ]);
+      const fundName =
+        usefulFundName(body.fundName, fundCode) ??
+        usefulFundName(holding?.fundName, fundCode) ??
+        usefulFundName(latestNameRows[0]?.name, fundCode) ??
+        usefulFundName(latestNameRows[1]?.fundName, fundCode);
+      const isIncrease = deltaUnits > 0;
+      const absoluteDelta = Math.abs(deltaUnits);
 
-    const created = await prisma.$transaction((tx) =>
-      createFundTransactionWithCashFlows(tx, {
+      const created = await createFundTransactionWithCashFlows(tx, {
         householdId: ctx.householdId,
         fundAccountId: accountId,
         cashAccountId: null,
@@ -142,28 +170,37 @@ export async function POST(req: NextRequest) {
         realizedProfit: isIncrease ? null : 0,
         note,
         cashFlows: [],
-      }),
-    );
+      });
 
-    await recalcFundPositions(accountId, [fundCode]);
-    await recalcAndSaveAccountBalance(accountId);
-    revalidateAfterInvestChange();
+      await recalcFundPositions(accountId, [fundCode], tx);
 
-    return NextResponse.json({
-      ok: true,
-      data: {
+      return {
         entryId: created.fundTransaction.id,
         currentUnits,
         actualUnits,
         deltaUnits,
         noChange: false,
-      },
+      };
     });
+    if (!result.noChange) {
+      await recalcAndSaveAccountBalance(accountId);
+      revalidateAfterInvestChange();
+    }
+    return NextResponse.json({ ok: true, data: result });
   } catch (error) {
+    if (error instanceof ReconciliationBusyError) {
+      logger.warn("Fund units reconciliation could not start", "fund-units-reconcile", error.cause);
+      return NextResponse.json({
+        ok: false,
+        code: "FUND_UNITS_RECONCILE_BUSY",
+        error: error.message,
+      }, { status: 503, headers: { "Retry-After": "2" } });
+    }
+    logger.error("Fund units reconciliation failed", "fund-units-reconcile", error);
     return NextResponse.json({
       ok: false,
       code: "FUND_UNITS_RECONCILE_FAILED",
-      error: error instanceof Error ? error.message : "fund units reconciliation failed",
+      error: "Fund units reconciliation failed",
     }, { status: 500 });
   }
 }

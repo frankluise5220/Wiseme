@@ -24,6 +24,8 @@ export function assertBelongsToHousehold(record: { householdId?: string | null }
 
 /**
  * Read householdId from the cookie and verify access against the current user:
+ * - a verified user session is required; anonymous requests must use an
+ *   explicit public/setup route instead of receiving a default household
  * - admin: any householdId present in the cookie is accepted; otherwise fall back to the first household in the DB
  * - regular user: only the household matching the user's own householdId is accessible
  * If the DB has no Household at all, a default household is auto-created
@@ -32,6 +34,9 @@ export function assertBelongsToHousehold(record: { householdId?: string | null }
  */
 export async function getHouseholdScope(): Promise<HouseholdContext> {
   const user = await getCurrentUser();
+  if (!user) {
+    throw new Error("Authentication required.");
+  }
   const cookieStore = await cookies();
   const raw = cookieStore.get("householdId")?.value;
 
