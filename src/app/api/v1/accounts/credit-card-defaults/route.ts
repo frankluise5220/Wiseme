@@ -1,7 +1,7 @@
 /**
  * GET /api/v1/accounts/credit-card-defaults?institutionId=...
  *
- * Returns `{ ok: true, data: { billingDay, repaymentDay, creditLimit, creditBillMode } | null }`.
+ * Returns `{ ok: true, data: { billingDay, repaymentDay, repaymentOffsetDays, creditLimit, creditBillMode } | null }`.
  * Values come from the most complete active credit card in the current household and institution.
  */
 import { NextResponse } from "next/server";

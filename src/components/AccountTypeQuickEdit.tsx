@@ -34,7 +34,7 @@ type Group = { id: string; name: string };
 export type AccountQuickEditValue = {
   id: string; name: string; kind: string; currency?: string | null; note?: string | null;
   groupId?: string | null; institutionId?: string | null; billingDay?: number | null;
-  repaymentDay?: number | null; creditLimit?: unknown; creditBillMode?: "separate" | "consolidated" | null;
+  repaymentDay?: number | null; repaymentOffsetDays?: number | null; creditLimit?: unknown; creditBillMode?: "separate" | "consolidated" | null;
   numberMasked?: string | null; investProductType?: string | null; costBasisMethod?: string | null;
   fundUnitsDecimals?: number | null; tradingCalendar?: string | null; fixedAssetType?: string | null;
   counterpartyId?: string | null; debtDirection?: string | null; isConsumerLoan?: boolean | null;
@@ -137,6 +137,8 @@ export function AccountTypeQuickEdit({ account, accountLabel, openSignal = 0, sh
       name: account.name, kind: nextKind, note: account.note ?? "", currency: normalizeCurrency(account.currency ?? "CNY"),
       groupId: account.groupId ?? "", institutionId: nextSupportsInstitution ? account.institutionId ?? "" : "", billingDay: account.billingDay == null ? "" : String(account.billingDay),
       repaymentDay: account.repaymentDay == null ? "" : String(account.repaymentDay), creditLimit: account.creditLimit == null ? "" : String(account.creditLimit),
+      repaymentOffsetDays: account.repaymentOffsetDays == null ? "" : String(account.repaymentOffsetDays),
+      repaymentDayMode: account.repaymentOffsetDays != null ? "offset" : "fixed",
       creditBillMode: account.creditBillMode === "consolidated" ? "consolidated" : "separate",       numberMasked: account.numberMasked ?? "",
       investProductType: nextInvestProductType, costBasisMethod: account.costBasisMethod ?? "moving_avg",
       counterpartyId: nextKind === "settlement" ? account.counterpartyId ?? "" : "",
@@ -313,7 +315,9 @@ export function AccountTypeQuickEdit({ account, accountLabel, openSignal = 0, sh
               {isInvestment && productType === "fund" && <Field label={t("settings.accounts.fundUnitsDecimals")}><input value={form.fundUnitsDecimals ?? "2"} onChange={(event) => setField("fundUnitsDecimals", event.target.value)} className={inputClass} inputMode="numeric" /></Field>}
               {isInvestment && supportsTradingCalendarForAccount(kind, productType) && <Field label={t("settings.accounts.tradingCalendar")}><select value={form.tradingCalendar || "cn_fund"} onChange={(event) => setField("tradingCalendar", event.target.value)} className={inputClass}>{TRADING_CALENDARS.map((value) => <option key={value} value={value}>{t(`tradingCalendar.${value}`)}</option>)}</select></Field>}
               {isCredit && <Field label={t("settings.accounts.billingDayLabel")}><input value={form.billingDay ?? ""} onChange={(event) => setField("billingDay", event.target.value)} className={inputClass} inputMode="numeric" placeholder="1-31" /></Field>}
-              {isCredit && <Field label={t("settings.accounts.repaymentDayLabel")}><input value={form.repaymentDay ?? ""} onChange={(event) => setField("repaymentDay", event.target.value)} className={inputClass} inputMode="numeric" placeholder="1-31" /></Field>}
+              {isCredit && <Field label={t("settings.accounts.repaymentDayModeLabel")}><select value={form.repaymentDayMode || "fixed"} onChange={(event) => setField("repaymentDayMode", event.target.value)} className={inputClass}><option value="fixed">{t("entityForm.repaymentDayMode.fixed")}</option><option value="offset">{t("entityForm.repaymentDayMode.offset")}</option></select></Field>}
+              {isCredit && form.repaymentDayMode !== "offset" && <Field label={t("settings.accounts.repaymentDayLabel")}><input value={form.repaymentDay ?? ""} onChange={(event) => setField("repaymentDay", event.target.value)} className={inputClass} inputMode="numeric" placeholder="1-31" /></Field>}
+              {isCredit && form.repaymentDayMode === "offset" && <Field label={t("settings.accounts.repaymentOffsetDaysLabel")}><input value={form.repaymentOffsetDays ?? ""} onChange={(event) => setField("repaymentOffsetDays", event.target.value)} className={inputClass} inputMode="numeric" placeholder={t("entityForm.repaymentOffsetDaysPlaceholder")} /></Field>}
               {isCredit && <Field label={t("settings.accounts.creditLimitLabel")}><input value={form.creditLimit ?? ""} onChange={(event) => setField("creditLimit", event.target.value)} className={inputClass} /></Field>}
               {supportsLastFour && <Field label={t("settings.accounts.lastFourLabel")}><input value={form.numberMasked ?? ""} onChange={(event) => setField("numberMasked", event.target.value)} className={inputClass} /></Field>}
               {isCredit && <Field label={t("settings.accounts.billMode")}><select value={form.creditBillMode || "separate"} onChange={(event) => setField("creditBillMode", event.target.value)} className={inputClass}><option value="separate">{t("settings.accounts.separateBill")}</option><option value="consolidated">{t("settings.accounts.consolidatedBill")}</option></select></Field>}

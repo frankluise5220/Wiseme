@@ -262,6 +262,13 @@ const CREDIT_BILL_MODE_OPTIONS = [
   { value: "consolidated", labelKey: "entityForm.creditBillMode.consolidated" },
 ];
 
+/* ---- Credit repayment day mode options ---- */
+
+const CREDIT_REPAYMENT_DAY_MODE_OPTIONS = [
+  { value: "fixed", labelKey: "entityForm.repaymentDayMode.fixed" },
+  { value: "offset", labelKey: "entityForm.repaymentDayMode.offset" },
+];
+
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -341,7 +348,9 @@ const ENTITY_CONFIG = {
       { key: "loanType", labelKey: "settings.accounts.loanType", type: "select", options: LOAN_TYPE_OPTIONS, defaultValue: "home", condition: (f) => f.kind === "loan" },
       { key: "currency", labelKey: "detail.column.currency", type: "select", options: CURRENCY_OPTION_KEYS, defaultValue: "CNY" },
       { key: "billingDay", labelKey: "settings.accounts.billingDayLabel", type: "text", placeholderKey: "entityForm.dayRangePlaceholder", condition: (f) => f.kind === "bank_credit" },
-      { key: "repaymentDay", labelKey: "settings.accounts.repaymentDayLabel", type: "text", placeholderKey: "entityForm.dayRangePlaceholder", condition: (f) => f.kind === "bank_credit" },
+      { key: "repaymentDayMode", labelKey: "settings.accounts.repaymentDayModeLabel", type: "select", options: CREDIT_REPAYMENT_DAY_MODE_OPTIONS, defaultValue: "fixed", condition: (f) => f.kind === "bank_credit" },
+      { key: "repaymentDay", labelKey: "settings.accounts.repaymentDayLabel", type: "text", placeholderKey: "entityForm.dayRangePlaceholder", condition: (f) => f.kind === "bank_credit" && f.repaymentDayMode !== "offset" },
+      { key: "repaymentOffsetDays", labelKey: "settings.accounts.repaymentOffsetDaysLabel", type: "text", placeholderKey: "entityForm.repaymentOffsetDaysPlaceholder", condition: (f) => f.kind === "bank_credit" && f.repaymentDayMode === "offset" },
       { key: "creditLimit", labelKey: "settings.accounts.creditLimitLabel", type: "text", placeholderKey: "entityForm.creditLimitPlaceholder", condition: (f) => f.kind === "bank_credit" },
       { key: "creditBillMode", labelKey: "entityForm.creditBillModeLabel", type: "select", options: CREDIT_BILL_MODE_OPTIONS, defaultValue: "separate", condition: (f) => f.kind === "bank_credit" },
       { key: "numberMasked", labelKey: "settings.accounts.lastFourLabel", type: "text", placeholderKey: "entityForm.lastFourPlaceholder", condition: (f) => f.kind === "bank_credit" || f.kind === "bank_debit" },
@@ -530,10 +539,13 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
         if (cancelled || !result?.ok || !result.data) return;
         setForm((current) => {
           if (current.kind !== "bank_credit" || current.institutionId !== form.institutionId) return current;
+          const offsetDays = result.data.repaymentOffsetDays == null ? "" : String(result.data.repaymentOffsetDays);
           return {
             ...current,
             billingDay: result.data.billingDay == null ? "" : String(result.data.billingDay),
             repaymentDay: result.data.repaymentDay == null ? "" : String(result.data.repaymentDay),
+            repaymentOffsetDays: offsetDays,
+            repaymentDayMode: offsetDays ? "offset" : "fixed",
             creditLimit: result.data.creditLimit == null ? "" : String(result.data.creditLimit),
             creditBillMode: result.data.creditBillMode === "consolidated" ? "consolidated" : "separate",
           };
@@ -790,7 +802,7 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
   }
 
   function textFieldInputMode(field: FieldDef) {
-    return field.key === "billingDay" || field.key === "repaymentDay" ? "numeric" : undefined;
+    return field.key === "billingDay" || field.key === "repaymentDay" || field.key === "repaymentOffsetDays" ? "numeric" : undefined;
   }
 
   function textFieldClassName(field: FieldDef, className = "", readOnly = false) {

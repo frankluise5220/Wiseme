@@ -15,6 +15,7 @@ import {
 } from "@/lib/scheduled-task";
 import { calcNextScheduledRunDate } from "@/lib/scheduled-task-date";
 import { recalcAndSaveAccountBalance } from "@/lib/server/account-balance";
+import { releaseMortgagedAssetsForSettledLoanAccounts } from "@/lib/server/collateral-mortgage";
 import { listLoanRateAdjustmentsByAccountIds, resolveLoanRateAdjustments } from "@/lib/server/loan-rate-adjustments";
 import { revalidateAfterInvestChange, revalidateAfterTxChange } from "@/lib/server/revalidate";
 import { resolveCategorySnapshot, resolveCreditCardRepaymentCategory } from "@/lib/default-categories";
@@ -118,7 +119,7 @@ export async function executeNonFundScheduledTaskPlan(params: {
   const { householdId, plan } = params;
   const task = params.task ?? decodeScheduledTaskMemo(plan.memo);
   if (!isNonFundScheduledTask(task.type)) {
-    throw new Error("executeNonFundScheduledTaskPlan only accepts non-fund scheduled tasks");
+    throw new Error("该执行器仅支持非基金类计划任务");
   }
   const loanRateAdjustments = task.type === "loan_repayment"
     ? resolveLoanRateAdjustments({
@@ -134,7 +135,7 @@ export async function executeNonFundScheduledTaskPlan(params: {
 
   const { targetAcc, cashAcc } = await loadTaskAccounts(plan);
   if (!targetAcc) throw new Error("目标账户不存在");
-  if (requiresCashAccount(task) && !cashAcc) throw new Error("Scheduled task is missing a cash account");
+  if (requiresCashAccount(task) && !cashAcc) throw new Error("计划任务缺少资金账户");
 
   const amountNum = params.overrideAmount && params.overrideAmount > 0
     ? params.overrideAmount
@@ -303,7 +304,7 @@ export async function executeNonFundScheduledTaskPlan(params: {
     for (const [runIndex, runDate] of datesToProcess.entries()) {
       if (task.type === "loan_repayment") {
         const loanPlanRole = getLoanScheduledPlanRole(task);
-        if (loanPlanRole !== "bill" && !cashAcc) throw new Error("Scheduled task is missing a cash account");
+        if (loanPlanRole !== "bill" && !cashAcc) throw new Error("计划任务缺少资金账户");
         applyPrepaymentsBefore(rollingPreviousRunDate);
         const remainingRunsForThisRun = plan.totalRuns
           ? Math.max(1, plan.totalRuns - plan.executedRuns - runIndex)
@@ -347,7 +348,7 @@ export async function executeNonFundScheduledTaskPlan(params: {
         if (parts.principal > 0 || parts.interest > 0) {
           if (loanPlanRole !== "bill") {
             const debitCashAcc = cashAcc;
-            if (!debitCashAcc) throw new Error("Scheduled task is missing a cash account");
+            if (!debitCashAcc) throw new Error("计划任务缺少资金账户");
             // Auto-debit (mortgage-style): generate the repayment as a cash
             // transfer from the payment account to the loan account.
             await tx.txRecord.create({
@@ -477,6 +478,11 @@ export async function executeNonFundScheduledTaskPlan(params: {
         status: nextStatus,
       },
     });
+
+    // 贷款扣款落库后，若贷款就此结清（最后一期扣完），同步解除抵押资产状态
+    if (task.type === "loan_repayment") {
+      await releaseMortgagedAssetsForSettledLoanAccounts(tx, { householdId, debtAccountIds: [targetAcc.id] });
+    }
   }, NON_FUND_SCHEDULED_TASK_TRANSACTION_OPTIONS);
 
   for (const accountId of affectedAccountIds) {

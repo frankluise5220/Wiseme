@@ -247,7 +247,7 @@ function asciiHeaderFileName(fileName: string) {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
   if (fallback && /[A-Za-z0-9]/.test(fallback)) return fallback;
-  return "mmh-backup.mmh-backup";
+  return "mmh-backup.mmhbackup";
 }
 
 function attachmentDisposition(fileName: string) {
@@ -300,7 +300,7 @@ function getCredentialsFromJson(value: unknown): {
 
 function restoreFailureMessage(error: unknown) {
   if (error instanceof SyntaxError) {
-    return "备份文件不是有效的 MMH 加密备份，请重新选择 .mmh-backup 文件";
+    return "备份文件不是有效的 MMH 加密备份，请重新选择 .mmhbackup 文件";
   }
   return error instanceof Error ? error.message : "恢复失败";
 }
@@ -367,7 +367,7 @@ async function exportBackupPackage(req: NextRequest) {
         exportedAt,
         { passphrase },
       );
-      const fileName = buildBackupFileName(householdName, exportedAt, "mmh-backup");
+      const fileName = buildBackupFileName(householdName, exportedAt, "mmhbackup");
       return new Response(JSON.stringify(encryptedPayload, null, 2), {
         status: 200,
         headers: {
@@ -384,7 +384,7 @@ async function exportBackupPackage(req: NextRequest) {
       { backupScope },
     );
     const encryptedPayload = await encryptBackupPayload(payload, { passphrase });
-    const fileName = buildBackupFileName(payload.scope.householdName, payload.exportedAt, "mmh-backup");
+    const fileName = buildBackupFileName(payload.scope.householdName, payload.exportedAt, "mmhbackup");
     return new Response(JSON.stringify(encryptedPayload, null, 2), {
       status: 200,
       headers: {
@@ -441,7 +441,7 @@ async function exportTableWorkbook() {
  * - `userPassword` verifies the current logged-in user before exporting
  * - `backupScope: "system"` requires an administrator; other authenticated users are limited to `"household"`
  * - `backupPassphrase` optionally encrypts the backup package; when omitted, `userPassword` is used
- * - returns an encrypted `.mmh-backup` package.
+ * - returns an encrypted `.mmhbackup` package.
  *
  * Table export:
  * - `POST /api/v1/settings/backup?mode=table-export`
@@ -451,7 +451,7 @@ async function exportTableWorkbook() {
  * Restore:
  * - `POST /api/v1/settings/backup`
  * - multipart/form-data
- *   - `file`: the `.mmh-backup` encrypted package exported by this endpoint
+ *   - `file`: the `.mmhbackup` encrypted package exported by this endpoint
  *   - `userPassword`: current user's password, verified before destructive restore
  *   - `backupPassphrase`: optional backup package encryption passphrase; when omitted, `userPassword` is used
  * - starts a background restore task and returns `{ ok: true, restoreId, task }`
@@ -511,8 +511,10 @@ export async function POST(req: NextRequest) {
   if (credentialDenied) return credentialDenied;
 
   const lowerFileName = file.name.toLowerCase();
-  if (!lowerFileName.endsWith(".mmh-backup")) {
-    return NextResponse.json({ ok: false, code: "INVALID_FILE_TYPE", error: "恢复仅支持 MMH 加密备份（.mmh-backup）" }, { status: 400 });
+  // Accept both the current `.mmhbackup` and the legacy `.mmh-backup` suffix
+  // so previously exported backups can still be restored.
+  if (!lowerFileName.endsWith(".mmhbackup") && !lowerFileName.endsWith(".mmh-backup")) {
+    return NextResponse.json({ ok: false, code: "INVALID_FILE_TYPE", error: "恢复仅支持 MMH 加密备份（.mmhbackup）" }, { status: 400 });
   }
 
   if (activeRestoreHouseholds.has(householdId)) {

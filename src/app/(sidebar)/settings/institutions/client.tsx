@@ -9,6 +9,7 @@ import { SettingsDeleteButton } from "@/components/SettingsDeleteButton";
 import { BasicDataSubmenuHeader } from "@/components/settings/BasicDataImportExport";
 import { SettingsPrimaryAddButton } from "@/components/settings/SettingsPageScaffold";
 import { fetchSettingsAccountData, notifySettingsDataChanged } from "@/lib/client/settingsCache";
+import { showBlockingLoading } from "@/lib/client/blocking-loading";
 import { showConfirmDialog } from "@/lib/client/confirm-dialog";
 import { useI18n } from "@/lib/i18n";
 
@@ -104,6 +105,7 @@ export function SettingsInstitutionsClient({
     if (!confirmed) return;
 
     setBatchDeleting(true);
+    const closeBlocking = showBlockingLoading(t("common.batchDeleting"));
     try {
       let deleted = 0;
       for (const id of ids) {
@@ -129,6 +131,7 @@ export function SettingsInstitutionsClient({
         window.alert(t("settings.batchDelete.result", { deleted, failed }));
       }
     } finally {
+      closeBlocking();
       setBatchDeleting(false);
     }
   }

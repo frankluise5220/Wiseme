@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db/prisma";
-import { AccountKind, TransactionType } from "@prisma/client";
+import { AccountKind, Prisma, TransactionType } from "@prisma/client";
 import { toNumber } from "@/lib/date-utils";
 import { compareDetailEntriesAsc, getDetailEntryDisplayDate } from "@/lib/detail-entry-order";
 import { applyBalanceReconcileEntry, getBalanceReconcileTarget } from "@/lib/balance-reconcile";
@@ -224,8 +224,13 @@ export async function computeLoanPrincipalBalancesAsOf(
   accounts: AccountBalanceLike[],
   hidFilter: { householdId?: string } | undefined,
   asOfDate: Date,
-  options?: { excludeEntryId?: string | null },
+  options?: {
+    excludeEntryId?: string | null;
+    // 传入事务 client 时，余额计算能看到同一事务里尚未提交的借还款流水
+    client?: Prisma.TransactionClient | typeof prisma;
+  },
 ) {
+  const db = options?.client ?? prisma;
   const accountIds = accounts
     .filter((account) => isLoanOrSettlementAccountKind(account.kind))
     .map((account) => account.id)
@@ -237,7 +242,7 @@ export async function computeLoanPrincipalBalancesAsOf(
   if (accountIds.length === 0 || !Number.isFinite(asOfDate.getTime())) return result;
 
   const asOfDateKey = asOfDate.toISOString().slice(0, 10);
-  const txRows = await prisma.txRecord.findMany({
+  const txRows = await db.txRecord.findMany({
     where: {
       deletedAt: null,
       ...(hidFilter ?? {}),

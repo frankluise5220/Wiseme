@@ -3,6 +3,8 @@ import { AccountKind, Prisma, PropertyTransactionAction, TransactionType } from 
 import { toNumber } from "@/lib/date-utils";
 import { normalizeFixedAssetType } from "@/lib/fixed-asset";
 import { prisma } from "@/lib/db/prisma";
+import { computeLoanPrincipalBalancesAsOf } from "@/lib/server/account-balance";
+import { ACTIVE_DEBT_EPSILON } from "@/lib/server/debt-view-data";
 import { upsertEntryBusinessCashFlowLink } from "@/lib/server/entry-business-link";
 
 type TxClient = Prisma.TransactionClient | typeof prisma;
@@ -378,6 +380,24 @@ export async function recalcPropertyAssetsFromTransactions(
       if (row.action === PropertyTransactionAction.sale || row.action === PropertyTransactionAction.disposal) return current;
       return row.cashAccountId;
     }, null);
+    // 资金账户是贷款账户 ≠ 仍处于抵押中：贷款已结清时不把状态标回 mortgaged，
+    // 与结清自动解除（releaseMortgagedAssetsForSettledLoanAccounts）保持一致，
+    // 避免资产交易增删改触发的重算把已解除的抵押状态复活。
+    let effectiveMortgageLoanAccountId = latestMortgageLoanAccountId;
+    if (effectiveMortgageLoanAccountId) {
+      const loanAccount = relatedAccounts.find((account) => account.id === effectiveMortgageLoanAccountId);
+      if (loanAccount) {
+        const loanBalances = await computeLoanPrincipalBalancesAsOf(
+          [loanAccount],
+          { householdId: params.householdId },
+          new Date(),
+          { client },
+        );
+        if ((loanBalances.get(loanAccount.id) ?? 0) >= -ACTIVE_DEBT_EPSILON) {
+          effectiveMortgageLoanAccountId = null;
+        }
+      }
+    }
 
     if (rows.length === 0) {
       await client.propertyAsset.updateMany({
@@ -412,8 +432,8 @@ export async function recalcPropertyAssetsFromTransactions(
         latestValuationDate,
         status: latestTerminal
           ? latestTerminal.action === PropertyTransactionAction.disposal ? "disposed" : "sold"
-          : latestMortgageLoanAccountId ? "mortgaged" : "active",
-        mortgageLoanAccountId: latestTerminal ? null : latestMortgageLoanAccountId,
+          : effectiveMortgageLoanAccountId ? "mortgaged" : "active",
+        mortgageLoanAccountId: latestTerminal ? null : effectiveMortgageLoanAccountId,
         purchaseDate: firstPurchase?.tradeDate ?? rows[0]?.tradeDate ?? null,
         purchasePrice: decimalString(firstPurchase ? Math.abs(toNumber(firstPurchase.amount)) : null),
       },

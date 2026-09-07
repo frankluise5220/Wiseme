@@ -4,6 +4,7 @@ import type { Metadata, Viewport } from "next";
 import { cookies } from "next/headers";
 import { ModalDragController } from "@/components/ModalDragController";
 import { PwaServiceWorkerRegistration } from "@/components/PwaServiceWorkerRegistration";
+import { ClientLogCollector } from "@/components/ClientLogCollector";
 import { I18nProvider } from "@/components/I18nProvider";
 import { DISPLAY_LANGUAGE_COOKIE } from "@/lib/server/i18n";
 import type { DisplayLanguage } from "@/lib/client/appPreferences";
@@ -59,6 +60,7 @@ export default async function RootLayout({
         <I18nProvider initialLanguage={displayLanguage}>{children}</I18nProvider>
         <ModalDragController />
         <PwaServiceWorkerRegistration />
+        <ClientLogCollector />
         <Script
           id="performance-measure-guard"
           strategy="beforeInteractive"

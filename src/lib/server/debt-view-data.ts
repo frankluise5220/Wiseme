@@ -150,6 +150,7 @@ export type DebtDetailEntry = {
   date: string;
   typeLabel: string;
   relatedAccountLabel: string;
+  collateralLabel?: string | null;
   note: string;
   amount: number;
   principal: number;
@@ -168,6 +169,7 @@ export type DebtDetailEntry = {
     mode: "borrow_in" | "repay_out" | "prepay_out" | "lend_out" | "collect_in";
     defaultDebtAccountId: string;
     defaultDebtAccountName?: string | null;
+    defaultLoanPurposeCategoryId?: string | null;
     defaultCashAccountId: string;
     defaultAutoDebitCashAccountId?: string;
     defaultFixedAssetAccountId?: string;
@@ -498,6 +500,7 @@ export function buildDebtDetailEntriesViewData({
   debtDirectionByAccountId,
   displayAccountId,
   mortgagedAssetByLoanAccountId,
+  collateralNameByLoanAccountId,
 }: {
   debtEntriesRaw: DebtMetricEntry[];
   selectedDebtAccountIds: Set<string>;
@@ -510,6 +513,7 @@ export function buildDebtDetailEntriesViewData({
   debtDirectionByAccountId: Map<string, DebtDirection | string | null>;
   displayAccountId?: string | null;
   mortgagedAssetByLoanAccountId?: Map<string, { accountId: string; id: string }>;
+  collateralNameByLoanAccountId?: Map<string, string>;
 }) {
   const automaticRepaymentPlanIds = new Set<string>();
   if (selectedAutoDebitPlan?.id) automaticRepaymentPlanIds.add(selectedAutoDebitPlan.id);
@@ -671,6 +675,7 @@ export function buildDebtDetailEntriesViewData({
             : normalizeSettlementTransferCategoryName(entry.categoryName)
           : (entry.categoryName || formatDebtEntryType(entry.type)),
       relatedAccountLabel: isBalanceReconcile ? "-" : (accountLabelById.get(cashSideAccountId) ?? "-"),
+      collateralLabel: collateralNameByLoanAccountId?.get(debtSideAccountId) ?? null,
       note: entry.note ?? "",
       amount: displayAmount,
       principal: cashFlowAmount,
@@ -705,6 +710,7 @@ export function buildDebtDetailEntriesViewData({
               dialogType: isSelectedBankLoan ? "loan" : "debt",
               defaultDebtAccountId: debtSideAccountId,
               defaultDebtAccountName: selectedDebtRow?.name ?? null,
+              defaultLoanPurposeCategoryId: debtEditMode === "borrow_in" ? (entry.categoryId ?? null) : null,
               defaultCashAccountId: entry.source === "debt_financed_purchase" ? defaultAutoDebitCashAccountId : cashSideAccountId,
               defaultAutoDebitCashAccountId,
               defaultFixedAssetAccountId: mortgagedAsset?.accountId,
@@ -1268,10 +1274,12 @@ export function buildDebtRowsViewData({
   const selectedLoanTypeRows = selectedDebtLoanType
     ? debtRows.filter((row) => !row.parentKey && row.isLoan && row.loanType === selectedDebtLoanType)
     : [];
-  const debtRowsForShell = selectedDebtRow && !selectedDebtRowIsOrdinary
-    ? debtRows.filter((row) => row.key === selectedDebtRow.key)
-    : selectedDebtLoanType
-      ? selectedLoanTypeRows
+  // 选中某笔贷款时只做“高亮 + 下方详情定位”，列表仍展示全部同类债务行，
+  // 否则点击一行后整个表格只剩这一行，用户会以为其他贷款记录丢了。
+  const debtRowsForShell = selectedDebtLoanType
+    ? selectedLoanTypeRows
+    : selectedDebtRow && !selectedDebtRowIsOrdinary
+      ? debtRows.filter((row) => !row.parentKey && (row.isLoan || row.key === selectedDebtRow.key))
       : ordinaryDebtRows;
   const selectedDebtObjectValue = selectedDebtRow?.counterpartyId
     ? `counterparty:${selectedDebtRow.counterpartyId}`

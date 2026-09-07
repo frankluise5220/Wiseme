@@ -951,6 +951,8 @@ export function DetailViewClient({
               mode: debtMode,
               dialogType: debtEditDialogType,
               defaultDebtAccountId: debtAccountIdForEdit,
+              defaultDebtAccountName: (isDebtAccountFromSide ? e.accountName : e.toAccountName) ?? null,
+              defaultLoanPurposeCategoryId: debtEditDialogType === "loan" && debtMode === "borrow_in" ? e.categoryId : undefined,
               defaultCashAccountId: cashAccountIdForEdit,
               defaultLoanFundingMode: e.source === "debt_financed_purchase" ? "financed_purchase" : "cash_disbursement",
               defaultDate: dateStr,
@@ -961,6 +963,7 @@ export function DetailViewClient({
               defaultPrepayStrategy: e.source === "debt_prepay_out"
                 ? parseLoanPrepayStrategy(e.toNote) ?? DEFAULT_LOAN_PREPAY_STRATEGY
                 : undefined,
+              defaultTagIds: e.entryTags.map((item) => item.tagId).filter(Boolean),
             },
           }
         : undefined;

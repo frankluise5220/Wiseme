@@ -201,7 +201,12 @@ const portableNpmCli = path.join(stageNodeDir, "node_modules", "npm", "bin", "np
 const rebuild = spawnSync(portableNode, [portableNpmCli, "rebuild", "better-sqlite3"], {
   cwd: stageAppDir,
   stdio: "inherit",
-  env: { ...process.env, npm_config_ignore_scripts: "false" },
+  env: {
+    ...process.env,
+    Path: `${stageNodeDir}${path.delimiter}${process.env.Path || process.env.PATH || ""}`,
+    PATH: `${stageNodeDir}${path.delimiter}${process.env.Path || process.env.PATH || ""}`,
+    npm_config_ignore_scripts: "false",
+  },
   shell: false,
 });
 if (rebuild.status !== 0) {

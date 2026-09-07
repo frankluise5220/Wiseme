@@ -102,6 +102,11 @@ function read(file) {
   return fs.readFileSync(file, "utf8");
 }
 
+function readIfExists(file) {
+  if (!fs.existsSync(file)) return "";
+  return fs.readFileSync(file, "utf8");
+}
+
 function readTarEntry(archive, entry) {
   if (!fs.existsSync(archive)) return "";
   const result = spawnSync("tar", ["-xOf", archive, entry], {
@@ -263,7 +268,8 @@ const fundProfileSource = read(path.join(root, "src", "lib", "fund", "fundProfil
 const repositoryExample = read(path.join(root, "deploy", "fnos", "repository", "apps.example.json"));
 const repositoryApiApps = read(path.join(root, "deploy", "fnos", "repository", "api", "apps"));
 const fnosReadme = read(path.join(root, "deploy", "fnos", "README.md"));
-const fnosPackagePlan = read(path.join(root, "docs", "fnos-package-plan.md"));
+const fnosPackagePlanPath = path.join(root, "docs", "fnos-package-plan.md");
+const fnosPackagePlan = readIfExists(fnosPackagePlanPath);
 const nativeSchema = path.join(root, "prisma", "schema.native.prisma");
 const stageDir = path.join(root, "release-artifacts", "fnos", verifyTarget.stageDirName);
 const prismaCli = path.join(root, "node_modules", "prisma", "build", "index.js");
@@ -372,6 +378,7 @@ expect(/20260828_add_fixed_asset_type/.test(buildScript) && /addColumnIfMissing\
 expect(/20260905_add_property_mortgage_loan_account/.test(buildScript) && /addColumnIfMissing\(db, "property_assets", "mortgageLoanAccountId", "TEXT"\)/.test(buildScript), "fnOS SQLite migrations must add mortgage loan linkage for fixed assets.");
 expect(/20260905_add_account_loan_type/.test(buildScript) && /addColumnIfMissing\(db, "Account", "loanType", "TEXT"\)/.test(buildScript) && /'consumer'/.test(buildScript), "fnOS SQLite migrations must add Account.loanType for existing databases.");
 expect(/20260906_restore_counterparty_settlement_kind/.test(buildScript) && /counterparty-owned settlement accounts/.test(buildScript) && /counterpartyId IS NOT NULL AND institutionId IS NULL/.test(buildScript), "fnOS SQLite migrations must restore counterparty settlement accounts misclassified as loans.");
+expect(/20260907_normalize_counterparty_settlement_accounts/.test(buildScript) && /WHERE kind = 'loan' AND counterpartyId IS NOT NULL/.test(buildScript) && /institutionId = NULL/.test(buildScript), "fnOS SQLite migrations must normalize all legacy counterparty loan accounts to settlement and clear institution links.");
 expect(/20260829_add_credit_card_billing_day/.test(buildScript) && /createCreditCardBillingDayTable\(db\)/.test(buildScript) && /CreditCardBillingDay_accountId_effectiveDate_key/.test(buildScript) && /CreditCardBillingDay/.test(buildScript) && /updatedAt/.test(buildScript), "fnOS SQLite migrations must create, index, and timestamp CreditCardBillingDay for existing databases.");
 expect(/20260902_add_regular_invest_plan_name/.test(buildScript) && /addColumnIfMissing\(db, "RegularInvestPlan", "planName", "TEXT"\)/.test(buildScript), "fnOS SQLite migrations must add RegularInvestPlan.planName for existing databases.");
 expect(/20260903_normalize_ewallet_institution_type/.test(buildScript) && /SET \\+"type\\+" = 'payment' WHERE \\+"type\\+" = 'ewallet'/.test(buildScript), "fnOS SQLite migrations must normalize legacy ewallet institutions to the payment type for existing databases.");

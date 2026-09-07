@@ -56,6 +56,13 @@ export function InvestmentProfitFilterSelect({
   function buildHref(next: AccountScopeValue) {
     const query = new URLSearchParams();
     Object.entries(baseParams).forEach(([key, value]) => query.set(key, value));
+    // The scope selection is owned by the local draft. baseParams may carry the
+    // scope keys from the current URL (e.g. the picker base params), so drop
+    // them before applying the draft — otherwise clearing a selection would
+    // immediately re-apply the stale URL value on refresh.
+    query.delete("userIds");
+    query.delete("institutionIds");
+    query.delete("investmentAccounts");
     if (next.userIds.length) query.set("userIds", next.userIds.join(","));
     if (next.institutionIds.length) query.set("institutionIds", next.institutionIds.join(","));
     if (next.accountIds.length) query.set("investmentAccounts", next.accountIds.join(","));

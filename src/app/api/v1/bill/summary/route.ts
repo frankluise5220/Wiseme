@@ -45,6 +45,7 @@ export async function GET(request: Request) {
         kind: true,
         billingDay: true,
         repaymentDay: true,
+        repaymentOffsetDays: true,
         creditBillMode: true,
       },
     });

@@ -341,6 +341,7 @@ start_app() {
   export NODE_ENV=production
   export HOSTNAME=0.0.0.0
   export MMH_DEPLOY_TARGET=synology
+  export MMH_DATA_DIR="$DATA_DIR"
   export DATABASE_URL="file:$DATA_DIR/mmh.db"
   export PRISMA_SCHEMA_PATH="$SERVER_DIR/prisma/schema.native.prisma"
   append_log "Testing bundled Node runtime: $NODE_BIN"

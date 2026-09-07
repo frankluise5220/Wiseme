@@ -41,6 +41,15 @@ export type InvestmentProfitMissingNav = {
   accountName: string;
 };
 
+export type InvestmentProfitMissingStockPrice = {
+  market: string;
+  stockCode: string;
+  stockName: string | null;
+  date: string;
+  accountId: string;
+  accountName: string;
+};
+
 type ProfitEvent = {
   date: Date;
   kind: InvestmentProfitKind;
@@ -800,6 +809,7 @@ function stockMarketValueAt(params: {
 
   let marketValue = 0;
   let positionCount = 0;
+  const heldPositions: Array<{ key: string; market: string; stockCode: string; quantity: number }> = [];
   for (const [key, position] of positions) {
     if (position.quantity <= 0.000001 && position.cost <= 0.01) continue;
     const closePrice = stockClosePriceOnOrBefore(params.priceByKey, key, dateKey);
@@ -810,12 +820,66 @@ function stockMarketValueAt(params: {
       marketValue += positionValue;
       positionCount += 1;
     }
+    if (position.quantity > 0.000001) {
+      heldPositions.push({ key, market: position.market, stockCode: position.stockCode, quantity: position.quantity });
+    }
   }
 
   return {
     marketValue: roundMoney(marketValue),
     positionCount,
+    heldPositions,
   };
+}
+
+/**
+ * A stock position's snapshot value uses the close on (or before) the snapshot
+ * date. When the cache lacks the close on the snapshot's last trading day the
+ * valuation silently degrades to an older close (or to cost), so flag it the
+ * same way held funds flag missing NAVs. Only CN stocks have a public close
+ * data source, so other markets are never flagged.
+ */
+function lastStockTradingDateOnOrBefore(dateKey: string) {
+  let candidate = dateKey;
+  for (let index = 0; index < 31; index += 1) {
+    if (!isTradingClosedDate(candidate, "cn_fund")) return candidate;
+    const date = new Date(`${candidate}T00:00:00.000Z`);
+    date.setUTCDate(date.getUTCDate() - 1);
+    candidate = ymd(date);
+  }
+  return null;
+}
+
+function detectMissingStockPrices(params: {
+  snapshotDate: Date;
+  heldPositions: Array<{ key: string; market: string; stockCode: string }>;
+  priceByKey: Map<string, Array<{ date: string; price: number }>>;
+  stockNameByKey: Map<string, string | null>;
+  accountByKey: Map<string, { id: string; name: string }>;
+  todayKey: string;
+  missingByKey: Map<string, InvestmentProfitMissingStockPrice>;
+}) {
+  const snapshotDateKey = ymd(params.snapshotDate);
+  if (snapshotDateKey > params.todayKey) return;
+  const expectedDate = lastStockTradingDateOnOrBefore(snapshotDateKey);
+  if (!expectedDate || expectedDate >= params.todayKey) return;
+  for (const position of params.heldPositions) {
+    if (position.market !== "CN") continue;
+    if (params.priceByKey.get(position.key)?.some((row) => row.date === expectedDate)) continue;
+    const account = params.accountByKey.get(position.key);
+    if (!account) continue;
+    const key = `${position.key}|${expectedDate}`;
+    if (!params.missingByKey.has(key)) {
+      params.missingByKey.set(key, {
+        market: position.market,
+        stockCode: position.stockCode,
+        stockName: params.stockNameByKey.get(position.key) ?? null,
+        date: expectedDate,
+        accountId: account.id,
+        accountName: account.name,
+      });
+    }
+  }
 }
 
 function stockCashFlows(params: {
@@ -849,20 +913,24 @@ async function applyStockValuationProfit(params: {
   buckets: Bucket[];
   accounts: StockAccount[];
   txRows: StockTxRow[];
-}) {
-  if (params.accounts.length === 0 || params.txRows.length === 0 || params.buckets.length === 0) return;
+}): Promise<InvestmentProfitMissingStockPrice[]> {
+  if (params.accounts.length === 0 || params.txRows.length === 0 || params.buckets.length === 0) return [];
 
   const accountIds = new Set(params.accounts.map((account) => account.id));
   const txRows = params.txRows.filter((row) => accountIds.has(row.stockAccountId) && row.stockCode.trim());
-  if (txRows.length === 0) return;
+  if (txRows.length === 0) return [];
 
   const pricePairs = new Map<string, { market: string; stockCode: string }>();
+  const stockNameByKey = new Map<string, string | null>();
   for (const row of txRows) {
     const market = row.market.trim();
     const stockCode = row.stockCode.trim();
     if (!market || !stockCode) continue;
     const key = stockPriceKey(market, stockCode);
-    if (!pricePairs.has(key)) pricePairs.set(key, { market, stockCode });
+    if (!pricePairs.has(key)) {
+      pricePairs.set(key, { market, stockCode });
+      stockNameByKey.set(key, row.stockName?.trim() || null);
+    }
   }
   const priceFilters = Array.from(pricePairs.values());
   const maxBoundary = params.buckets[params.buckets.length - 1]!.end;
@@ -884,14 +952,36 @@ async function applyStockValuationProfit(params: {
     priceByKey.set(key, list);
   }
 
+  // A held stock can span several stock accounts; surface the first account
+  // holding it so the badge can say where the position lives.
+  const accountByKey = new Map<string, { id: string; name: string }>();
+  for (const row of txRows) {
+    const key = stockPriceKey(row.market.trim(), row.stockCode.trim());
+    if (!accountByKey.has(key)) {
+      const account = params.accounts.find((item) => item.id === row.stockAccountId);
+      if (account) accountByKey.set(key, { id: account.id, name: account.name });
+    }
+  }
+
   const todayKey = ymd(new Date());
   const today = new Date(`${todayKey}T00:00:00.000Z`);
+  const missingPriceByKey = new Map<string, InvestmentProfitMissingStockPrice>();
   let previousSnapshot = 0;
   for (const [index, bucket] of params.buckets.entries()) {
     if (index === 0) {
       const baseline = new Date(bucket.start);
       baseline.setUTCDate(baseline.getUTCDate() - 1);
-      previousSnapshot = stockMarketValueAt({ txRows, priceByKey, date: baseline }).marketValue;
+      const baselineSnapshot = stockMarketValueAt({ txRows, priceByKey, date: baseline });
+      previousSnapshot = baselineSnapshot.marketValue;
+      detectMissingStockPrices({
+        snapshotDate: baseline,
+        heldPositions: baselineSnapshot.heldPositions,
+        priceByKey,
+        stockNameByKey,
+        accountByKey,
+        todayKey,
+        missingByKey: missingPriceByKey,
+      });
     }
 
     if (ymd(bucket.start) > todayKey) continue;
@@ -904,7 +994,20 @@ async function applyStockValuationProfit(params: {
     const row = params.rows.get(bucket.key);
     if (row) addProfit(row, "stock", profit, Math.max(1, current.positionCount, flow.count));
     previousSnapshot = current.marketValue;
+    detectMissingStockPrices({
+      snapshotDate: effectiveEnd,
+      heldPositions: current.heldPositions,
+      priceByKey,
+      stockNameByKey,
+      accountByKey,
+      todayKey,
+      missingByKey: missingPriceByKey,
+    });
   }
+
+  return Array.from(missingPriceByKey.values()).sort((a, b) =>
+    a.date.localeCompare(b.date) || a.stockCode.localeCompare(b.stockCode, "zh-Hans-CN"),
+  );
 }
 
 function propertySpend(row: { action: PropertyTransactionAction | string; amount: unknown; fee?: unknown | null; tax?: unknown | null }) {
@@ -1228,12 +1331,88 @@ function findFirstDataYear(params: {
   return years.length ? Math.min(...years) : params.currentYear;
 }
 
+// Day/month buckets only load a date window of property/event rows, so their
+// in-memory rows cannot reveal the household's true first investment year.
+// These cheap min-date aggregates keep the date picker's year options aligned
+// with the full investment history (fund / stock / property / legacy and
+// statistic TxRecord events).
+async function findFirstDataYearFromDb(params: {
+  ctx: HouseholdContext;
+  snapshotAccountIds: Set<string>;
+  stockAccountIds: string[];
+  propertyAccountIds: string[];
+  propertyActions: PropertyTransactionAction[];
+  investmentAccountIds: string[];
+  currentYear: number;
+}) {
+  const [fundAgg, stockAgg, propertyAgg, eventAgg] = await Promise.all([
+    params.snapshotAccountIds.size > 0
+      ? prisma.fundTransaction.aggregate({
+          where: {
+            householdId: params.ctx.householdId,
+            deletedAt: null,
+            fundAccountId: { in: Array.from(params.snapshotAccountIds) },
+          },
+          _min: { applyDate: true, confirmDate: true },
+        })
+      : null,
+    params.stockAccountIds.length > 0
+      ? prisma.stockTransaction.aggregate({
+          where: {
+            householdId: params.ctx.householdId,
+            deletedAt: null,
+            stockAccountId: { in: params.stockAccountIds },
+          },
+          _min: { tradeDate: true },
+        })
+      : null,
+    params.propertyAccountIds.length > 0 && params.propertyActions.length > 0
+      ? prisma.propertyTransaction.aggregate({
+          where: {
+            householdId: params.ctx.householdId,
+            deletedAt: null,
+            accountId: { in: params.propertyAccountIds },
+            action: { in: params.propertyActions },
+          },
+          _min: { tradeDate: true, settlementDate: true },
+        })
+      : null,
+    params.investmentAccountIds.length > 0
+      ? prisma.txRecord.aggregate({
+          where: {
+            ...params.ctx.hidFilter,
+            deletedAt: null,
+            type: TransactionType.investment,
+            OR: [
+              { accountId: { in: params.investmentAccountIds } },
+              { toAccountId: { in: params.investmentAccountIds } },
+            ],
+          },
+          _min: { date: true },
+        })
+      : null,
+  ]);
+  const years = [
+    fundAgg?._min.applyDate?.getUTCFullYear(),
+    fundAgg?._min.confirmDate?.getUTCFullYear(),
+    stockAgg?._min.tradeDate?.getUTCFullYear(),
+    propertyAgg?._min.tradeDate?.getUTCFullYear(),
+    propertyAgg?._min.settlementDate?.getUTCFullYear(),
+    eventAgg?._min.date?.getUTCFullYear(),
+  ].filter((year): year is number => typeof year === "number" && Number.isInteger(year) && year >= 1900 && year <= params.currentYear);
+  return years.length ? Math.min(...years) : params.currentYear;
+}
+
 export async function loadInvestmentProfitReport(
   ctx: HouseholdContext,
   params: {
     period: InvestmentProfitPeriod;
     year: number;
     month: number;
+    /** Year-period only: start the yearly buckets from this year ("从哪一年起"). */
+    startYear?: number | null;
+    /** Also resolve the household's first investment year for day/month periods (used by the date picker). */
+    includeFirstDataYear?: boolean;
     accountIds?: string[] | null;
     tagIds?: string[] | null;
     fundValuationMode?: FundValuationMode;
@@ -1498,7 +1677,7 @@ export async function loadInvestmentProfitReport(
     ...wealthEntries.flatMap((entry) => [entry.id, entry.entryId]),
   ]);
 
-  const firstYear = params.period === "year"
+  const dataFirstYear = params.period === "year"
     ? findFirstDataYear({
         currentYear,
         txRows: fundTxRows,
@@ -1506,6 +1685,24 @@ export async function loadInvestmentProfitReport(
         propertyTxRows: scopedPropertyTxRows,
         eventRows: [...txEntries, ...fundStatisticEntries, ...wealthEntries],
       })
+    : params.includeFirstDataYear
+      ? await findFirstDataYearFromDb({
+          ctx,
+          snapshotAccountIds,
+          stockAccountIds,
+          propertyAccountIds,
+          propertyActions,
+          investmentAccountIds,
+          currentYear,
+        })
+      : params.year;
+  // Year buckets start at the household's first investment year; an explicit
+  // startYear ("从哪一年起") only moves the bucket start later. Clamping to
+  // [dataFirstYear, currentYear] keeps the baseline chain valid: the first
+  // bucket baselines off the (startYear - 1) year-end snapshot, and years
+  // before startYear are excluded from rows/totals.
+  const firstYear = params.period === "year"
+    ? Math.min(currentYear, Math.max(dataFirstYear, params.startYear ?? dataFirstYear))
     : params.year;
   const buckets = buildBuckets(params.period, params.year, params.month, currentYear, firstYear, language);
   const rows = new Map(buckets.map((bucket) => [bucket.key, createRow(bucket)]));
@@ -1517,7 +1714,7 @@ export async function loadInvestmentProfitReport(
     txRows: fundTxRows,
     valuationMode: params.fundValuationMode,
   });
-  await applyStockValuationProfit({
+  const missingStockPrices = await applyStockValuationProfit({
     rows,
     buckets,
     accounts: stockAccounts,
@@ -1599,9 +1796,11 @@ export async function loadInvestmentProfitReport(
     rows: orderedRows,
     totals,
     eventCount: events.length,
+    dataFirstYear,
     start: ymd(periodStart(params.period, params.year, params.month, firstYear)),
     end: ymd(buckets[buckets.length - 1]?.end ?? new Date()),
     baselineDate: ymd(baselineDateFor(params.period, params.year, params.month, firstYear)),
     missingNavs,
+    missingStockPrices,
   };
 }

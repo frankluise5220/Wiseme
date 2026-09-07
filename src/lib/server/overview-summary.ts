@@ -60,6 +60,7 @@ export type CreditAccountRow = AccountListRow & {
   availableLimit: number;
   billingDay: number | null;
   repaymentDay: number | null;
+  repaymentOffsetDays: number | null;
   creditBillMode: "separate" | "consolidated";
   currentAmount: number;
   currentBill: number;
@@ -278,6 +279,7 @@ export async function computeOverviewSummary(
       creditLimit: true,
       billingDay: true,
       repaymentDay: true,
+      repaymentOffsetDays: true,
       creditBillMode: true,
       institutionId: true,
       numberMasked: true,
@@ -498,6 +500,7 @@ export async function computeOverviewSummary(
       currentAmount,
       billingDay: storageAccount.billingDay,
       repaymentDay: storageAccount.repaymentDay,
+      repaymentOffsetDays: storageAccount.repaymentOffsetDays,
       creditBillMode: isConsolidatedGroup ? "consolidated" : storageAccount.creditBillMode,
       currentBill: toNumber(cycle?.effectiveBill),
       paid: toNumber(cycle?.paid),

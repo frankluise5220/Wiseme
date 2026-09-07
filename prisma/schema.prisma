@@ -28,11 +28,13 @@ model Account {
   isPlaceholder                                              Boolean                     @default(false)
   isConsumerLoan                                             Boolean                     @default(false)
   loanType                                                   LoanType?
+  collateralAssetId                                          String?
   investProductType                                          FundProductType?
   fixedAssetType                                            FixedAssetType?
   creditLimit                                                Decimal?                    @db.Decimal(18, 2)
   billingDay                                                 Int?
   repaymentDay                                               Int?
+  repaymentOffsetDays                                        Int?
   creditBillMode                                             CreditBillMode              @default(separate)
   numberMasked                                               String?
   routeKey                                                   String?                     @unique

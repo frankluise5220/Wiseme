@@ -78,6 +78,15 @@ function parseDay(raw: unknown) {
   return n;
 }
 
+function parseOffsetDays(raw: unknown) {
+  if (raw === undefined) return undefined;
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 1 || n > 365) return undefined;
+  return n;
+}
+
 function parseDateOnly(raw: unknown) {
   const value = String(raw ?? "").trim();
   if (!value) return new Date();
@@ -194,12 +203,21 @@ export async function POST(req: NextRequest) {
       : null;
     const requestedBillingDay = parseDay(body.billingDay);
     const requestedRepaymentDay = parseDay(body.repaymentDay);
+    const requestedRepaymentOffsetDays = parseOffsetDays(body.repaymentOffsetDays);
     const billingDay = isCreditLike
       ? requestedBillingDay ?? creditDefaults?.billingDay ?? null
       : null;
-    const repaymentDay = isCreditLike
+    let repaymentDay = isCreditLike
       ? requestedRepaymentDay ?? creditDefaults?.repaymentDay ?? null
       : null;
+    let repaymentOffsetDays = isCreditLike
+      ? requestedRepaymentOffsetDays ?? creditDefaults?.repaymentOffsetDays ?? null
+      : null;
+    if (repaymentOffsetDays != null && repaymentOffsetDays > 0) {
+      repaymentDay = null;
+    } else if (repaymentDay != null && repaymentDay > 0) {
+      repaymentOffsetDays = null;
+    }
     const creditLimit = isCreditLike
       ? String(body.creditLimit ?? "").trim() || creditDefaults?.creditLimit || null
       : null;
@@ -250,6 +268,7 @@ export async function POST(req: NextRequest) {
           isActive: true,
           billingDay,
           repaymentDay,
+          repaymentOffsetDays,
           creditLimit,
           creditBillMode,
           numberMasked,
@@ -311,6 +330,7 @@ export async function POST(req: NextRequest) {
         institutionId: account.institutionId,
         billingDay: account.billingDay,
         repaymentDay: account.repaymentDay,
+        repaymentOffsetDays: account.repaymentOffsetDays,
         creditBillMode: account.creditBillMode,
       });
       const institutionCards = account.institutionId
@@ -407,14 +427,21 @@ export async function PUT(req: NextRequest) {
     if (nextKind === "bank_credit") {
       data.billingDay = body.billingDay !== undefined ? parseDay(body.billingDay) : existing.billingDay;
       data.repaymentDay = body.repaymentDay !== undefined ? parseDay(body.repaymentDay) : existing.repaymentDay;
+      data.repaymentOffsetDays = body.repaymentOffsetDays !== undefined ? parseOffsetDays(body.repaymentOffsetDays) : existing.repaymentOffsetDays;
       data.creditLimit = body.creditLimit !== undefined ? (String(body.creditLimit ?? "").trim() || null) : existing.creditLimit;
       data.numberMasked = body.numberMasked !== undefined ? (String(body.numberMasked ?? "").trim() || null) : existing.numberMasked;
       data.creditBillMode = body.creditBillMode !== undefined
         ? normalizeCreditBillMode(body.creditBillMode)
         : existing.creditBillMode;
+      if (data.repaymentOffsetDays != null && Number(data.repaymentOffsetDays) > 0) {
+        data.repaymentDay = null;
+      } else if (data.repaymentDay != null && Number(data.repaymentDay) > 0) {
+        data.repaymentOffsetDays = null;
+      }
     } else {
       data.billingDay = null;
       data.repaymentDay = null;
+      data.repaymentOffsetDays = null;
       data.creditLimit = null;
       data.numberMasked = accountSupportsNumberMasked(nextKind)
         ? body.numberMasked !== undefined
@@ -520,6 +547,7 @@ export async function PUT(req: NextRequest) {
         nextInstitutionId !== existing.institutionId ||
         (body.billingDay !== undefined && data.billingDay !== existing.billingDay) ||
         (body.repaymentDay !== undefined && data.repaymentDay !== existing.repaymentDay) ||
+        (body.repaymentOffsetDays !== undefined && data.repaymentOffsetDays !== existing.repaymentOffsetDays) ||
         (body.creditBillMode !== undefined && data.creditBillMode !== existing.creditBillMode)
       );
 
@@ -547,6 +575,7 @@ export async function PUT(req: NextRequest) {
         institutionId: updated.institutionId,
         billingDay: updated.billingDay,
         repaymentDay: updated.repaymentDay,
+        repaymentOffsetDays: updated.repaymentOffsetDays,
         creditBillMode: updated.creditBillMode,
       });
       const institutionCards = updated.institutionId

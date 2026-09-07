@@ -9,6 +9,7 @@ import {
   roundLoanMoney,
 } from "@/lib/loan-repayment";
 import { recalcAndSaveAccountBalance } from "@/lib/server/account-balance";
+import { releaseMortgagedAssetsForSettledLoanAccounts } from "@/lib/server/collateral-mortgage";
 import {
   decodeScheduledTaskMemo,
   shouldPreferLoanAutoDebitPlan,
@@ -414,6 +415,9 @@ export async function POST(req: Request) {
               : plan.status,
         },
       });
+
+      // 重算更正后若贷款就此结清，同步解除抵押资产状态
+      await releaseMortgagedAssetsForSettledLoanAccounts(tx, { householdId, debtAccountIds: [plan.accountId] });
     });
 
     for (const balanceAccountId of [plan.accountId, plan.cashAccountId].filter(Boolean) as string[]) {

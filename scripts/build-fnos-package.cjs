@@ -1140,6 +1140,7 @@ start_app () {
   export NODE_ENV=production
   export HOSTNAME=0.0.0.0
   export MMH_DEPLOY_TARGET=fnos
+  export MMH_DATA_DIR="$DATA_DEST"
   export DATABASE_URL="file:$DATA_DEST/mmh.db"
   export PRISMA_SCHEMA_PATH="$SERVER_DIR/prisma/schema.native.prisma"
   (cd "$SERVER_DIR" && "$NODE_BIN" "$SERVER_DIR/scripts/init-sqlite.cjs") >>"$LOG_FILE" 2>&1 || exit 1
@@ -1417,6 +1418,14 @@ const MIGRATIONS = [
     apply(db) {
       db.prepare("UPDATE Account SET kind = 'settlement', loanType = NULL, isConsumerLoan = 0 WHERE kind = 'loan' AND counterpartyId IS NOT NULL AND institutionId IS NULL").run();
       db.prepare("UPDATE Account SET loanType = NULL, isConsumerLoan = 0 WHERE kind = 'settlement'").run();
+    },
+  },
+  {
+    version: "20260907_normalize_counterparty_settlement_accounts",
+    description: "Normalize all legacy counterparty-owned loan accounts to settlement",
+    apply(db) {
+      db.prepare("UPDATE Account SET kind = 'settlement', institutionId = NULL, loanType = NULL, isConsumerLoan = 0 WHERE kind = 'loan' AND counterpartyId IS NOT NULL").run();
+      db.prepare("UPDATE Account SET institutionId = NULL, loanType = NULL, isConsumerLoan = 0 WHERE kind = 'settlement'").run();
     },
   },
   {

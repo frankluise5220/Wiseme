@@ -33,6 +33,7 @@ import {
 import { calcInitialScheduledRunDate, calcNextScheduledRunDate } from "@/lib/scheduled-task-date";
 import { formatDateUtc, toNumber, toStatementMonth } from "@/lib/date-utils";
 import { linkExpenseToFixedAsset } from "@/lib/property/transactions";
+import { releaseMortgagedAssetsForSettledLoanAccounts } from "@/lib/server/collateral-mortgage";
 import { ACTIVE_DEBT_EPSILON } from "@/lib/server/debt-view-data";
 import { assertAccountIdentityUnique } from "@/lib/server/account-identity-unique";
 import { attachEntryTags, replaceEntryTags } from "@/lib/server/entry-tags";
@@ -574,6 +575,12 @@ export async function createDebtTransaction(formData: FormData) {
           where: { id: fixedAssetAssetId },
           data: { mortgageLoanAccountId: debtAccount.id, status: "mortgaged" },
         });
+        // 贷款账户记录当时的抵押物。结清自动解除时只清资产侧标记，这个字段保留，
+        // 已还清的贷款记录仍能表明当时使用的抵押物。
+        await tx.account.update({
+          where: { id: debtAccount.id },
+          data: { collateralAssetId: fixedAssetAssetId },
+        });
         affectedAccountIds.add(fixedAssetAccountId);
       };
       const isCounterpartyDebtAccount = !!debtAccount.counterpartyId && !debtAccount.institutionId;
@@ -973,6 +980,10 @@ export async function createDebtTransaction(formData: FormData) {
             }
           }
         }
+        // 还款/提前还款记录被编辑后，若贷款就此结清，同步解除抵押资产状态
+        if (mode === "repay_out" || mode === "prepay_out") {
+          await releaseMortgagedAssetsForSettledLoanAccounts(tx, { householdId, debtAccountIds: [debtAccount.id] });
+        }
         return;
       }
       const shouldCreateRepaymentPlan =
@@ -1175,6 +1186,11 @@ export async function createDebtTransaction(formData: FormData) {
           accountId: debtAccount.id,
           startDate: formatDateUtc(date),
         };
+      }
+
+      // 还款/提前还款落库后，若贷款就此结清，同步解除抵押资产状态
+      if (mode === "repay_out" || mode === "prepay_out") {
+        await releaseMortgagedAssetsForSettledLoanAccounts(tx, { householdId, debtAccountIds: [debtAccount.id] });
       }
     });
 

@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
-import { ChevronLeft, ChevronRight, Download } from "lucide-react";
+import { Download } from "lucide-react";
 import { TransactionType } from "@prisma/client";
 
 import { InvestmentProfitReport } from "@/components/InvestmentProfitReport";
 import { InvestmentProfitFilterSelect } from "@/components/InvestmentProfitFilterSelect";
+import { InvestmentProfitPeriodPicker } from "@/components/InvestmentProfitPeriodPicker";
 import { MissingFundNavPrompt } from "@/components/MissingFundNavPrompt";
+import { MissingStockPricePrompt } from "@/components/MissingStockPricePrompt";
 import { IncomeExpenseReportClient } from "@/components/IncomeExpenseReportClient";
 import { buildCategorySmartSelectOptions } from "@/components/categorySmartSelect";
 import { ReportTransactionEditHost } from "@/components/ReportTransactionEditHost";
@@ -135,12 +137,14 @@ function buildInvestmentFilterHref(
   profitYear: number,
   profitMonth: number,
   filters: { userIds: string[]; institutionIds: string[]; accountIds: string[] },
+  profitStartYear?: number | null,
 ) {
   const query = new URLSearchParams();
   query.set("report", "investment-profit");
   query.set("profitPeriod", profitPeriod);
   query.set("profitYear", String(profitYear));
   query.set("profitMonth", String(profitMonth));
+  if (profitPeriod === "year" && profitStartYear) query.set("profitStartYear", String(profitStartYear));
   if (filters.userIds.length) query.set("userIds", filters.userIds.join(","));
   if (filters.institutionIds.length) query.set("institutionIds", filters.institutionIds.join(","));
   if (filters.accountIds.length) query.set("investmentAccounts", filters.accountIds.join(","));
@@ -155,15 +159,6 @@ function buildStatisticsHref() {
 function parseMonthNumber(value: string | undefined, fallback: number) {
   const month = Number(String(value ?? "").trim());
   return Number.isInteger(month) && month >= 1 && month <= 12 ? month : fallback;
-}
-
-function shiftProfitWindow(period: InvestmentProfitPeriod, year: number, month: number, delta: number) {
-  if (period === "day") {
-    const shifted = new Date(Date.UTC(year, month - 1 + delta, 1));
-    return { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth() + 1 };
-  }
-  if (period === "month") return { year: year + delta, month };
-  return { year, month };
 }
 
 export default async function ReportsPage({
@@ -240,6 +235,8 @@ export default async function ReportsPage({
     typeof params.profitMonth === "string" ? params.profitMonth : undefined,
     currentMonth,
   );
+  // Yearly view only: "从哪一年起" for the investment-profit report.
+  const profitStartYear = parseYear(typeof params.profitStartYear === "string" ? params.profitStartYear : undefined);
 
 
   const commonData = await loadCommonData(ctx.hidFilter);
@@ -371,7 +368,7 @@ export default async function ReportsPage({
     userIds: selectedUserIds,
     institutionIds: selectedInstitutionIds,
     accountIds: selectedInvestmentAccountIds,
-  });
+  }, profitStartYear);
   const currentStockHref = buildReportHref("stock-holdings", undefined, undefined, undefined, PROFIT_SCOPE_ALL);
   const currentFundHref = buildReportHref("fund-holdings", undefined, undefined, undefined, PROFIT_SCOPE_ALL);
   const currentStatisticsHref = buildStatisticsHref();
@@ -395,32 +392,37 @@ export default async function ReportsPage({
       period: profitPeriod,
       year: profitYear,
       month: profitMonth,
+      startYear: profitPeriod === "year" ? profitStartYear : null,
+      includeFirstDataYear: true,
       accountIds: scopedInvestmentAccountIds,
       fundValuationMode: "daily_nav_delta",
     }, language);
+    // The date picker offers the household's full investment-history years.
+    // An explicit start year only takes effect on the yearly view and is
+    // clamped to the data's first year (loader clamps too; keep select in sync).
+    const effectiveProfitStartYear = profitPeriod === "year" && profitStartYear
+      ? Math.max(profitStartYear, investmentReport.dataFirstYear)
+      : null;
+    const pickerYears = Array.from(
+      { length: currentYear - investmentReport.dataFirstYear + 1 },
+      (_, index) => investmentReport.dataFirstYear + index,
+    );
+    const investmentBaseParams: Record<string, string> = {
+      report: "investment-profit",
+      profitPeriod,
+      profitYear: String(profitYear),
+      profitMonth: String(profitMonth),
+    };
+    if (effectiveProfitStartYear) investmentBaseParams.profitStartYear = String(effectiveProfitStartYear);
+    if (selectedUserIds.length) investmentBaseParams.userIds = selectedUserIds.join(",");
+    if (selectedInstitutionIds.length) investmentBaseParams.institutionIds = selectedInstitutionIds.join(",");
+    if (selectedInvestmentAccountIds.length) investmentBaseParams.investmentAccounts = selectedInvestmentAccountIds.join(",");
     const periodHref = (period: InvestmentProfitPeriod) =>
       buildInvestmentFilterHref(period, profitYear, profitMonth, {
         userIds: selectedUserIds,
         institutionIds: selectedInstitutionIds,
         accountIds: selectedInvestmentAccountIds,
-      });
-    const previousWindow = shiftProfitWindow(profitPeriod, profitYear, profitMonth, -1);
-    const nextWindow = shiftProfitWindow(profitPeriod, profitYear, profitMonth, 1);
-    const previousHref = buildInvestmentFilterHref(profitPeriod, previousWindow.year, previousWindow.month, {
-      userIds: selectedUserIds,
-      institutionIds: selectedInstitutionIds,
-      accountIds: selectedInvestmentAccountIds,
-    });
-    const nextHref = buildInvestmentFilterHref(profitPeriod, nextWindow.year, nextWindow.month, {
-      userIds: selectedUserIds,
-      institutionIds: selectedInstitutionIds,
-      accountIds: selectedInvestmentAccountIds,
-    });
-    const rangeLabel = profitPeriod === "day"
-      ? t("reports.rangeLabelDay", { year: profitYear, month: profitMonth })
-      : profitPeriod === "month"
-        ? t("reports.rangeLabelMonth", { year: profitYear })
-        : t("reports.rangeLabelYear", { year: currentYear });
+      }, effectiveProfitStartYear);
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <header className="page-header">
@@ -455,27 +457,14 @@ export default async function ReportsPage({
                     </Link>
                   ))}
                 </div>
-                {profitPeriod !== "year" ? (
-                  <Link
-                    href={previousHref}
-                    scroll={false}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-800"
-                    title={profitPeriod === "day" ? t("reports.prevMonth") : t("reports.prevYear")}
-                  >
-                    <ChevronLeft className="h-3.5 w-3.5" />
-                  </Link>
-                ) : null}
-                <span className="min-w-24 text-center text-xs font-medium text-slate-500">{rangeLabel}</span>
-                {profitPeriod !== "year" ? (
-                  <Link
-                    href={nextHref}
-                    scroll={false}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-800"
-                    title={profitPeriod === "day" ? t("reports.nextMonth") : t("reports.nextYear")}
-                  >
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  </Link>
-                ) : null}
+                <InvestmentProfitPeriodPicker
+                  period={profitPeriod}
+                  year={profitYear}
+                  month={profitMonth}
+                  startYear={effectiveProfitStartYear}
+                  availableYears={pickerYears}
+                  baseParams={investmentBaseParams}
+                />
               </div>
               <InvestmentProfitFilterSelect
                 selectedUserIds={selectedUserIds}
@@ -484,9 +473,10 @@ export default async function ReportsPage({
                 allUsers={investmentFilterUsers}
                 allInstitutions={investmentFilterInstitutions}
                 allAccounts={investmentFilterAccounts}
-                baseParams={{ report: "investment-profit", profitPeriod, profitYear: String(profitYear), profitMonth: String(profitMonth) }}
+                baseParams={investmentBaseParams}
               />
               <MissingFundNavPrompt items={investmentReport.missingNavs} className="ml-auto" />
+              <MissingStockPricePrompt items={investmentReport.missingStockPrices} className={investmentReport.missingNavs.length > 0 ? "" : "ml-auto"} />
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto pr-1">
               <InvestmentProfitReport

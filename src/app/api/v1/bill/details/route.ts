@@ -161,6 +161,7 @@ export async function GET(req: Request) {
         kind: true,
         billingDay: true,
         repaymentDay: true,
+        repaymentOffsetDays: true,
         creditBillMode: true,
       },
     });
@@ -210,6 +211,7 @@ export async function GET(req: Request) {
             account.billingDay,
             account.repaymentDay ?? null,
             new Date(),
+            account.repaymentOffsetDays,
           );
           return computed
             ? {

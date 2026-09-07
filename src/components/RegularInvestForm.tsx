@@ -924,6 +924,11 @@ export function RegularInvestForm({
         : (formData.fundName.trim() || formData.fundCode.trim() || scheduledTaskTypeLabel(formData.taskType));
       const submitPlanName = formData.planName.trim() || (mode === "create" ? submitFundName : "");
       const submitCashAccountId = isOrdinaryTask ? "" : formData.cashAccountId || "";
+      // Loan repayment amount is schedule-derived and read-only in edit mode.
+      // Do not echo it back: the server keeps the repayment schedule as the
+      // source of truth, and a stale echo (plan amount recalculated after this
+      // page loaded) would trip the amount guard and block date-only edits.
+      const suppressAmountOnEdit = mode === "edit" && formData.taskType === "loan_repayment";
 
       if (mode === "edit" && editData) {
         let savedPlan: unknown;
@@ -941,7 +946,7 @@ export function RegularInvestForm({
           fd.set("categoryId", isOrdinaryTask ? formData.categoryId : "");
           fd.set("categoryName", isOrdinaryTask ? formData.categoryName.trim() : "");
           fd.set("note", isOrdinaryTask ? formData.note.trim() : "");
-          fd.set("amount", String(finalAmount));
+          if (!suppressAmountOnEdit) fd.set("amount", String(finalAmount));
           fd.set("intervalUnit", effectiveIntervalUnit);
           fd.set("intervalValue", effectiveIntervalValue);
           fd.set("nextRunDate", mode === "edit" ? formData.nextRunDate : formData.startDate);
@@ -975,7 +980,8 @@ export function RegularInvestForm({
             categoryId: isOrdinaryTask ? formData.categoryId || null : null,
             categoryName: isOrdinaryTask ? formData.categoryName.trim() || null : null,
             note: isOrdinaryTask ? formData.note.trim() || null : null,
-            amount: finalAmount,
+            // Omitted (undefined) for loan edits — see suppressAmountOnEdit.
+            amount: suppressAmountOnEdit ? undefined : finalAmount,
             intervalUnit: effectiveIntervalUnit,
             intervalValue: parseInt(effectiveIntervalValue) || 1,
             executionDay: effectiveExecutionDay,

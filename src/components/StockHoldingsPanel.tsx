@@ -5,6 +5,7 @@ import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Pencil, Refresh
 
 import { formatCurrencyMoney, formatMoney, formatPercent } from "@/lib/format";
 import { pnlClassFromRedUp } from "@/lib/client/colors";
+import { showBlockingLoading } from "@/lib/client/blocking-loading";
 import { showConfirmDialog } from "@/lib/client/confirm-dialog";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { useI18n } from "@/lib/i18n";
@@ -406,6 +407,7 @@ export function StockHoldingsPanel({
     if (!ok) return;
     setBatchDeleting(true);
     setDeleteMessage(t("stockPanel.deleting"));
+    const closeBlocking = showBlockingLoading(t("common.batchDeleting"));
     try {
       const res = await fetch(`/api/v1/stocks/transactions?${new URLSearchParams({ ids: ids.join(",") }).toString()}`, {
         method: "DELETE",
@@ -429,6 +431,7 @@ export function StockHoldingsPanel({
     } catch {
       setDeleteMessage(t("stockPanel.error.batchDeleteFailed"));
     } finally {
+      closeBlocking();
       setBatchDeleting(false);
     }
   }

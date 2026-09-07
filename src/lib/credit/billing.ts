@@ -266,7 +266,15 @@ function compareMonth(a: string, b: string) {
   return a.localeCompare(b);
 }
 
-function dueForCycleEnd(periodEnd: Date, billingDay: number, repaymentDay: number | null | undefined) {
+function dueForCycleEnd(
+  periodEnd: Date,
+  billingDay: number,
+  repaymentDay: number | null | undefined,
+  repaymentOffsetDays?: number | null,
+) {
+  if (repaymentOffsetDays != null && repaymentOffsetDays > 0) {
+    return addDaysUtc(periodEnd, repaymentOffsetDays);
+  }
   if (!repaymentDay || repaymentDay < 1) return null;
   const dueMonthOffset = repaymentDay <= billingDay ? 1 : 0;
   const dueMonth = periodEnd.getUTCMonth() + dueMonthOffset;
@@ -311,6 +319,7 @@ export function cycleForStatementMonth(
   billingDay: number,
   repaymentDay: number | null | undefined,
   now: Date,
+  repaymentOffsetDays?: number | null,
 ): CreditBillCycleDefinition | null {
   const parsed = parseStatementMonth(statementMonth);
   if (!parsed) return null;
@@ -319,7 +328,7 @@ export function cycleForStatementMonth(
   const start = addDaysUtc(previousEnd, 1);
   const today = startOfDayUtc(now);
   const isCurrentCycle = today.getTime() >= start.getTime() && today.getTime() < addDaysUtc(end, 1).getTime();
-  const due = dueForCycleEnd(end, billingDay, repaymentDay);
+  const due = dueForCycleEnd(end, billingDay, repaymentDay, repaymentOffsetDays);
 
   return { start, end, due, today, isCurrentCycle, billingDay };
 }
@@ -328,6 +337,7 @@ export function buildCreditBillCycleDefinitionsFromBillingDayRules(params: {
   months: string[];
   billingDayRules: readonly CreditCardBillingDayRule[];
   repaymentDay?: number | null;
+  repaymentOffsetDays?: number | null;
   now: Date;
   fallbackBillingDay?: number | null;
 }) {
@@ -373,7 +383,7 @@ export function buildCreditBillCycleDefinitionsFromBillingDayRules(params: {
     definitions.set(statementMonth, {
       start,
       end,
-      due: dueForCycleEnd(end, activeRule.billingDay, params.repaymentDay),
+      due: dueForCycleEnd(end, activeRule.billingDay, params.repaymentDay, params.repaymentOffsetDays),
       today,
       isCurrentCycle,
       billingDay: activeRule.billingDay,
@@ -387,6 +397,7 @@ export function cycleForStatementMonthWithBillingDayRules(params: {
   statementMonth: string;
   billingDayRules: readonly CreditCardBillingDayRule[];
   repaymentDay?: number | null;
+  repaymentOffsetDays?: number | null;
   now: Date;
   fallbackBillingDay?: number | null;
 }) {
@@ -394,6 +405,7 @@ export function cycleForStatementMonthWithBillingDayRules(params: {
     months: [params.statementMonth],
     billingDayRules: params.billingDayRules,
     repaymentDay: params.repaymentDay,
+    repaymentOffsetDays: params.repaymentOffsetDays,
     now: params.now,
     fallbackBillingDay: params.fallbackBillingDay,
   }).get(params.statementMonth) ?? null;
@@ -427,17 +439,18 @@ export function fillMissingCreditBillSummaries(params: {
   summaryByMonth: Map<string, CreditBillSummary>;
   billingDay: number;
   repaymentDay?: number | null;
+  repaymentOffsetDays?: number | null;
   now: Date;
   cycleByMonth?: ReadonlyMap<string, CreditBillCycleDefinition>;
 }) {
-  const { months, summaryByMonth, billingDay, repaymentDay, now, cycleByMonth } = params;
+  const { months, summaryByMonth, billingDay, repaymentDay, repaymentOffsetDays, now, cycleByMonth } = params;
 
   return months
     .map((month) => {
       const existing = summaryByMonth.get(month);
       if (existing) return existing;
 
-      const base = cycleByMonth?.get(month) ?? cycleForStatementMonth(month, billingDay, repaymentDay ?? null, now);
+      const base = cycleByMonth?.get(month) ?? cycleForStatementMonth(month, billingDay, repaymentDay ?? null, now, repaymentOffsetDays);
       if (!base) return null;
 
       return {
@@ -531,6 +544,7 @@ export function mergeCreditBillSummariesWithCascade(
 export function buildCreditCardCyclePersistRows(params: {
   billingDay: number;
   repaymentDay?: number | null;
+  repaymentOffsetDays?: number | null;
   months: CreditBillCascadeRow[];
   summaryByMonth: ReadonlyMap<string, CreditBillSummary>;
   effectiveBillByMonth: Map<string, number>;
@@ -542,6 +556,7 @@ export function buildCreditCardCyclePersistRows(params: {
   const {
     billingDay,
     repaymentDay,
+    repaymentOffsetDays,
     months,
     summaryByMonth,
     effectiveBillByMonth,
@@ -554,7 +569,7 @@ export function buildCreditCardCyclePersistRows(params: {
   const rows = months
     .map((row) => {
       const summary = summaryByMonth.get(row.month);
-      const cycle = summary ?? cycleByMonth?.get(row.month) ?? cycleForStatementMonth(row.month, billingDay, repaymentDay ?? null, now);
+      const cycle = summary ?? cycleByMonth?.get(row.month) ?? cycleForStatementMonth(row.month, billingDay, repaymentDay ?? null, now, repaymentOffsetDays);
       if (!cycle) return null;
 
       const effectiveBill = effectiveBillByMonth.get(row.month) ?? row.bill;

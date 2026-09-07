@@ -46,7 +46,7 @@ const RESTORE_FILE_PICKER_TYPES = (t: I18nT) => [
   {
     description: t("settings.database.backupFilePickerDesc"),
     accept: {
-      "application/json": ["mmhbackup"],
+      "application/json": [".mmhbackup"],
     },
   },
 ];
@@ -103,6 +103,55 @@ type RestoreProgressState = {
   label: string;
   detail?: string;
 };
+
+type AutoBackupFrequencyType = "daily" | "weekly" | "interval";
+
+type AutoBackupConfig = {
+  enabled: boolean;
+  frequencyType: AutoBackupFrequencyType;
+  time: string;
+  weekday: number;
+  everyHours: number;
+  scope: "system" | "household";
+  path: string;
+  keepCount: number;
+};
+
+type AutoBackupStatus = {
+  lastRunAt: string | null;
+  lastRunOk: boolean | null;
+  lastError: string | null;
+  nextRunAt: string | null;
+};
+
+type AutoBackupDiskInfo = {
+  freeBytes?: number;
+  totalBytes?: number;
+  free?: string;
+};
+
+type AutoBackupResponse = {
+  ok?: boolean;
+  error?: string;
+  data?: {
+    config?: AutoBackupConfig;
+    status?: AutoBackupStatus;
+    capabilities?: {
+      systemBackup?: boolean;
+      defaultDir?: string;
+      defaultDisk?: AutoBackupDiskInfo | null;
+    };
+    disk?: AutoBackupDiskInfo | null;
+    result?: { files?: string[] };
+  };
+};
+
+function formatAutoBackupTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 
 type RestoreTask = {
   id: string;
@@ -202,13 +251,13 @@ async function saveDataBackup(credentials: SensitiveOperationCredentials, t: I18
   const blob = await res.blob();
   const fileName =
     filenameFromDisposition(res.headers.get("content-disposition")) ||
-    `mmh-backup-${Date.now()}.mmh-backup`;
+    `mmh-backup-${Date.now()}.mmhbackup`;
   const savePicker = (window as WindowWithFilePickers).showSaveFilePicker;
   if (savePicker) {
     try {
       const handle = await savePicker({
         suggestedName: fileName,
-        types: [{ description: t("settings.database.backupFileDesc"), accept: { "application/json": [".mmh-backup"] } }],
+        types: [{ description: t("settings.database.backupFileDesc"), accept: { "application/json": [".mmhbackup"] } }],
       });
       const writable = await handle.createWritable();
       await writable.write(blob);
@@ -539,6 +588,17 @@ export default function DatabaseSettingsPage() {
   const [cacheRefreshMessage, setCacheRefreshMessage] = useState("");
   const [cacheRefreshError, setCacheRefreshError] = useState("");
 
+  const [autoBackup, setAutoBackup] = useState<AutoBackupConfig | null>(null);
+  const [autoBackupStatus, setAutoBackupStatus] = useState<AutoBackupStatus | null>(null);
+  const [autoBackupSystemSupported, setAutoBackupSystemSupported] = useState(true);
+  const [autoBackupDefaultDir, setAutoBackupDefaultDir] = useState("");
+  const [autoBackupDisk, setAutoBackupDisk] = useState<AutoBackupDiskInfo | null>(null);
+  const [autoBackupLoading, setAutoBackupLoading] = useState(true);
+  const [autoBackupSaving, setAutoBackupSaving] = useState(false);
+  const [autoBackupRunning, setAutoBackupRunning] = useState(false);
+  const [autoBackupMessage, setAutoBackupMessage] = useState("");
+  const [autoBackupError, setAutoBackupError] = useState("");
+
   const canBackup = !backuping && !tableExporting && !restoring;
   const canTableExport = !backuping && !tableExporting && !restoring;
   const canRestore = useMemo(
@@ -556,6 +616,110 @@ export default function DatabaseSettingsPage() {
   useEffect(() => {
     void loadDatabaseSettings();
   }, []);
+
+  useEffect(() => {
+    void loadAutoBackupSettings();
+  }, []);
+
+  async function loadAutoBackupSettings() {
+    setAutoBackupLoading(true);
+    setAutoBackupError("");
+    setAutoBackupMessage("");
+    try {
+      const res = await fetch("/api/v1/settings/backup/auto", { cache: "no-store" });
+      const data = await res.json().catch(() => null) as AutoBackupResponse | null;
+      if (!res.ok || !data?.ok || !data.data) {
+        throw new Error(data?.error ?? t("settings.autoBackup.loadFailed", { error: String(res.status) }));
+      }
+      const capabilities = data.data.capabilities;
+      const systemSupported = capabilities?.systemBackup !== false;
+      setAutoBackupSystemSupported(systemSupported);
+      setAutoBackupDefaultDir(capabilities?.defaultDir ?? "");
+      setAutoBackupDisk(capabilities?.defaultDisk ?? null);
+      const config = data.data.config;
+      if (config) {
+        setAutoBackup({
+          enabled: config.enabled,
+          frequencyType: config.frequencyType,
+          time: config.time,
+          weekday: config.weekday,
+          everyHours: config.everyHours,
+          scope: systemSupported ? config.scope : "household",
+          path: config.path,
+          keepCount: config.keepCount,
+        });
+      } else {
+        setAutoBackup({
+          enabled: false,
+          frequencyType: "daily",
+          time: "02:00",
+          weekday: 1,
+          everyHours: 24,
+          scope: systemSupported ? "system" : "household",
+          path: "",
+          keepCount: 7,
+        });
+      }
+      setAutoBackupStatus(data.data.status ?? null);
+    } catch (error) {
+      setAutoBackupError(error instanceof Error ? error.message : t("settings.autoBackup.loadFailed", { error: "" }));
+    } finally {
+      setAutoBackupLoading(false);
+    }
+  }
+
+  async function saveAutoBackupSettings() {
+    if (!autoBackup) return;
+    setAutoBackupSaving(true);
+    setAutoBackupError("");
+    setAutoBackupMessage("");
+    try {
+      const res = await fetch("/api/v1/settings/backup/auto", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: autoBackup }),
+      });
+      const data = await res.json().catch(() => null) as AutoBackupResponse | null;
+      if (!res.ok || !data?.ok || !data.data) {
+        throw new Error(data?.error ?? t("settings.autoBackup.saveFailed", { error: String(res.status) }));
+      }
+      const saved = data.data.config;
+      if (saved) {
+        setAutoBackup({ ...autoBackup, ...saved, scope: autoBackupSystemSupported ? saved.scope : "household" });
+      }
+      setAutoBackupStatus(data.data.status ?? null);
+      setAutoBackupDisk(data.data.disk ?? null);
+      setAutoBackupMessage(t("settings.autoBackup.saved"));
+    } catch (error) {
+      setAutoBackupError(error instanceof Error ? error.message : t("settings.autoBackup.saveFailed", { error: "" }));
+    } finally {
+      setAutoBackupSaving(false);
+    }
+  }
+
+  async function runAutoBackupNow() {
+    setAutoBackupRunning(true);
+    setAutoBackupError("");
+    setAutoBackupMessage("");
+    try {
+      const res = await fetch("/api/v1/settings/backup/auto?action=run-now", { method: "POST" });
+      const data = await res.json().catch(() => null) as AutoBackupResponse | null;
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error ?? t("settings.autoBackup.runNowFailed", { error: String(res.status) }));
+      }
+      setAutoBackupStatus(data.data?.status ?? null);
+      const files = data.data?.result?.files;
+      if (files && files.length > 0) {
+        setAutoBackupMessage(t("settings.autoBackup.runNowResult", { files: files.join(", ") }));
+      } else {
+        setAutoBackupMessage(t("settings.autoBackup.runNowResult", { files: t("settings.autoBackup.lastRunNone") }));
+      }
+    } catch (error) {
+      setAutoBackupError(error instanceof Error ? error.message : t("settings.autoBackup.runNowFailed", { error: "" }));
+    } finally {
+      setAutoBackupRunning(false);
+    }
+  }
 
   async function loadDatabaseSettings() {
     setOriginsLoading(true);
@@ -904,7 +1068,6 @@ export default function DatabaseSettingsPage() {
     try {
       const [handle] = await openPicker({
         multiple: false,
-        excludeAcceptAllOption: true,
         types: RESTORE_FILE_PICKER_TYPES(t),
       });
       if (!handle) return;
@@ -1082,7 +1245,7 @@ export default function DatabaseSettingsPage() {
             <input
               ref={restoreFileInputRef}
               type="file"
-              accept=".mmh-backup"
+              accept=".mmhbackup"
               className="hidden"
               onChange={(event) => {
                 void applyRestoreFile(event.target.files?.[0] ?? null);
@@ -1098,6 +1261,227 @@ export default function DatabaseSettingsPage() {
               {restoring ? t("settings.database.restoring") : t("settings.database.startRestore")}
             </button>
           </div>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-slate-200 bg-white p-4">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-slate-800">{t("settings.autoBackup.title")}</div>
+            <div className="mt-1 text-xs text-slate-500">
+              {t("settings.autoBackup.desc")}
+            </div>
+          </div>
+          <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 text-xs text-slate-600">
+            <input
+              type="checkbox"
+              checked={autoBackup?.enabled ?? false}
+              disabled={autoBackupLoading}
+              onChange={(event) => {
+                setAutoBackup((prev) => (prev ? { ...prev, enabled: event.target.checked } : prev));
+                setAutoBackupMessage("");
+                setAutoBackupError("");
+              }}
+              className="h-4 w-4 accent-blue-600"
+            />
+            {t("settings.autoBackup.enabled")}
+          </label>
+        </div>
+
+        {autoBackupMessage ? <div className="mt-2 text-xs text-emerald-600">{autoBackupMessage}</div> : null}
+        {autoBackupError ? <div className="mt-2 text-xs text-red-600">{autoBackupError}</div> : null}
+
+        {autoBackup && !autoBackupLoading ? (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div>
+              <div className="text-xs font-medium text-slate-600">{t("settings.autoBackup.frequency")}</div>
+              <select
+                value={autoBackup.frequencyType}
+                onChange={(event) => {
+                  const frequencyType = event.target.value as AutoBackupFrequencyType;
+                  setAutoBackup((prev) => (prev ? { ...prev, frequencyType } : prev));
+                }}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700"
+              >
+                <option value="daily">{t("settings.autoBackup.frequency.daily")}</option>
+                <option value="weekly">{t("settings.autoBackup.frequency.weekly")}</option>
+                <option value="interval">{t("settings.autoBackup.frequency.interval")}</option>
+              </select>
+            </div>
+
+            {autoBackup.frequencyType === "daily" || autoBackup.frequencyType === "weekly" ? (
+              <div>
+                <div className="text-xs font-medium text-slate-600">{t("settings.autoBackup.time")}</div>
+                <input
+                  type="time"
+                  value={autoBackup.time}
+                  onChange={(event) => {
+                    setAutoBackup((prev) => (prev ? { ...prev, time: event.target.value || "02:00" } : prev));
+                  }}
+                  className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700"
+                />
+              </div>
+            ) : (
+              <div>
+                <div className="text-xs font-medium text-slate-600">{t("settings.autoBackup.everyHours")}</div>
+                <input
+                  type="number"
+                  min={1}
+                  max={720}
+                  value={autoBackup.everyHours}
+                  onChange={(event) => {
+                    const everyHours = Number(event.target.value);
+                    setAutoBackup((prev) => (prev ? { ...prev, everyHours } : prev));
+                  }}
+                  className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700"
+                />
+              </div>
+            )}
+
+            {autoBackup.frequencyType === "weekly" ? (
+              <div>
+                <div className="text-xs font-medium text-slate-600">{t("settings.autoBackup.weekday")}</div>
+                <select
+                  value={autoBackup.weekday}
+                  onChange={(event) => {
+                    setAutoBackup((prev) => (prev ? { ...prev, weekday: Number(event.target.value) } : prev));
+                  }}
+                  className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700"
+                >
+                  {[0, 1, 2, 3, 4, 5, 6].map((day) => (
+                    <option key={day} value={day}>
+                      {t(`settings.autoBackup.weekday.${day}`)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+
+            <div>
+              <div className="text-xs font-medium text-slate-600">{t("settings.autoBackup.scope")}</div>
+              <div className="mt-1 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAutoBackup((prev) => (prev ? { ...prev, scope: "system" } : prev));
+                  }}
+                  disabled={!autoBackupSystemSupported}
+                  className={`h-9 rounded-md border px-3 text-xs font-medium disabled:opacity-40 ${
+                    autoBackup.scope === "system"
+                      ? "border-blue-300 bg-blue-50 text-blue-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                  }`}
+                >
+                  {t("settings.autoBackup.scope.system")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAutoBackup((prev) => (prev ? { ...prev, scope: "household" } : prev));
+                  }}
+                  className={`h-9 rounded-md border px-3 text-xs font-medium ${
+                    autoBackup.scope === "household"
+                      ? "border-blue-300 bg-blue-50 text-blue-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                  }`}
+                >
+                  {t("settings.autoBackup.scope.household")}
+                </button>
+              </div>
+              {autoBackup.scope === "system" && !autoBackupSystemSupported ? (
+                <div className="mt-2 rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+                  {t("settings.autoBackup.scopeSystemUnsupported")}
+                </div>
+              ) : null}
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-slate-600">{t("settings.autoBackup.path")}</div>
+              <input
+                type="text"
+                value={autoBackup.path}
+                placeholder={t("settings.autoBackup.pathPlaceholder")}
+                onChange={(event) => {
+                  setAutoBackup((prev) => (prev ? { ...prev, path: event.target.value } : prev));
+                  setAutoBackupDisk(null);
+                }}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700"
+              />
+              <div className="mt-1 truncate text-[11px] text-slate-400" title={autoBackupDefaultDir}>
+                {t("settings.autoBackup.defaultDir", { path: autoBackupDefaultDir || "…" })}
+              </div>
+              <div className="mt-1 text-[11px] text-amber-700">{t("settings.autoBackup.pathHint")}</div>
+              {autoBackupDisk?.free ? (
+                <div className="mt-1 text-[11px] text-slate-500">
+                  {t("settings.autoBackup.diskSpace", { free: autoBackupDisk.free })}
+                </div>
+              ) : null}
+              {autoBackupDisk?.freeBytes !== undefined && autoBackupDisk.freeBytes < 2 * 1024 * 1024 * 1024 ? (
+                <div className="mt-1 rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+                  {t("settings.autoBackup.diskSpaceLow", { free: autoBackupDisk.free ?? "" })}
+                </div>
+              ) : null}
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-slate-600">{t("settings.autoBackup.keepCount")}</div>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={autoBackup.keepCount}
+                onChange={(event) => {
+                  const keepCount = Number(event.target.value);
+                  setAutoBackup((prev) => (prev ? { ...prev, keepCount } : prev));
+                }}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700"
+              />
+              <div className="mt-1 text-[11px] text-slate-400">{t("settings.autoBackup.keepCountHint")}</div>
+            </div>
+          </div>
+        ) : null}
+
+        {autoBackupStatus ? (
+          <div className="mt-3 space-y-1 text-[11px] text-slate-500">
+            {autoBackupStatus.lastRunAt ? (
+              autoBackupStatus.lastRunOk ? (
+                <div>{t("settings.autoBackup.lastRunOk", { time: formatAutoBackupTime(autoBackupStatus.lastRunAt) })}</div>
+              ) : (
+                <div>
+                  {t("settings.autoBackup.lastRunFailed", {
+                    time: formatAutoBackupTime(autoBackupStatus.lastRunAt),
+                    error: autoBackupStatus.lastError ?? "",
+                  })}
+                </div>
+              )
+            ) : (
+              <div>{t("settings.autoBackup.lastRunNone")}</div>
+            )}
+            {autoBackupStatus.nextRunAt ? (
+              <div>{t("settings.autoBackup.nextRun", { time: formatAutoBackupTime(autoBackupStatus.nextRunAt) })}</div>
+            ) : autoBackup?.enabled ? (
+              <div>{t("settings.autoBackup.nextRunNone")}</div>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void saveAutoBackupSettings()}
+            disabled={autoBackupSaving || autoBackupRunning || !autoBackup}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-blue-600 px-4 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {autoBackupSaving ? t("settings.autoBackup.saving") : t("settings.autoBackup.save")}
+          </button>
+          <button
+            type="button"
+            onClick={() => void runAutoBackupNow()}
+            disabled={autoBackupRunning || autoBackupSaving || !autoBackup}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-4 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+          >
+            {autoBackupRunning ? t("settings.autoBackup.running") : t("settings.autoBackup.runNow")}
+          </button>
         </div>
       </section>
 

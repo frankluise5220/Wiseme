@@ -233,6 +233,71 @@ function parseEastmoneyKlineClose(row: unknown) {
   return { priceDate, closePrice };
 }
 
+// Tencent fqkline is the CN fallback source: push2his.eastmoney.com is a
+// single point of failure (IP throttling / connection resets happen in the
+// wild), and the app must still be able to backfill closes when it is down.
+function tencentSymbol(stockCode: string, exchange?: string | null) {
+  if (exchange === "SH") return `sh${stockCode}`;
+  if (exchange === "SZ") return `sz${stockCode}`;
+  if (exchange === "BJ") return `bj${stockCode}`;
+  if (/^[69]/.test(stockCode)) return `sh${stockCode}`;
+  if (/^[023]/.test(stockCode)) return `sz${stockCode}`;
+  if (/^(4|8|92)/.test(stockCode)) return `bj${stockCode}`;
+  return `sz${stockCode}`;
+}
+
+function parseTencentKlineRows(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((row: unknown) => {
+      if (!Array.isArray(row) || row.length < 3) return null;
+      const priceDate = String(row[0] ?? "").trim();
+      const closePrice = Number(row[2]);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(priceDate)) return null;
+      if (!Number.isFinite(closePrice) || closePrice <= 0) return null;
+      return { priceDate, closePrice };
+    })
+    .filter((item): item is { priceDate: string; closePrice: number } => item != null);
+}
+
+function parseTencentKlineResponse(payload: any, symbol: string) {
+  const node = payload?.data?.[symbol];
+  if (!node || typeof node !== "object") return null;
+  // fqkline returns "qfqday" for adjusted daily rows; unadjusted responses
+  // (some date ranges / non-adjusted queries) use "day" instead.
+  let rows = parseTencentKlineRows(node.qfqday);
+  if (rows.length === 0) rows = parseTencentKlineRows(node.day);
+  return rows.length > 0 ? rows : null;
+}
+
+async function queryTencentCnCloseList(
+  stockCode: string,
+  exchange: string | null | undefined,
+  startDate: string,
+  endDate: string,
+): Promise<StockClosePriceListResult> {
+  const symbol = tencentSymbol(stockCode, exchange ?? inferStockExchangeFromCode("CN", stockCode));
+  // Tencent fqkline only accepts dashed Y-M-D dates (compact YYYYMMDD returns an empty payload).
+  const beg = /^\d{8}$/.test(startDate) ? `${startDate.slice(0, 4)}-${startDate.slice(4, 6)}-${startDate.slice(6, 8)}` : startDate;
+  const end = /^\d{8}$/.test(endDate) ? `${endDate.slice(0, 4)}-${endDate.slice(4, 6)}-${endDate.slice(6, 8)}` : endDate;
+  const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${symbol},day,${beg},${end},640,qfq`;
+  try {
+    const payload: any = await fetchJson(url);
+    const rows = parseTencentKlineResponse(payload, symbol);
+    if (!rows) return null;
+    return {
+      market: "CN",
+      stockCode,
+      currency: "CNY",
+      exchange: exchange ?? inferStockExchangeFromCode("CN", stockCode),
+      source: "tencent-fqkline",
+      items: rows,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function normalizeEastmoneyKlineEndDate(value: unknown) {
   const raw = String(value ?? "").trim();
   if (/^\d{8}$/.test(raw)) return raw;
@@ -397,13 +462,10 @@ export async function queryStockClosePriceList(
   if (!stockCode) return null;
 
   if (market === "CN") {
-    return queryEastmoneyCnCloseList(
-      stockCode,
-      exchange,
-      normalizeEastmoneyKlineEndDate(startDateRaw),
-      normalizeEastmoneyKlineEndDate(endDateRaw),
-      "eastmoney-kline-list",
-    );
+    const startDate = normalizeEastmoneyKlineEndDate(startDateRaw);
+    const endDate = normalizeEastmoneyKlineEndDate(endDateRaw);
+    return await queryEastmoneyCnCloseList(stockCode, exchange, startDate, endDate, "eastmoney-kline-list")
+      ?? await queryTencentCnCloseList(stockCode, exchange, startDate, endDate);
   }
 
   return null;

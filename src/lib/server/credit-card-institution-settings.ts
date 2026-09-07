@@ -10,6 +10,7 @@ const CREDIT_BILL_MODE_CONSOLIDATED: CreditBillMode = "consolidated";
 export type CreditCardInstitutionDefaults = {
   billingDay: number | null;
   repaymentDay: number | null;
+  repaymentOffsetDays: number | null;
   creditLimit: string | null;
   creditBillMode: CreditBillMode;
 };
@@ -38,6 +39,7 @@ export async function getCreditCardInstitutionDefaults(
     select: {
       billingDay: true,
       repaymentDay: true,
+      repaymentOffsetDays: true,
       creditLimit: true,
       creditBillMode: true,
       updatedAt: true,
@@ -47,12 +49,13 @@ export async function getCreditCardInstitutionDefaults(
   if (accounts.length === 0) return null;
   const template = [...accounts].sort((a, b) => {
     const completeness = (row: typeof a) =>
-      Number(row.billingDay != null) + Number(row.repaymentDay != null) + Number(row.creditLimit != null);
+      Number(row.billingDay != null) + Number(row.repaymentDay != null) + Number(row.repaymentOffsetDays != null) + Number(row.creditLimit != null);
     return completeness(b) - completeness(a) || b.updatedAt.getTime() - a.updatedAt.getTime();
   })[0];
   return {
     billingDay: template.billingDay,
     repaymentDay: template.repaymentDay,
+    repaymentOffsetDays: template.repaymentOffsetDays,
     creditLimit: template.creditLimit?.toString() ?? null,
     creditBillMode: template.creditBillMode,
   };
@@ -65,6 +68,7 @@ export async function syncCreditCardInstitutionSettings(
     institutionId: string | null | undefined;
     billingDay: number | null;
     repaymentDay: number | null;
+    repaymentOffsetDays: number | null;
     creditBillMode: CreditBillMode;
   },
 ) {
@@ -78,6 +82,7 @@ export async function syncCreditCardInstitutionSettings(
     data: {
       billingDay: input.billingDay,
       repaymentDay: input.repaymentDay,
+      repaymentOffsetDays: input.repaymentOffsetDays,
       creditBillMode: input.creditBillMode,
     },
   });

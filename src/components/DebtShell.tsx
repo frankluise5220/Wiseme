@@ -79,6 +79,7 @@ type DebtEntry = {
   date: string;
   typeLabel: string;
   relatedAccountLabel: string;
+  collateralLabel?: string | null;
   note: string;
   amount: number;
   principal: number;
@@ -222,6 +223,15 @@ function shouldShowUnpaidScheduleRow(row: RepaymentScheduleRow, todayKey: string
   if (row.status === "paid") return false;
   if (row.date < todayKey) return false;
   return true;
+}
+
+// 条数口径：只统计真实还款期数；利率调整行、提前还款事件行不计数。
+function isScheduleRepaymentPeriodRow(row: RepaymentScheduleRow) {
+  return row.rowType === "payment" && row.eventType === "repayment";
+}
+
+function repaymentScheduleRowKey(row: RepaymentScheduleRow) {
+  return `${row.status ?? ""}:${row.eventType ?? ""}:${row.rowType}:${row.period}:${row.date}:${row.annualRate ?? ""}`;
 }
 
 function makeDraftId() {
@@ -533,6 +543,28 @@ export function DebtShell({
       : repaymentScheduleRows.filter((row) => shouldShowUnpaidScheduleRow(row, todayKey)),
     [repaymentScheduleRows, showPaidScheduleRows, todayKey],
   );
+  const schedulePeriodCounts = useMemo(() => {
+    let visible = 0;
+    for (const row of visibleRepaymentScheduleRows) {
+      if (isScheduleRepaymentPeriodRow(row)) visible += 1;
+    }
+    let total = 0;
+    for (const row of repaymentScheduleRows) {
+      if (isScheduleRepaymentPeriodRow(row)) total += 1;
+    }
+    return { visible, total };
+  }, [repaymentScheduleRows, visibleRepaymentScheduleRows]);
+  // 勾选“显示已还”后，把视口定位到当前月份的还款记录上。
+  const repaymentScrollAnchorKey = useMemo(() => {
+    if (!showPaidScheduleRows) return null;
+    const periodRows = visibleRepaymentScheduleRows.filter(isScheduleRepaymentPeriodRow);
+    if (periodRows.length === 0) return null;
+    const monthPrefix = todayKey.slice(0, 7);
+    const anchorRow = periodRows.find((row) => row.date.startsWith(monthPrefix))
+      ?? periodRows.find((row) => row.date >= todayKey)
+      ?? periodRows[periodRows.length - 1];
+    return repaymentScheduleRowKey(anchorRow);
+  }, [showPaidScheduleRows, todayKey, visibleRepaymentScheduleRows]);
   const debtRowSummary = useMemo(() => {
     const summaryRows = baseRows.filter((row) => !row.parentKey);
     const net = summaryRows.reduce((sum, row) => sum + row.net, 0);
@@ -1200,6 +1232,15 @@ export function DebtShell({
     { key: "type", label: t("debtShell.colType"), width: 90, minWidth: 70, filterText: (entry) => entry.typeLabel, render: (entry) => <span className="text-slate-700">{entry.typeLabel}</span> },
     { key: "relatedAccount", label: t("debtShell.colCashAccount"), width: 160, minWidth: 100, filterText: (entry) => entry.relatedAccountLabel, render: (entry) => <span className="block truncate text-slate-600" title={entry.relatedAccountLabel}>{entry.relatedAccountLabel || "-"}</span> },
     {
+      key: "collateral",
+      label: t("debtShell.colCollateral"),
+      width: 140,
+      minWidth: 100,
+      hideable: true,
+      filterText: (entry) => entry.collateralLabel ?? "",
+      render: (entry) => <span className="block truncate text-slate-600" title={entry.collateralLabel ?? ""}>{entry.collateralLabel || "-"}</span>,
+    },
+    {
       key: "outflow",
       label: t("detail.column.outflow"),
       width: 110,
@@ -1414,7 +1455,8 @@ export function DebtShell({
               storageKey="mmh_debt_repayment_schedule_table_v1"
               columns={repaymentScheduleColumns}
               rows={visibleRepaymentScheduleRows}
-              rowKey={(row) => `${row.status ?? ""}:${row.eventType ?? ""}:${row.rowType}:${row.period}:${row.date}:${row.annualRate ?? ""}`}
+              rowKey={repaymentScheduleRowKey}
+              scrollToRowKey={repaymentScrollAnchorKey}
               minTableWidth={920}
               emptyText={t("debtShell.emptySchedule")}
               fillHeight
@@ -1422,8 +1464,8 @@ export function DebtShell({
               toolbarLeftContent={(
                 <span>
                   {showPaidScheduleRows
-                    ? t("debtShell.scheduleVisibleCount", { visible: visibleRepaymentScheduleRows.length, total: repaymentScheduleRows.length })
-                    : t("debtShell.scheduleUnpaidCount", { count: visibleRepaymentScheduleRows.length })}
+                    ? t("debtShell.scheduleVisibleCount", { visible: schedulePeriodCounts.visible, total: schedulePeriodCounts.total })
+                    : t("debtShell.scheduleUnpaidCount", { count: schedulePeriodCounts.visible })}
                 </span>
               )}
               toolbarRightContent={(

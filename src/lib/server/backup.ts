@@ -109,6 +109,11 @@ function summaryRows(payload: HouseholdBackupPayload) {
     { field: "distillLogs", value: payload.counts.distillLogs },
     { field: "commandTestResults", value: payload.counts.commandTestResults },
     { field: "commandAliases", value: payload.counts.commandAliases },
+    { field: "creditCardBillingDays", value: payload.counts.creditCardBillingDays },
+    { field: "fundProfiles", value: payload.counts.fundProfiles },
+    { field: "approvedCurrencies", value: payload.counts.approvedCurrencies },
+    { field: "customCurrencyRequests", value: payload.counts.customCurrencyRequests },
+    { field: "benchmarkCaches", value: payload.counts.benchmarkCaches },
   ];
 }
 
@@ -190,6 +195,7 @@ function restoredStatementRecognitionRule(
   if (targetType === "field" && !backupText(item.fieldName)) return null;
 
   return {
+    ...item,
     id: backupText(item.id, crypto.randomUUID()),
     householdId,
     targetType,
@@ -229,6 +235,7 @@ function restoredLegacyStatementCategoryRule(
   if (!backupText(item.categoryName) && !categoryId) return null;
 
   return {
+    ...item,
     id: `recog_legacy_${backupText(item.id, crypto.randomUUID())}`,
     householdId,
     targetType: "category",
@@ -394,8 +401,13 @@ async function createManyRecords(
   nullDateKeys = new Set<string>(),
 ) {
   if (records.length === 0) return;
+  const dbTableName = resolveRestoreDbTableName(delegate);
+  const safeRecords = dbTableName
+    ? await filterRestoreRecords(dbTableName, records)
+    : records;
+  if (safeRecords.length === 0) return;
   const target = delegate as { createMany: (args: { data: Record<string, unknown>[] }) => Promise<unknown> };
-  await target.createMany({ data: records.map((record) => normalizeRecordDates(record, nullDateKeys)) });
+  await target.createMany({ data: safeRecords.map((record) => normalizeRecordDates(record, nullDateKeys)) });
 }
 
 const RESTORE_CREATE_MANY_BATCH_SIZE = 500;
@@ -419,16 +431,20 @@ async function createMappedRecordsInChunks<T>(
   const batchSize = options.batchSize ?? RESTORE_CREATE_MANY_BATCH_SIZE;
   const nullDateKeys = options.nullDateKeys ?? new Set<string>();
   const target = delegate as { createMany: (args: { data: Record<string, unknown>[] }) => Promise<unknown> };
+  const dbTableName = resolveRestoreDbTableName(delegate);
+  const columns = dbTableName ? await getRestoreTableColumns(dbTableName) : null;
   let completed = 0;
   let batch: Record<string, unknown>[] = [];
 
   const flush = async () => {
     if (batch.length === 0) return;
     const normalized = batch.map((record) => normalizeRecordDates(record, nullDateKeys));
+    const safeBatch = filterRecordsToTableColumns(normalized, columns);
+    if (safeBatch.length === 0) return;
     if (options.fastInsert) {
-      await options.fastInsert(normalized);
+      await options.fastInsert(safeBatch);
     } else {
-      await target.createMany({ data: normalized });
+      await target.createMany({ data: safeBatch });
     }
     batch = [];
     await options.afterChunk?.(completed, records.length);
@@ -455,7 +471,20 @@ type RestoredCategoryRecord = {
   parentId: string | null;
   householdId: string;
   isSystem: boolean;
+  // All other fields from the backup row (e.g. sortOrder and any future new
+  // columns) carried through untouched so category restores never drop fields.
+  extraFields: Record<string, unknown>;
 };
+
+const RESTORED_CATEGORY_HANDLED_KEYS = new Set([
+  "id",
+  "name",
+  "type",
+  "icon",
+  "parentId",
+  "householdId",
+  "isSystem",
+]);
 
 function buildRestoredCategoryBatches(items: Record<string, unknown>[], householdId: string) {
   const records: RestoredCategoryRecord[] = [];
@@ -467,6 +496,10 @@ function buildRestoredCategoryBatches(items: Record<string, unknown>[], househol
     seenIds.add(id);
 
     const parentId = backupText(item.parentId).trim();
+    const extraFields: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(item)) {
+      if (!RESTORED_CATEGORY_HANDLED_KEYS.has(key)) extraFields[key] = value;
+    }
     records.push({
       id,
       name: backupText(item.name).trim() || "未命名分类",
@@ -475,6 +508,7 @@ function buildRestoredCategoryBatches(items: Record<string, unknown>[], househol
       parentId: parentId || null,
       householdId,
       isSystem: Boolean(item.isSystem),
+      extraFields,
     });
   }
 
@@ -537,82 +571,228 @@ function isSqliteRuntime() {
   return url === ":memory:" || url.startsWith("file:");
 }
 
-const TRANSACTION_RESTORE_COLUMNS = [
-  { name: "id", select: 'x."id"' },
-  { name: "date", select: "NULLIF(x.\"date\", '')::timestamptz" },
-  { name: "postedAt", select: "NULLIF(x.\"postedAt\", '')::timestamptz" },
-  { name: "type", select: 'x."type"::"TransactionType"' },
-  { name: "amount", select: "NULLIF(x.\"amount\", '')::numeric" },
-  { name: "accountId", select: 'x."accountId"' },
-  { name: "accountName", select: 'x."accountName"' },
-  { name: "toAccountId", select: 'x."toAccountId"' },
-  { name: "toAccountName", select: 'x."toAccountName"' },
-  { name: "categoryId", select: 'x."categoryId"' },
-  { name: "categoryName", select: 'x."categoryName"' },
-  { name: "fundCode", select: 'x."fundCode"' },
-  { name: "fundProductType", select: 'x."fundProductType"::"FundProductType"' },
-  { name: "metalTypeId", select: 'x."metalTypeId"' },
-  { name: "metalTypeName", select: 'x."metalTypeName"' },
-  { name: "metalUnitId", select: 'x."metalUnitId"' },
-  { name: "metalUnitName", select: 'x."metalUnitName"' },
-  { name: "metalQuantity", select: "NULLIF(x.\"metalQuantity\", '')::numeric" },
-  { name: "metalUnitPrice", select: "NULLIF(x.\"metalUnitPrice\", '')::numeric" },
-  { name: "metalFee", select: "NULLIF(x.\"metalFee\", '')::numeric" },
-  { name: "confirmDate", select: "NULLIF(x.\"confirmDate\", '')::timestamptz" },
-  { name: "statementMonth", select: 'x."statementMonth"' },
-  { name: "note", select: 'x."note"' },
-  { name: "toNote", select: 'x."toNote"' },
-  { name: "deletedAt", select: "NULLIF(x.\"deletedAt\", '')::timestamptz" },
-  { name: "importBatchId", select: 'x."importBatchId"' },
-  { name: "householdId", select: 'x."householdId"' },
-  { name: "createdAt", select: "NULLIF(x.\"createdAt\", '')::timestamptz" },
-  { name: "updatedAt", select: "NULLIF(x.\"updatedAt\", '')::timestamptz" },
-  { name: "dayOrder", select: "NULLIF(x.\"dayOrder\", '')::integer" },
-  { name: "currency", select: 'x."currency"' },
-  { name: "paymentChannelId", select: 'x."paymentChannelId"' },
-  { name: "paymentChannelName", select: 'x."paymentChannelName"' },
-  { name: "counterpartyInstitutionId", select: 'x."counterpartyInstitutionId"' },
-  { name: "counterpartyInstitutionName", select: 'x."counterpartyInstitutionName"' },
-  { name: "status", select: 'x."status"::"TransactionStatus"' },
-  { name: "fundArrivalAmount", select: "NULLIF(x.\"fundArrivalAmount\", '')::numeric" },
-  { name: "fundArrivalDate", select: "NULLIF(x.\"fundArrivalDate\", '')::timestamptz" },
-  { name: "depositAnnualRate", select: "NULLIF(x.\"depositAnnualRate\", '')::numeric" },
-  { name: "depositInterest", select: "NULLIF(x.\"depositInterest\", '')::numeric" },
-  { name: "depositSourceEntryId", select: 'x."depositSourceEntryId"' },
-  { name: "fundSourceEntryId", select: 'x."fundSourceEntryId"' },
-  { name: "debtPrincipalAmount", select: "NULLIF(x.\"debtPrincipalAmount\", '')::numeric" },
-  { name: "debtInterestAmount", select: "NULLIF(x.\"debtInterestAmount\", '')::numeric" },
-  { name: "debtFeeAmount", select: "NULLIF(x.\"debtFeeAmount\", '')::numeric" },
-  { name: "fundConfirmDate", select: "NULLIF(x.\"fundConfirmDate\", '')::timestamptz" },
-  { name: "fundFee", select: "NULLIF(x.\"fundFee\", '')::numeric" },
-  { name: "fundNav", select: "NULLIF(x.\"fundNav\", '')::numeric" },
-  { name: "fundSubtype", select: 'x."fundSubtype"::"FundSubtype"' },
-  { name: "fundUnits", select: "NULLIF(x.\"fundUnits\", '')::numeric" },
-  { name: "realizedProfit", select: "NULLIF(x.\"realizedProfit\", '')::numeric" },
-  { name: "regularInvestPlanId", select: 'x."regularInvestPlanId"' },
-  { name: "creditCardInstallmentPlanId", select: 'x."creditCardInstallmentPlanId"' },
-  { name: "installmentNo", select: "NULLIF(x.\"installmentNo\", '')::integer" },
-  { name: "installmentTotal", select: "NULLIF(x.\"installmentTotal\", '')::integer" },
-  { name: "installmentPrincipal", select: "NULLIF(x.\"installmentPrincipal\", '')::numeric" },
-  { name: "installmentInterest", select: "NULLIF(x.\"installmentInterest\", '')::numeric" },
-  { name: "installmentRole", select: 'x."installmentRole"' },
-  { name: "fundName", select: 'x."fundName"' },
-  { name: "wealthProductId", select: 'x."wealthProductId"' },
-  { name: "insuranceProductId", select: 'x."insuranceProductId"' },
-  { name: "insuranceAction", select: 'x."insuranceAction"' },
-  { name: "insuranceProductName", select: 'x."insuranceProductName"' },
-  { name: "source", select: 'x."source"' },
-] as const;
+type RestoreColumnLookupClient = {
+  $queryRawUnsafe: <T = unknown>(query: string, ...values: unknown[]) => Promise<T>;
+};
 
-const TRANSACTION_RESTORE_INSERT_SQL = `INSERT INTO "transactions" (${TRANSACTION_RESTORE_COLUMNS
-  .map((column) => `"${column.name}"`)
-  .join(", ")}) SELECT ${TRANSACTION_RESTORE_COLUMNS.map((column) => column.select).join(", ")} FROM jsonb_to_recordset($1::jsonb) AS x(${TRANSACTION_RESTORE_COLUMNS
-  .map((column) => `"${column.name}" text`)
-  .join(", ")})`;
+// Restore-time column cache: the live database is the single source of truth for
+// writable columns, so restore stays field-safe no matter how the Prisma schema
+// evolves (new fields on either the backup side or the live side pass through
+// automatically; stale/renamed fields are dropped instead of crashing).
+const restoreTableColumnsCache = new Map<string, Promise<Set<string> | null>>();
 
-async function insertTransactionsViaJson(delegate: RawExecuteClient, records: Record<string, unknown>[]) {
+// Prisma delegate name -> physical DB table name (schema.prisma @@map / defaults).
+export const RESTORE_DELEGATE_DB_TABLES: Record<string, string> = {
+  user: "User",
+  userSettings: "UserSettings",
+  accountGroup: "AccountGroup",
+  institution: "Institution",
+  counterparty: "Counterparty",
+  category: "Category",
+  tag: "Tag",
+  statementRecognitionRule: "statement_recognition_rules",
+  insuranceProductMaster: "InsuranceProductMaster",
+  wealthProduct: "WealthProduct",
+  fundQueryApi: "FundQueryApi",
+  preciousMetalType: "PreciousMetalType",
+  preciousMetalUnit: "PreciousMetalUnit",
+  account: "Account",
+  accountAlias: "AccountAlias",
+  billOverride: "BillOverride",
+  creditCardCycle: "CreditCardCycle",
+  creditCardBillingDay: "CreditCardBillingDay",
+  fundConfirmDays: "FundConfirmDays",
+  fundFeeRate: "FundFeeRate",
+  fundHolding: "FundHolding",
+  fundSnapshot: "FundSnapshot",
+  fundNavCache: "FundNavCache",
+  stockSecurity: "stock_securities",
+  stockHolding: "stock_holdings",
+  stockPriceCache: "stock_price_cache",
+  stockFeeRule: "stock_fee_rules",
+  stockMarketFeeRule: "stock_market_fee_rules",
+  stockBrokerageCatalog: "stock_brokerage_catalog",
+  preciousMetalHolding: "PreciousMetalHolding",
+  propertyAsset: "property_assets",
+  propertyValuation: "property_valuations",
+  propertyTransaction: "property_transactions",
+  fxRate: "FxRate",
+  fxConversion: "FxConversion",
+  insuranceProduct: "InsuranceProduct",
+  creditCardInstallmentPlan: "CreditCardInstallmentPlan",
+  importBatch: "ImportBatch",
+  txRecord: "transactions",
+  fundTransaction: "fund_transactions",
+  fundTransactionCashFlow: "fund_transaction_cash_flows",
+  insuranceTransaction: "insurance_transactions",
+  wealthTransaction: "wealth_transactions",
+  depositTransaction: "deposit_transactions",
+  preciousMetalTransaction: "precious_metal_transactions",
+  stockTransaction: "stock_transactions",
+  entryBusinessLink: "entry_business_links",
+  attachment: "Attachment",
+  entryTag: "EntryTag",
+  regularInvestPlan: "RegularInvestPlan",
+  loanRateAdjustment: "LoanRateAdjustment",
+  emailAccount: "EmailAccount",
+  distillLog: "DistillLog",
+  commandTestResult: "CommandTestResult",
+  commandAlias: "CommandAlias",
+  fundProfile: "FundProfile",
+  approvedCurrency: "ApprovedCurrency",
+  customCurrencyRequest: "CustomCurrencyRequest",
+  benchmarkCache: "BenchmarkCache",
+};
+
+// The transaction client that restore inserts run against; set for the duration
+// of restoreHouseholdBackup so delegates can be resolved back to table names.
+let activeRestoreSchemaClient: unknown = null;
+
+export function clearRestoreTableColumnsCache() {
+  restoreTableColumnsCache.clear();
+}
+
+function restoreColumnCacheKey(dbTableName: string) {
+  return `${isSqliteRuntime() ? "sqlite" : "pg"}:${dbTableName}`;
+}
+
+function resolveRestoreDbTableName(delegate: unknown): string | null {
+  const holder = activeRestoreSchemaClient as Record<string, unknown> | null;
+  if (!holder) return null;
+  for (const [delegateName, dbTableName] of Object.entries(RESTORE_DELEGATE_DB_TABLES)) {
+    if (holder[delegateName] === delegate) return dbTableName;
+  }
+  return null;
+}
+
+async function getRestoreTableColumns(dbTableName: string): Promise<Set<string> | null> {
+  const key = restoreColumnCacheKey(dbTableName);
+  let columnsPromise = restoreTableColumnsCache.get(key);
+  if (!columnsPromise) {
+    columnsPromise = (async () => {
+      const client = prisma as unknown as RestoreColumnLookupClient;
+      if (isSqliteRuntime()) {
+        const rows = await client.$queryRawUnsafe<Array<{ name: string }>>(
+          `PRAGMA table_info(${quoteSqliteIdent(dbTableName)})`,
+        );
+        return rows.length === 0 ? null : new Set(rows.map((row) => row.name));
+      }
+      const rows = await client.$queryRawUnsafe<Array<{ column_name: string }>>(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1",
+        dbTableName,
+      );
+      return rows.length === 0 ? null : new Set(rows.map((row) => row.column_name));
+    })();
+    restoreTableColumnsCache.set(key, columnsPromise);
+  }
+  try {
+    return await columnsPromise;
+  } catch {
+    restoreTableColumnsCache.delete(key);
+    return null;
+  }
+}
+
+export function filterRecordsToTableColumns(
+  records: Record<string, unknown>[],
+  columns: Set<string> | null,
+): Record<string, unknown>[] {
+  if (!columns || columns.size === 0) return records;
+  return records.map((record) => {
+    const filtered: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(record)) {
+      if (columns.has(key)) filtered[key] = value;
+    }
+    return filtered;
+  });
+}
+
+async function filterRestoreRecords(
+  dbTableName: string,
+  records: Record<string, unknown>[],
+): Promise<Record<string, unknown>[]> {
+  if (records.length === 0) return records;
+  const columns = await getRestoreTableColumns(dbTableName);
+  return filterRecordsToTableColumns(records, columns);
+}
+
+async function createManySkipDuplicatesRestore(
+  dbTableName: string,
+  delegate: unknown,
+  records: Record<string, unknown>[],
+): Promise<void> {
+  const safeRecords = await filterRestoreRecords(dbTableName, records);
+  if (safeRecords.length === 0) return;
+  await createManySkipDuplicatesCompat(delegate as never, safeRecords);
+}
+
+type PgTransactionColumnMeta = {
+  name: string;
+  data_type: string;
+  udt_name: string;
+};
+
+function quotePgIdent(value: string) {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function pgTransactionColumnSelectExpr(column: PgTransactionColumnMeta): string {
+  const quoted = quotePgIdent(column.name);
+  switch (column.data_type) {
+    case "timestamp with time zone":
+    case "timestamp without time zone":
+      return `NULLIF(${quoted}, '')::timestamptz`;
+    case "numeric":
+      return `NULLIF(${quoted}, '')::numeric`;
+    case "smallint":
+      return `NULLIF(${quoted}, '')::smallint`;
+    case "integer":
+      return `NULLIF(${quoted}, '')::integer`;
+    case "bigint":
+      return `NULLIF(${quoted}, '')::bigint`;
+    case "boolean":
+      return `NULLIF(${quoted}, '')::boolean`;
+    case "USER-DEFINED":
+      return column.udt_name.startsWith("_") ? quoted : `${quoted}::${quotePgIdent(column.udt_name)}`;
+    default:
+      return quoted;
+  }
+}
+
+export function buildTransactionRestoreInsertSql(
+  columns: PgTransactionColumnMeta[],
+  recordKeys: Set<string>,
+): string | null {
+  const usable = columns.filter((column) => recordKeys.has(column.name));
+  if (usable.length === 0) return null;
+  const names = usable.map((column) => quotePgIdent(column.name)).join(", ");
+  const selects = usable.map((column) => pgTransactionColumnSelectExpr(column)).join(", ");
+  const defs = usable.map((column) => `${quotePgIdent(column.name)} text`).join(", ");
+  return `INSERT INTO "transactions" (${names}) SELECT ${selects} FROM jsonb_to_recordset($1::jsonb) AS x(${defs})`;
+}
+
+async function lookupTransactionsTableColumns(tx: unknown): Promise<PgTransactionColumnMeta[]> {
+  const rows = await (tx as unknown as RestoreColumnLookupClient).$queryRawUnsafe<PgTransactionColumnMeta[]>(
+    `SELECT column_name AS "name", data_type AS "data_type", udt_name AS "udt_name"
+     FROM information_schema.columns
+     WHERE table_schema = current_schema() AND table_name = 'transactions'
+     ORDER BY ordinal_position`,
+  );
+  return rows ?? [];
+}
+
+async function insertTransactionsViaJson(tx: unknown, records: Record<string, unknown>[]) {
   if (records.length === 0) return;
-  await delegate.$executeRawUnsafe(TRANSACTION_RESTORE_INSERT_SQL, JSON.stringify(records));
+  const recordKeys = new Set<string>();
+  for (const record of records) {
+    for (const key of Object.keys(record)) recordKeys.add(key);
+  }
+  const columns = await lookupTransactionsTableColumns(tx);
+  const insertSql = buildTransactionRestoreInsertSql(columns, recordKeys);
+  if (!insertSql) {
+    restoreError("当前数据库 transactions 表结构与备份不兼容，无法恢复交易明细");
+  }
+  await (tx as RawExecuteClient).$executeRawUnsafe(insertSql, JSON.stringify(records));
 }
 
 const SQLITE_STOCK_RESTORE_SCHEMA_SQL = [
@@ -1211,6 +1391,7 @@ export async function ensureSqliteRestoreCompatibilitySchema() {
   await prisma.$executeRawUnsafe(
     `CREATE INDEX IF NOT EXISTS "entry_business_links_propertyTransactionId_idx" ON "entry_business_links"("propertyTransactionId")`,
   );
+  clearRestoreTableColumnsCache();
 }
 
 function decodeBackupPackageKey(value: string) {
@@ -1502,7 +1683,7 @@ function remapHouseholdSystemSettingKey(key: string, sourceHouseholdId: string, 
   return null;
 }
 
-export function buildBackupFileName(householdName: string, exportedAt: Date, format: "json" | "xlsx" | "mmh-backup") {
+export function buildBackupFileName(householdName: string, exportedAt: Date, format: "json" | "xlsx" | "mmhbackup") {
   const suffix = format;
   return `${safeFilePart(householdName)}-backup-${exportedAt.toISOString().replace(/[:.]/g, "-")}.${suffix}`;
 }
@@ -1577,6 +1758,10 @@ export async function buildHouseholdBackupPayload(
     accessKeys,
     aiChannels,
     aiModels,
+    fundProfiles,
+    approvedCurrencies,
+    customCurrencyRequests,
+    benchmarkCaches,
   ] = await Promise.all([
     isSystemBackup
       ? prisma.user.findMany({ where: { householdId }, orderBy: [{ createdAt: "asc" }] })
@@ -1695,6 +1880,10 @@ export async function buildHouseholdBackupPayload(
     prisma.accessKey.findMany({ orderBy: [{ createdAt: "asc" }] }),
     prisma.aiChannel.findMany({ orderBy: [{ createdAt: "asc" }] }),
     prisma.aiModel.findMany({ orderBy: [{ createdAt: "asc" }] }),
+    isSystemBackup ? prisma.fundProfile.findMany({ orderBy: [{ fundCode: "asc" }] }) : Promise.resolve([]),
+    isSystemBackup ? prisma.approvedCurrency.findMany({ orderBy: [{ code: "asc" }] }) : Promise.resolve([]),
+    isSystemBackup ? prisma.customCurrencyRequest.findMany({ orderBy: [{ createdAt: "asc" }] }) : Promise.resolve([]),
+    isSystemBackup ? prisma.benchmarkCache.findMany({ orderBy: [{ code: "asc" }, { navDate: "asc" }] }) : Promise.resolve([]),
   ]);
   const exportedSystemSettings = settingsForBackup(systemSettings, backupScope);
 
@@ -1706,6 +1895,7 @@ export async function buildHouseholdBackupPayload(
     accountAliases,
     billOverrides,
     creditCardCycles,
+    creditCardBillingDays,
     fundConfirmDays,
     fundFeeRates,
     fundHoldings,
@@ -1725,6 +1915,12 @@ export async function buildHouseholdBackupPayload(
       : Promise.resolve([]),
     accountIds.length > 0
       ? prisma.creditCardCycle.findMany({ where: { accountId: { in: accountIds } }, orderBy: [{ createdAt: "asc" }] })
+      : Promise.resolve([]),
+    accountIds.length > 0
+      ? prisma.creditCardBillingDay.findMany({
+          where: { accountId: { in: accountIds } },
+          orderBy: [{ accountId: "asc" }, { effectiveDate: "asc" }],
+        })
       : Promise.resolve([]),
     accountIds.length > 0
       ? prisma.fundConfirmDays.findMany({ where: { accountId: { in: accountIds } }, orderBy: [{ createdAt: "asc" }] })
@@ -1790,6 +1986,11 @@ export async function buildHouseholdBackupPayload(
       distillLogs: distillLogs.length,
       commandTestResults: commandTestResults.length,
       commandAliases: commandAliases.length,
+      creditCardBillingDays: creditCardBillingDays.length,
+      fundProfiles: fundProfiles.length,
+      approvedCurrencies: approvedCurrencies.length,
+      customCurrencyRequests: customCurrencyRequests.length,
+      benchmarkCaches: benchmarkCaches.length,
     },
     data: {
       household,
@@ -1851,6 +2052,11 @@ export async function buildHouseholdBackupPayload(
       attachments,
       entryTags,
       emailAccounts,
+      creditCardBillingDays,
+      fundProfiles,
+      approvedCurrencies,
+      customCurrencyRequests,
+      benchmarkCaches,
     },
   };
 }
@@ -1916,6 +2122,11 @@ export async function buildHouseholdBackupWorkbook(payload: HouseholdBackupPaylo
     ["Attachments", sheetRows(payload.data.attachments)],
     ["EntryTags", sheetRows(payload.data.entryTags)],
     ["EmailAccounts", sheetRows(payload.data.emailAccounts)],
+    ["CreditCardBillingDays", sheetRows(payload.data.creditCardBillingDays)],
+    ["FundProfiles", sheetRows(payload.data.fundProfiles)],
+    ["ApprovedCurrencies", sheetRows(payload.data.approvedCurrencies)],
+    ["CustomCurrencyRequests", sheetRows(payload.data.customCurrencyRequests)],
+    ["BenchmarkCache", sheetRows(payload.data.benchmarkCaches)],
   ];
 
   for (const [sheetName, rows] of sheets) {
@@ -1995,6 +2206,8 @@ export async function buildHouseholdTableExportWorkbook(payload: HouseholdBackup
     ["EntryBusinessLinks", sheetRows(payload.data.entryBusinessLinks)],
     ["Attachments", sheetRows(payload.data.attachments)],
     ["EntryTags", sheetRows(payload.data.entryTags)],
+    ["CreditCardBillingDays", sheetRows(payload.data.creditCardBillingDays)],
+    ["FundProfiles", sheetRows(payload.data.fundProfiles)],
   ];
 
   for (const [sheetName, rows] of sheets) {
@@ -2085,6 +2298,11 @@ export function parseBackupPayload(raw: unknown) {
       attachments: ensureArray(data.attachments ?? [], "data.attachments"),
       entryTags: ensureArray(data.entryTags ?? [], "data.entryTags"),
       emailAccounts: ensureArray(data.emailAccounts ?? [], "data.emailAccounts"),
+      creditCardBillingDays: ensureArray(data.creditCardBillingDays ?? [], "data.creditCardBillingDays"),
+      fundProfiles: ensureArray(data.fundProfiles ?? [], "data.fundProfiles"),
+      approvedCurrencies: ensureArray(data.approvedCurrencies ?? [], "data.approvedCurrencies"),
+      customCurrencyRequests: ensureArray(data.customCurrencyRequests ?? [], "data.customCurrencyRequests"),
+      benchmarkCaches: ensureArray(data.benchmarkCaches ?? [], "data.benchmarkCaches"),
     },
   };
 }
@@ -2112,6 +2330,7 @@ export async function restoreHouseholdBackup(
   const householdId = options.householdId;
   await reportProgress({ stage: "preparing", percent: 48, label: "兼容检查", detail: "正在检查数据库表结构" });
   await ensureSqliteRestoreCompatibilitySchema();
+  clearRestoreTableColumnsCache();
   await reportProgress({ stage: "preparing", percent: 50, label: "准备导入", detail: "正在建立恢复索引" });
 
   const isSystemRestore = payload.scope.backupScope !== "household";
@@ -2209,6 +2428,7 @@ export async function restoreHouseholdBackup(
     data.entryBusinessLinks.some((item) => item.stockTransactionId != null);
 
   await prisma.$transaction(async (tx) => {
+    activeRestoreSchemaClient = tx;
     await reportProgress({ stage: "clearing", percent: 55, label: "清空当前账簿", detail: "正在移除当前账簿旧数据" });
     const currentUsers = await tx.user.findMany({
       where: { householdId },
@@ -2344,6 +2564,7 @@ export async function restoreHouseholdBackup(
       await tx.fundFeeRate.deleteMany({ where: { accountId: { in: currentAccountIds } } });
       await tx.billOverride.deleteMany({ where: { accountId: { in: currentAccountIds } } });
       await tx.creditCardCycle.deleteMany({ where: { accountId: { in: currentAccountIds } } });
+      await tx.creditCardBillingDay.deleteMany({ where: { accountId: { in: currentAccountIds } } });
       await tx.accountAlias.deleteMany({ where: { accountId: { in: currentAccountIds } } });
     }
 
@@ -2392,6 +2613,10 @@ export async function restoreHouseholdBackup(
       );
       await tx.distillLog.deleteMany({});
       await tx.commandTestResult.deleteMany({});
+      await tx.fundProfile.deleteMany({});
+      await tx.approvedCurrency.deleteMany({});
+      await tx.customCurrencyRequest.deleteMany({});
+      await tx.benchmarkCache.deleteMany({});
     }
     await reportProgress({ stage: "importing", percent: 60, label: "导入基础数据", detail: "正在写入用户、账户和分类" });
 
@@ -2497,6 +2722,22 @@ export async function restoreHouseholdBackup(
       await createManyRecords(tx.fundNavCache, data.fundNavCaches);
     }
 
+    if (isSystemRestore && data.fundProfiles.length > 0) {
+      await createManyRecords(tx.fundProfile, data.fundProfiles);
+    }
+
+    if (isSystemRestore && data.approvedCurrencies.length > 0) {
+      await createManyRecords(tx.approvedCurrency, data.approvedCurrencies);
+    }
+
+    if (isSystemRestore && data.customCurrencyRequests.length > 0) {
+      await createManyRecords(tx.customCurrencyRequest, data.customCurrencyRequests);
+    }
+
+    if (isSystemRestore && data.benchmarkCaches.length > 0) {
+      await createManyRecords(tx.benchmarkCache, data.benchmarkCaches);
+    }
+
     if (isSystemRestore && data.stockBrokerageCatalogs.length > 0) {
       const stockBrokerageCatalogDelegate = getOptionalPrismaDelegate<OptionalPrismaRestoreDelegate>(
         tx,
@@ -2522,72 +2763,62 @@ export async function restoreHouseholdBackup(
 
     if (data.users.length > 0) {
       await tx.user.createMany({
-        data: data.users.map((item) => ({
-          id: String(item.id),
-          name: String(item.name ?? "user"),
-          email: item.email == null ? null : String(item.email),
-          role: String(item.role ?? "user"),
-          isSystem: Boolean(item.isSystem),
-          passwordHash: item.passwordHash == null ? null : String(item.passwordHash),
-          householdId,
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-          updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-        })),
+        data: (await filterRestoreRecords(
+          "User",
+          data.users.map((item) => ({
+            ...item,
+            id: String(item.id),
+            name: String(item.name ?? "user"),
+            role: String(item.role ?? "user"),
+            isSystem: Boolean(item.isSystem),
+            householdId,
+          })),
+        )) as never,
       });
     }
 
     if (data.userSettings.length > 0) {
       await tx.userSettings.createMany({
-        data: data.userSettings
-          .filter((item) => importedUserSet.has(String(item.userId)))
-          .map((item) => ({
-            id: String(item.id),
-            userId: String(item.userId),
-            emailHost: item.emailHost == null ? null : String(item.emailHost),
-            emailPort: item.emailPort == null ? null : Number(item.emailPort),
-            emailSecure: item.emailSecure == null ? true : Boolean(item.emailSecure),
-            emailUser: item.emailUser == null ? null : String(item.emailUser),
-            emailPassword: item.emailPassword == null ? null : String(item.emailPassword),
-            emailMailbox: item.emailMailbox == null ? "INBOX" : String(item.emailMailbox),
-            smtpHost: item.smtpHost == null ? null : String(item.smtpHost),
-            smtpPort: item.smtpPort == null ? null : Number(item.smtpPort),
-            smtpSecure: item.smtpSecure == null ? true : Boolean(item.smtpSecure),
-            smtpUser: item.smtpUser == null ? null : String(item.smtpUser),
-            smtpPass: item.smtpPass == null ? null : String(item.smtpPass),
-            smtpFrom: item.smtpFrom == null ? null : String(item.smtpFrom),
-            resendApiKey: item.resendApiKey == null ? null : String(item.resendApiKey),
-            resendFrom: item.resendFrom == null ? null : String(item.resendFrom),
-            passwordResetEnabled: item.passwordResetEnabled == null ? true : Boolean(item.passwordResetEnabled),
-            sessionDays: normalizeSessionDays(item.sessionDays, DEFAULT_SESSION_DAYS),
-            colorScheme: item.colorScheme == null ? "red_up_green_down" : String(item.colorScheme),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-          })),
+        data: (await filterRestoreRecords(
+          "UserSettings",
+          data.userSettings
+            .filter((item) => importedUserSet.has(String(item.userId)))
+            .map((item) => ({
+              ...item,
+              id: String(item.id),
+              userId: String(item.userId),
+              sessionDays: normalizeSessionDays(item.sessionDays, DEFAULT_SESSION_DAYS),
+              colorScheme: item.colorScheme == null ? "red_up_green_down" : String(item.colorScheme),
+            })),
+        )) as never,
       });
     }
 
     if (data.accountGroups.length > 0) {
       await tx.accountGroup.createMany({
-        data: data.accountGroups.map((item) => ({
-          id: String(item.id),
-          name: String(item.name ?? ""),
-          sortOrder: Number(item.sortOrder ?? 0),
-          householdId,
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-          updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-        })),
+        data: (await filterRestoreRecords(
+          "AccountGroup",
+          data.accountGroups.map((item) => ({
+            ...item,
+            id: String(item.id),
+            name: String(item.name ?? ""),
+            householdId,
+          })),
+        )) as never,
       });
     }
 
     if (data.institutions.length > 0) {
       await tx.institution.createMany({
-        data: data.institutions.map((item) => ({
-          id: String(item.id),
-          name: String(item.name ?? ""),
-          shortName: item.shortName == null ? null : String(item.shortName),
-          type: item.type == null ? null : String(item.type),
-          householdId,
-        })),
+        data: (await filterRestoreRecords(
+          "Institution",
+          data.institutions.map((item) => ({
+            ...item,
+            id: String(item.id),
+            name: String(item.name ?? ""),
+            householdId,
+          })),
+        )) as never,
       });
     }
 
@@ -2606,17 +2837,34 @@ export async function restoreHouseholdBackup(
     }
 
     for (const categoryBatch of restoredCategoryBatches) {
-      await tx.category.createMany({ data: categoryBatch });
+      await tx.category.createMany({
+        data: (await filterRestoreRecords(
+          "Category",
+          categoryBatch.map((record) => ({
+            ...record.extraFields,
+            id: record.id,
+            name: record.name,
+            type: record.type,
+            icon: record.icon,
+            parentId: record.parentId,
+            householdId: record.householdId,
+            isSystem: record.isSystem,
+          })),
+        )) as never,
+      });
     }
 
     if (data.tags.length > 0) {
       await tx.tag.createMany({
-        data: data.tags.map((item) => ({
-          id: String(item.id),
-          name: String(item.name ?? ""),
-          color: item.color == null ? null : String(item.color),
-          householdId,
-        })),
+        data: (await filterRestoreRecords(
+          "Tag",
+          data.tags.map((item) => ({
+            ...item,
+            id: String(item.id),
+            name: String(item.name ?? ""),
+            householdId,
+          })),
+        )) as never,
       });
     }
 
@@ -2637,7 +2885,11 @@ export async function restoreHouseholdBackup(
         .filter(isPresent),
     ];
     if (statementRecognitionRules.length > 0) {
-      await createManySkipDuplicatesCompat(tx.statementRecognitionRule, statementRecognitionRules);
+      await createManySkipDuplicatesRestore(
+        "statement_recognition_rules",
+        tx.statementRecognitionRule,
+        statementRecognitionRules,
+      );
     }
 
     if (data.insuranceProductMasters.length > 0) {
@@ -2665,115 +2917,83 @@ export async function restoreHouseholdBackup(
 
     if (data.fundQueryApis.length > 0) {
       await tx.fundQueryApi.createMany({
-        data: data.fundQueryApis.map((item) => ({
-          id: String(item.id),
-          name: String(item.name ?? ""),
-          code: String(item.code ?? ""),
-          baseUrl: String(item.baseUrl ?? ""),
-          apiKey: item.apiKey == null ? null : String(item.apiKey),
-          priority: Number(item.priority ?? 0),
-          isActive: item.isActive == null ? true : Boolean(item.isActive),
-          householdId: isSystemRestore && item.householdId == null ? null : householdId,
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-          updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-        })),
+        data: (await filterRestoreRecords(
+          "FundQueryApi",
+          data.fundQueryApis.map((item) => ({
+            ...item,
+            id: String(item.id),
+            householdId: isSystemRestore && item.householdId == null ? null : householdId,
+          })),
+        )) as never,
       });
     }
 
     if (data.preciousMetalTypes.length > 0) {
-      await createManySkipDuplicatesCompat(
+      await createManySkipDuplicatesRestore(
+        "PreciousMetalType",
         tx.preciousMetalType,
         data.preciousMetalTypes.map((item) => ({
+          ...item,
           id: String(item.id),
-          code: String(item.code ?? ""),
-          name: String(item.name ?? ""),
-          shortName: item.shortName == null ? null : String(item.shortName),
-          sortOrder: Number(item.sortOrder ?? 0),
-          isActive: item.isActive == null ? true : Boolean(item.isActive),
-          isSystem: Boolean(item.isSystem),
           householdId,
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-          updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
         })),
       );
     }
 
     if (data.preciousMetalUnits.length > 0) {
-      await createManySkipDuplicatesCompat(
+      await createManySkipDuplicatesRestore(
+        "PreciousMetalUnit",
         tx.preciousMetalUnit,
         data.preciousMetalUnits.map((item) => ({
+          ...item,
           id: String(item.id),
-          code: String(item.code ?? ""),
-          name: String(item.name ?? ""),
-          symbol: item.symbol == null ? null : String(item.symbol),
-          decimals: Number(item.decimals ?? 3),
-          sortOrder: Number(item.sortOrder ?? 0),
-          isActive: item.isActive == null ? true : Boolean(item.isActive),
-          isSystem: Boolean(item.isSystem),
           householdId,
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-          updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
         })),
       );
     }
 
     if (data.accounts.length > 0) {
       await tx.account.createMany({
-        data: data.accounts.map((item) => ({
-          id: String(item.id),
-          name: String(item.name ?? ""),
-          balance: item.balance == null ? "0" : String(item.balance),
-          kind: String(item.kind ?? "other") as never,
-          debtDirection: item.debtDirection == null ? null : (String(item.debtDirection) as never),
-          currency: item.currency == null ? "CNY" : String(item.currency),
-          isActive: item.isActive == null ? true : Boolean(item.isActive),
-          isPlaceholder: item.isPlaceholder == null ? false : Boolean(item.isPlaceholder),
-          investProductType: item.investProductType == null ? null : (String(item.investProductType) as never),
-          creditLimit: item.creditLimit == null ? null : String(item.creditLimit),
-          billingDay: item.billingDay == null ? null : Number(item.billingDay),
-          repaymentDay: item.repaymentDay == null ? null : Number(item.repaymentDay),
-          creditBillMode: item.creditBillMode == null ? "separate" : (String(item.creditBillMode) as never),
-          numberMasked: item.numberMasked == null ? null : String(item.numberMasked),
-          routeKey: item.routeKey == null ? null : String(item.routeKey),
-          note: item.note == null ? null : String(item.note),
-          usageCount: Number(item.usageCount ?? 0),
-          lastUsedAt: item.lastUsedAt == null ? null : new Date(String(item.lastUsedAt)),
-          householdId,
-          institutionId:
-            item.institutionId && importedInstitutions.has(String(item.institutionId)) ? String(item.institutionId) : null,
-          counterpartyId:
-            item.counterpartyId && importedCounterparties.has(String(item.counterpartyId)) ? String(item.counterpartyId) : null,
-          userId: item.userId && importedUserSet.has(String(item.userId)) ? String(item.userId) : null,
-          groupId:
-            item.groupId && importedAccountGroups.has(String(item.groupId))
-              ? String(item.groupId)
-              : restoreError(`备份文件缺少账户分组：${String(item.groupId ?? "")}`),
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-          updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-          costBasisMethod: item.costBasisMethod == null ? null : (String(item.costBasisMethod) as never),
-          defaultConfirmDays: item.defaultConfirmDays == null ? null : Number(item.defaultConfirmDays),
-          defaultArrivalDays: item.defaultArrivalDays == null ? null : Number(item.defaultArrivalDays),
-          tradingCalendar: item.tradingCalendar == null ? null : (String(item.tradingCalendar) as never),
-          defaultFundQueryApiId:
-            item.defaultFundQueryApiId && importedFundQueryApis.has(String(item.defaultFundQueryApiId))
-              ? String(item.defaultFundQueryApiId)
-              : null,
-          fundUnitsDecimals: item.fundUnitsDecimals == null ? 2 : Number(item.fundUnitsDecimals),
-        })),
+        data: (await filterRestoreRecords(
+          "Account",
+          data.accounts.map((item) => ({
+            ...item,
+            id: String(item.id),
+            name: String(item.name ?? ""),
+            balance: item.balance == null ? "0" : String(item.balance),
+            kind: String(item.kind ?? "other") as never,
+            householdId,
+            institutionId:
+              item.institutionId && importedInstitutions.has(String(item.institutionId)) ? String(item.institutionId) : null,
+            counterpartyId:
+              item.counterpartyId && importedCounterparties.has(String(item.counterpartyId)) ? String(item.counterpartyId) : null,
+            userId: item.userId && importedUserSet.has(String(item.userId)) ? String(item.userId) : null,
+            defaultFundQueryApiId:
+              item.defaultFundQueryApiId && importedFundQueryApis.has(String(item.defaultFundQueryApiId))
+                ? String(item.defaultFundQueryApiId)
+                : null,
+            groupId:
+              item.groupId && importedAccountGroups.has(String(item.groupId))
+                ? String(item.groupId)
+                : restoreError(`备份文件缺少账户分组：${String(item.groupId ?? "")}`),
+          })),
+        )) as never,
       });
     }
 
     if (data.accountAliases.length > 0) {
       await tx.accountAlias.createMany({
-        data: data.accountAliases
-          .filter((item) => importedAccounts.has(String(item.accountId)))
-          .map((item) => ({
-            id: String(item.id),
-            alias: String(item.alias ?? ""),
-            accountId: String(item.accountId),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-          })),
+        data: (await filterRestoreRecords(
+          "AccountAlias",
+          data.accountAliases
+            .filter((item) => importedAccounts.has(String(item.accountId)))
+            .map((item) => ({
+              ...item,
+              id: String(item.id),
+              alias: String(item.alias ?? ""),
+              accountId: String(item.accountId),
+            })),
+        )) as never,
       });
     }
 
@@ -2786,220 +3006,193 @@ export async function restoreHouseholdBackup(
 
     if (data.billOverrides.length > 0) {
       await tx.billOverride.createMany({
-        data: data.billOverrides
-          .filter((item) => importedAccounts.has(String(item.accountId)))
-          .map((item) => ({
-            id: String(item.id),
-            accountId: String(item.accountId),
-            statementMonth: String(item.statementMonth ?? ""),
-            amount: item.amount == null ? "0" : String(item.amount),
-            note: item.note == null ? null : String(item.note),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-          })),
+        data: (await filterRestoreRecords(
+          "BillOverride",
+          data.billOverrides
+            .filter((item) => importedAccounts.has(String(item.accountId)))
+            .map((item) => ({
+              ...item,
+              id: String(item.id),
+              accountId: String(item.accountId),
+              statementMonth: String(item.statementMonth ?? ""),
+              amount: item.amount == null ? "0" : String(item.amount),
+            })),
+        )) as never,
       });
     }
 
     if (data.creditCardCycles.length > 0) {
       await tx.creditCardCycle.createMany({
-        data: data.creditCardCycles
-          .filter((item) => importedAccounts.has(String(item.accountId)))
-          .map((item) => ({
-            id: String(item.id),
-            accountId: String(item.accountId),
-            statementMonth: String(item.statementMonth ?? ""),
-            periodStart: new Date(String(item.periodStart)),
-            periodEnd: new Date(String(item.periodEnd)),
-            dueDate: item.dueDate == null ? null : new Date(String(item.dueDate)),
-            expenseAbs: item.expenseAbs == null ? "0" : String(item.expenseAbs),
-            income: item.income == null ? "0" : String(item.income),
-            paid: item.paid == null ? "0" : String(item.paid),
-            rawBill: item.rawBill == null ? "0" : String(item.rawBill),
-            effectiveBill: item.effectiveBill == null ? "0" : String(item.effectiveBill),
-            cumulativeRemain: item.cumulativeRemain == null ? "0" : String(item.cumulativeRemain),
-            cumulativeOverpaid: item.cumulativeOverpaid == null ? "0" : String(item.cumulativeOverpaid),
-            isCurrentCycle: item.isCurrentCycle == null ? false : Boolean(item.isCurrentCycle),
-            isLocked: item.isLocked == null ? false : Boolean(item.isLocked),
-            lockSource: item.lockSource == null ? null : String(item.lockSource),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-          })),
+        data: (await filterRestoreRecords(
+          "CreditCardCycle",
+          data.creditCardCycles
+            .filter((item) => importedAccounts.has(String(item.accountId)))
+            .map((item) => ({
+              ...item,
+              id: String(item.id),
+              accountId: String(item.accountId),
+              statementMonth: String(item.statementMonth ?? ""),
+              periodStart: new Date(String(item.periodStart)),
+              periodEnd: new Date(String(item.periodEnd)),
+            })),
+        )) as never,
+      });
+    }
+
+    if (data.creditCardBillingDays.length > 0) {
+      await tx.creditCardBillingDay.createMany({
+        data: (await filterRestoreRecords(
+          "CreditCardBillingDay",
+          data.creditCardBillingDays
+            .filter((item) => importedAccounts.has(String(item.accountId)))
+            .map((item) => ({
+              ...item,
+              id: String(item.id),
+              accountId: String(item.accountId),
+              effectiveDate: item.effectiveDate ? new Date(String(item.effectiveDate)) : new Date(),
+            })),
+        )) as never,
       });
     }
 
     if (data.fundConfirmDays.length > 0) {
       await tx.fundConfirmDays.createMany({
-        data: data.fundConfirmDays
-          .filter((item) => importedAccounts.has(String(item.accountId)))
-          .map((item) => ({
-            id: String(item.id),
-            accountId: String(item.accountId),
-            fundCode: String(item.fundCode ?? ""),
-            days: Number(item.days ?? 0),
-            redeemCostDays: Number(item.redeemCostDays ?? 1),
-            arrivalDays: Number(item.arrivalDays ?? 0),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-            effectiveDate: item.effectiveDate ? new Date(String(item.effectiveDate)) : new Date(),
-          })),
+        data: (await filterRestoreRecords(
+          "FundConfirmDays",
+          data.fundConfirmDays
+            .filter((item) => importedAccounts.has(String(item.accountId)))
+            .map((item) => ({
+              ...item,
+              id: String(item.id),
+              accountId: String(item.accountId),
+              fundCode: String(item.fundCode ?? ""),
+              effectiveDate: item.effectiveDate ? new Date(String(item.effectiveDate)) : new Date(),
+            })),
+        )) as never,
       });
     }
 
     if (data.fundFeeRates.length > 0) {
       await tx.fundFeeRate.createMany({
-        data: data.fundFeeRates
-          .filter((item) => importedAccounts.has(String(item.accountId)))
-          .map((item) => ({
-            id: String(item.id),
-            accountId: String(item.accountId),
-            fundCode: String(item.fundCode ?? ""),
-            rate: item.rate == null ? "0" : String(item.rate),
-            effectiveDate: item.effectiveDate ? new Date(String(item.effectiveDate)) : new Date(),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-            feeType: String(item.feeType ?? "buy") as never,
-          })),
+        data: (await filterRestoreRecords(
+          "FundFeeRate",
+          data.fundFeeRates
+            .filter((item) => importedAccounts.has(String(item.accountId)))
+            .map((item) => ({
+              ...item,
+              id: String(item.id),
+              accountId: String(item.accountId),
+              fundCode: String(item.fundCode ?? ""),
+              effectiveDate: item.effectiveDate ? new Date(String(item.effectiveDate)) : new Date(),
+            })),
+        )) as never,
       });
     }
 
     if (data.fundHoldings.length > 0) {
       await tx.fundHolding.createMany({
-        data: data.fundHoldings
-          .filter((item) => importedAccounts.has(String(item.accountId)))
-          .map((item) => ({
-            id: String(item.id),
-            accountId: String(item.accountId),
-            fundCode: String(item.fundCode ?? ""),
-            fundName: item.fundName == null ? null : String(item.fundName),
-            units: item.units == null ? "0" : String(item.units),
-            avgCost: item.avgCost == null ? "0" : String(item.avgCost),
-            cost: item.cost == null ? "0" : String(item.cost),
-            nav: item.nav == null ? null : String(item.nav),
-            pendingCost: item.pendingCost == null ? "0" : String(item.pendingCost),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-            historicalProfit: item.historicalProfit == null ? "0" : String(item.historicalProfit),
-          })),
+        data: (await filterRestoreRecords(
+          "FundHolding",
+          data.fundHoldings
+            .filter((item) => importedAccounts.has(String(item.accountId)))
+            .map((item) => ({
+              ...item,
+              id: String(item.id),
+              accountId: String(item.accountId),
+              fundCode: String(item.fundCode ?? ""),
+            })),
+        )) as never,
       });
     }
 
     if (data.stockSecurities.length > 0) {
-      await createManySkipDuplicatesCompat(
+      await createManySkipDuplicatesRestore(
+        "stock_securities",
         tx.stockSecurity,
         data.stockSecurities.map((item) => ({
+          ...item,
           id: String(item.id),
           householdId,
           market: String(item.market ?? "CN"),
           stockCode: String(item.stockCode ?? ""),
           stockName: String(item.stockName ?? item.stockCode ?? ""),
-          currency: item.currency == null ? "CNY" : String(item.currency),
-          exchange: item.exchange == null ? null : String(item.exchange),
-          isActive: item.isActive == null ? true : Boolean(item.isActive),
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-          updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
         })),
       );
     }
 
     if (data.stockHoldings.length > 0) {
-      await createManySkipDuplicatesCompat(
+      await createManySkipDuplicatesRestore(
+        "stock_holdings",
         tx.stockHolding,
         data.stockHoldings
           .filter((item) => importedAccounts.has(String(item.accountId)) && importedStockSecurities.has(String(item.securityId)))
           .map((item) => ({
+            ...item,
             id: String(item.id),
             householdId,
             accountId: String(item.accountId),
             securityId: String(item.securityId),
             market: String(item.market ?? "CN"),
             stockCode: String(item.stockCode ?? ""),
-            stockName: item.stockName == null ? null : String(item.stockName),
-            quantity: item.quantity == null ? "0" : String(item.quantity),
-            avgCost: item.avgCost == null ? "0" : String(item.avgCost),
-            cost: item.cost == null ? "0" : String(item.cost),
-            latestPrice: item.latestPrice == null ? null : String(item.latestPrice),
-            marketValue: item.marketValue == null ? "0" : String(item.marketValue),
-            historicalProfit: item.historicalProfit == null ? "0" : String(item.historicalProfit),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
           })),
       );
     }
 
     if (data.stockPriceCache.length > 0) {
-      await createManySkipDuplicatesCompat(
+      await createManySkipDuplicatesRestore(
+        "stock_price_cache",
         tx.stockPriceCache,
         data.stockPriceCache
           .filter((item) => !item.securityId || importedStockSecurities.has(String(item.securityId)))
           .map((item) => ({
+            ...item,
             id: String(item.id),
             securityId: item.securityId && importedStockSecurities.has(String(item.securityId)) ? String(item.securityId) : null,
             market: String(item.market ?? "CN"),
             stockCode: String(item.stockCode ?? ""),
             priceDate: item.priceDate ? new Date(String(item.priceDate)) : new Date(),
-            closePrice: item.closePrice == null ? "0" : String(item.closePrice),
-            currency: item.currency == null ? "CNY" : String(item.currency),
-            source: item.source == null ? "manual" : String(item.source),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
           })),
       );
     }
 
     if (data.stockFeeRules.length > 0) {
-      await createManySkipDuplicatesCompat(
+      await createManySkipDuplicatesRestore(
+        "stock_fee_rules",
         tx.stockFeeRule,
         data.stockFeeRules
           .filter((item) => importedAccounts.has(String(item.accountId)) && (!item.securityId || importedStockSecurities.has(String(item.securityId))))
           .map((item) => ({
+            ...item,
             id: String(item.id),
             accountId: String(item.accountId),
             securityId: item.securityId && importedStockSecurities.has(String(item.securityId)) ? String(item.securityId) : null,
-            market: item.market == null ? null : String(item.market),
-            stockCode: item.stockCode == null ? null : String(item.stockCode),
-            feeType: String(item.feeType ?? "commission") as never,
-            direction: String(item.direction ?? "both") as never,
-            rate: item.rate == null ? null : String(item.rate),
-            amount: item.amount == null ? null : String(item.amount),
-            minAmount: item.minAmount == null ? null : String(item.minAmount),
-            currency: item.currency == null ? "CNY" : String(item.currency),
             effectiveDate: item.effectiveDate ? new Date(String(item.effectiveDate)) : new Date(),
-            source: item.source == null ? "manual" : String(item.source),
-            note: item.note == null ? null : String(item.note),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
           })),
       );
     }
 
     if (data.stockMarketFeeRules.length > 0) {
-      await createManySkipDuplicatesCompat(
+      await createManySkipDuplicatesRestore(
+        "stock_market_fee_rules",
         tx.stockMarketFeeRule,
         data.stockMarketFeeRules.map((item) => ({
+          ...item,
           id: String(item.id),
           householdId,
           market: String(item.market ?? "CN"),
-          stockCode: item.stockCode == null ? null : String(item.stockCode),
-          feeType: String(item.feeType ?? "commission") as never,
-          direction: String(item.direction ?? "both") as never,
-          rate: item.rate == null ? null : String(item.rate),
-          amount: item.amount == null ? null : String(item.amount),
-          minAmount: item.minAmount == null ? null : String(item.minAmount),
-          currency: item.currency == null ? "CNY" : String(item.currency),
           effectiveDate: item.effectiveDate ? new Date(String(item.effectiveDate)) : new Date(),
-          source: item.source == null ? "manual" : String(item.source),
-          sourceUrl: item.sourceUrl == null ? null : String(item.sourceUrl),
-          note: item.note == null ? null : String(item.note),
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-          updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
         })),
       );
     }
 
     if (data.preciousMetalHoldings.length > 0) {
-      await createManySkipDuplicatesCompat(
+      await createManySkipDuplicatesRestore(
+        "PreciousMetalHolding",
         tx.preciousMetalHolding,
         data.preciousMetalHoldings
           .filter((item) => importedAccounts.has(String(item.accountId)))
           .map((item) => ({
+            ...item,
             id: String(item.id),
             accountId: String(item.accountId),
             householdId,
@@ -3007,13 +3200,6 @@ export async function restoreHouseholdBackup(
             metalTypeName: String(item.metalTypeName ?? ""),
             metalUnitId: String(item.metalUnitId ?? ""),
             metalUnitName: String(item.metalUnitName ?? ""),
-            quantity: item.quantity == null ? "0" : String(item.quantity),
-            avgCost: item.avgCost == null ? "0" : String(item.avgCost),
-            cost: item.cost == null ? "0" : String(item.cost),
-            unitPrice: item.unitPrice == null ? null : String(item.unitPrice),
-            marketValue: item.marketValue == null ? "0" : String(item.marketValue),
-            historicalProfit: item.historicalProfit == null ? "0" : String(item.historicalProfit),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
           })),
       );
     }
@@ -3105,14 +3291,14 @@ export async function restoreHouseholdBackup(
 
     if (data.importBatches.length > 0) {
       await tx.importBatch.createMany({
-        data: data.importBatches.map((item) => ({
-          id: String(item.id),
-          source: item.source == null ? null : String(item.source),
-          note: item.note == null ? null : String(item.note),
-          rawText: item.rawText == null ? null : String(item.rawText),
-          householdId,
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-        })),
+        data: (await filterRestoreRecords(
+          "ImportBatch",
+          data.importBatches.map((item) => ({
+            ...item,
+            id: String(item.id),
+            householdId,
+          })),
+        )) as never,
       });
     }
     await reportProgress({ stage: "importing", percent: 68, label: "导入交易明细", detail: "正在写入交易记录" });
@@ -3126,88 +3312,50 @@ export async function restoreHouseholdBackup(
             const categoryId = item.categoryId && importedCategories.has(String(item.categoryId))
               ? String(item.categoryId)
               : null;
+            const splitFundProjection = isSplitFundProjection(item);
             return {
+              ...item,
               id: String(item.id),
               date: new Date(String(item.date)),
-              postedAt: item.postedAt == null ? null : new Date(String(item.postedAt)),
               type: String(item.type ?? "expense") as never,
               amount: item.amount == null ? "0" : String(item.amount),
               accountId: String(item.accountId),
               accountName: String(item.accountName ?? ""),
               toAccountId: item.toAccountId && importedAccounts.has(String(item.toAccountId)) ? String(item.toAccountId) : null,
-              toAccountName: item.toAccountName == null ? null : String(item.toAccountName),
               categoryId,
               categoryName: categoryId
                 ? restoredCategoryNameById.get(categoryId) ?? (item.categoryName == null ? null : String(item.categoryName))
                 : item.categoryName == null ? null : String(item.categoryName),
               fundCode: null,
-              fundProductType: isSplitFundProjection(item) || item.fundProductType == null ? null : (String(item.fundProductType) as never),
+              fundProductType: splitFundProjection || item.fundProductType == null ? null : (String(item.fundProductType) as never),
               metalTypeId:
                 item.metalTypeId && importedPreciousMetalTypes.has(String(item.metalTypeId))
                   ? String(item.metalTypeId)
                   : null,
-              metalTypeName: item.metalTypeName == null ? null : String(item.metalTypeName),
               metalUnitId:
                 item.metalUnitId && importedPreciousMetalUnits.has(String(item.metalUnitId))
                   ? String(item.metalUnitId)
                   : null,
-              metalUnitName: item.metalUnitName == null ? null : String(item.metalUnitName),
-              metalQuantity: item.metalQuantity == null ? null : String(item.metalQuantity),
-              metalUnitPrice: item.metalUnitPrice == null ? null : String(item.metalUnitPrice),
-              metalFee: item.metalFee == null ? null : String(item.metalFee),
-              confirmDate: item.confirmDate == null ? null : new Date(String(item.confirmDate)),
-              statementMonth: item.statementMonth == null ? null : String(item.statementMonth),
-              note: item.note == null ? null : String(item.note),
-              toNote: item.toNote == null ? null : String(item.toNote),
-              deletedAt: item.deletedAt == null ? null : new Date(String(item.deletedAt)),
-              importBatchId:
-                item.importBatchId && importedImportBatches.has(String(item.importBatchId)) ? String(item.importBatchId) : null,
-              householdId,
-              createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-              updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-              dayOrder: Number(item.dayOrder ?? 0),
-              currency: item.currency == null ? "CNY" : String(item.currency),
-              paymentChannelId: item.paymentChannelId == null ? null : String(item.paymentChannelId),
-              paymentChannelName: item.paymentChannelName == null ? null : String(item.paymentChannelName),
-              counterpartyInstitutionId:
-                item.counterpartyInstitutionId && importedInstitutions.has(String(item.counterpartyInstitutionId))
-                  ? String(item.counterpartyInstitutionId)
-                  : null,
-              counterpartyInstitutionName:
-                item.counterpartyInstitutionName == null ? null : String(item.counterpartyInstitutionName),
-              status: String(item.status ?? "posted") as never,
-              fundArrivalAmount: isSplitFundProjection(item) || item.fundArrivalAmount == null ? null : String(item.fundArrivalAmount),
-              fundArrivalDate: isSplitFundProjection(item) || item.fundArrivalDate == null ? null : new Date(String(item.fundArrivalDate)),
-              depositAnnualRate: item.depositAnnualRate == null ? null : String(item.depositAnnualRate),
-              depositInterest: item.depositInterest == null ? null : String(item.depositInterest),
-              depositSourceEntryId:
-                item.depositSourceEntryId && importedTransactions.has(String(item.depositSourceEntryId))
-                  ? String(item.depositSourceEntryId)
-                  : null,
+              fundArrivalAmount: splitFundProjection ? null : item.fundArrivalAmount,
+              fundArrivalDate: splitFundProjection || item.fundArrivalDate == null ? null : new Date(String(item.fundArrivalDate)),
               fundSourceEntryId:
                 item.fundSourceEntryId && importedTransactions.has(String(item.fundSourceEntryId))
                   ? String(item.fundSourceEntryId)
                   : null,
-              debtPrincipalAmount: item.debtPrincipalAmount == null ? null : String(item.debtPrincipalAmount),
-              debtInterestAmount: item.debtInterestAmount == null ? null : String(item.debtInterestAmount),
-              debtFeeAmount: item.debtFeeAmount == null ? null : String(item.debtFeeAmount),
-              fundConfirmDate: isSplitFundProjection(item) || item.fundConfirmDate == null ? null : new Date(String(item.fundConfirmDate)),
-              fundFee: isSplitFundProjection(item) || item.fundFee == null ? null : String(item.fundFee),
-              fundNav: isSplitFundProjection(item) || item.fundNav == null ? null : String(item.fundNav),
-              fundSubtype: isSplitFundProjection(item) || item.fundSubtype == null ? null : (String(item.fundSubtype) as never),
-              fundUnits: isSplitFundProjection(item) || item.fundUnits == null ? null : String(item.fundUnits),
-              realizedProfit: item.realizedProfit == null ? null : String(item.realizedProfit),
+              debtPrincipalAmount: item.debtPrincipalAmount,
+              debtInterestAmount: item.debtInterestAmount,
+              debtFeeAmount: item.debtFeeAmount,
+              fundConfirmDate: splitFundProjection || item.fundConfirmDate == null ? null : new Date(String(item.fundConfirmDate)),
+              fundFee: splitFundProjection || item.fundFee == null ? null : item.fundFee,
+              fundNav: splitFundProjection || item.fundNav == null ? null : item.fundNav,
+              fundSubtype: splitFundProjection || item.fundSubtype == null ? null : (String(item.fundSubtype) as never),
+              fundUnits: splitFundProjection || item.fundUnits == null ? null : item.fundUnits,
               regularInvestPlanId: item.regularInvestPlanId == null ? null : String(item.regularInvestPlanId),
               creditCardInstallmentPlanId:
                 item.creditCardInstallmentPlanId && importedCreditCardInstallmentPlans.has(String(item.creditCardInstallmentPlanId))
                   ? String(item.creditCardInstallmentPlanId)
                   : null,
-              installmentNo: item.installmentNo == null ? null : Number(item.installmentNo),
-              installmentTotal: item.installmentTotal == null ? null : Number(item.installmentTotal),
-              installmentPrincipal: item.installmentPrincipal == null ? null : String(item.installmentPrincipal),
-              installmentInterest: item.installmentInterest == null ? null : String(item.installmentInterest),
-              installmentRole: item.installmentRole == null ? null : String(item.installmentRole),
-              fundName: isSplitFundProjection(item) || item.fundName == null ? null : String(item.fundName),
+              fundName: splitFundProjection || item.fundName == null ? null : String(item.fundName),
               wealthProductId:
                 item.wealthProductId && importedWealthProducts.has(String(item.wealthProductId))
                   ? String(item.wealthProductId)
@@ -3216,10 +3364,17 @@ export async function restoreHouseholdBackup(
                 item.insuranceProductId && importedInsuranceProducts.has(String(item.insuranceProductId))
                   ? String(item.insuranceProductId)
                   : null,
-              insuranceAction: item.insuranceAction == null ? null : String(item.insuranceAction),
-              insuranceProductName: item.insuranceProductName == null ? null : String(item.insuranceProductName),
-              source: item.source == null ? null : String(item.source),
-              entryOrigin: item.entryOrigin == null ? "manual" : String(item.entryOrigin),
+              depositSourceEntryId:
+                item.depositSourceEntryId && importedTransactions.has(String(item.depositSourceEntryId))
+                  ? String(item.depositSourceEntryId)
+                  : null,
+              counterpartyInstitutionId:
+                item.counterpartyInstitutionId && importedInstitutions.has(String(item.counterpartyInstitutionId))
+                  ? String(item.counterpartyInstitutionId)
+                  : null,
+              importBatchId:
+                item.importBatchId && importedImportBatches.has(String(item.importBatchId)) ? String(item.importBatchId) : null,
+              householdId,
             };
           },
         {
@@ -3228,7 +3383,7 @@ export async function restoreHouseholdBackup(
             : {
                 batchSize: Math.max(data.transactions.length, 1),
                 fastInsert: (batch: Record<string, unknown>[]) =>
-                  insertTransactionsViaJson(tx as RawExecuteClient, batch),
+                  insertTransactionsViaJson(tx, batch),
               }),
           afterChunk: async (completed, total) => {
             const percent = 68 + Math.round((Math.min(completed, total) / Math.max(total, 1)) * 12);
@@ -3640,13 +3795,9 @@ export async function restoreHouseholdBackup(
         (item) =>
           importedTransactions.has(String(item.entryId))
             ? {
+            ...item,
             id: String(item.id),
-            name: item.name == null ? null : String(item.name),
-            mimeType: item.mimeType == null ? null : String(item.mimeType),
-            url: item.url == null ? null : String(item.url),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
             entryId: String(item.entryId),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
               }
             : null,
       );
@@ -3668,43 +3819,24 @@ export async function restoreHouseholdBackup(
 
     if (data.regularInvestPlans.length > 0) {
       await tx.regularInvestPlan.createMany({
-        data: data.regularInvestPlans
-          .filter((item) => importedAccounts.has(String(item.accountId)))
-          .map((item) => ({
-            id: String(item.id),
-            accountId: String(item.accountId),
-            cashAccountId:
-              item.cashAccountId && importedAccounts.has(String(item.cashAccountId)) ? String(item.cashAccountId) : null,
-            fundCode: String(item.fundCode ?? ""),
-            fundName: item.fundName == null ? null : String(item.fundName),
-            amount: item.amount == null ? "0" : String(item.amount),
-            intervalUnit: String(item.intervalUnit ?? "month") as never,
-            intervalValue: Number(item.intervalValue ?? 1),
-            nextRunDate: new Date(String(item.nextRunDate)),
-            lastRunDate: item.lastRunDate == null ? null : new Date(String(item.lastRunDate)),
-            feeRate: item.feeRate == null ? null : String(item.feeRate),
-            confirmDays: item.confirmDays == null ? null : Number(item.confirmDays),
-            arrivalDays: item.arrivalDays == null ? 2 : Number(item.arrivalDays),
-            createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-            updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-            accountName: String(item.accountName ?? ""),
-            cashAccountName: item.cashAccountName == null ? null : String(item.cashAccountName),
-            endDate: item.endDate == null ? null : new Date(String(item.endDate)),
-            executedRuns: Number(item.executedRuns ?? 0),
-            fundProductType: item.fundProductType == null ? null : (String(item.fundProductType) as never),
-            taskType: item.taskType == null ? null : String(item.taskType),
-            planName: item.planName == null ? null : String(item.planName),
-            targetName: item.targetName == null ? null : String(item.targetName),
-            insuranceProductName: item.insuranceProductName == null ? null : String(item.insuranceProductName),
-            memo: item.memo == null ? null : String(item.memo),
-            startDate: new Date(String(item.startDate)),
-            status: String(item.status ?? "active") as never,
-            totalRuns: item.totalRuns == null ? null : Number(item.totalRuns),
-            executionDay: item.executionDay == null ? null : Number(item.executionDay),
-            secondaryExecutionDay: item.secondaryExecutionDay == null ? null : Number(item.secondaryExecutionDay),
-            skipPendingPreceding: item.skipPendingPreceding == null ? true : Boolean(item.skipPendingPreceding),
-            householdId,
-          })),
+        data: (await filterRestoreRecords(
+          "RegularInvestPlan",
+          data.regularInvestPlans
+            .filter((item) => importedAccounts.has(String(item.accountId)))
+            .map((item) => ({
+              ...item,
+              id: String(item.id),
+              accountId: String(item.accountId),
+              cashAccountId:
+                item.cashAccountId && importedAccounts.has(String(item.cashAccountId)) ? String(item.cashAccountId) : null,
+              fundCode: String(item.fundCode ?? ""),
+              amount: item.amount == null ? "0" : String(item.amount),
+              nextRunDate: new Date(String(item.nextRunDate)),
+              accountName: String(item.accountName ?? ""),
+              startDate: new Date(String(item.startDate)),
+              householdId,
+            })),
+        )) as never,
       });
     }
 
@@ -3724,26 +3856,19 @@ export async function restoreHouseholdBackup(
 
     if (data.emailAccounts.length > 0) {
       await tx.emailAccount.createMany({
-        data: data.emailAccounts.map((item) => ({
-          id: String(item.id),
-          householdId,
-          label: String(item.label ?? ""),
-          username: String(item.username ?? ""),
-          imapHost: String(item.imapHost ?? ""),
-          imapPort: Number(item.imapPort ?? 993),
-          imapSecure: item.imapSecure == null ? true : Boolean(item.imapSecure),
-          outboundType: String(item.outboundType ?? "smtp"),
-          smtpHost: item.smtpHost == null ? null : String(item.smtpHost),
-          smtpPort: item.smtpPort == null ? null : Number(item.smtpPort),
-          smtpSecure: item.smtpSecure == null ? null : Boolean(item.smtpSecure),
-          smtpFrom: item.smtpFrom == null ? null : String(item.smtpFrom),
-          resendApiKey: item.resendApiKey == null ? null : String(item.resendApiKey),
-          resendFrom: item.resendFrom == null ? null : String(item.resendFrom),
-          password: String(item.password ?? ""),
-          mailbox: item.mailbox == null ? "INBOX" : String(item.mailbox),
-          createdAt: item.createdAt ? new Date(String(item.createdAt)) : new Date(),
-          updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : new Date(),
-        })),
+        data: (await filterRestoreRecords(
+          "EmailAccount",
+          data.emailAccounts.map((item) => ({
+            ...item,
+            id: String(item.id),
+            householdId,
+            label: String(item.label ?? ""),
+            username: String(item.username ?? ""),
+            imapHost: String(item.imapHost ?? ""),
+            imapPort: Number(item.imapPort ?? 993),
+            password: String(item.password ?? ""),
+          })),
+        )) as never,
       });
     }
 
@@ -3761,6 +3886,7 @@ export async function restoreHouseholdBackup(
       });
     }
   }, { maxWait: 10_000, timeout: 300_000 });
+  activeRestoreSchemaClient = null;
 
   await reportProgress({ stage: "finalizing", percent: 96, label: "收尾处理", detail: "正在刷新恢复后的加密缓存" });
   const { clearMasterKeyCache } = await import("@/lib/auth/encrypt");

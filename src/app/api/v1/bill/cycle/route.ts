@@ -64,7 +64,15 @@ function cycleEndForMonth(statementMonth: string, billingDay: number) {
   return new Date(Date.UTC(parsed.year, parsed.monthIndex, clampDay(parsed.year, parsed.monthIndex, billingDay)));
 }
 
-function dueForCycle(periodEnd: Date, billingDay: number, repaymentDay: number | null) {
+function dueForCycle(
+  periodEnd: Date,
+  billingDay: number,
+  repaymentDay: number | null,
+  repaymentOffsetDays?: number | null,
+) {
+  if (repaymentOffsetDays != null && repaymentOffsetDays > 0) {
+    return addDaysUtc(periodEnd, repaymentOffsetDays);
+  }
   if (!repaymentDay || repaymentDay < 1) return null;
   const dueMonthOffset = repaymentDay <= billingDay ? 1 : 0;
   const dueMonth = periodEnd.getUTCMonth() + dueMonthOffset;
@@ -105,6 +113,7 @@ export async function PATCH(req: Request) {
         creditBillMode: true,
         billingDay: true,
         repaymentDay: true,
+        repaymentOffsetDays: true,
       },
     });
     if (!account) return NextResponse.json({ ok: false, code: "CREDIT_ACCOUNT_NOT_FOUND", error: "信用卡账户不存在" }, { status: 404 });
@@ -159,7 +168,7 @@ export async function PATCH(req: Request) {
       if (!nextEnd) continue;
       current.periodStart = addDaysUtc(previous.periodEnd, 1);
       current.periodEnd = nextEnd;
-      current.dueDate = dueForCycle(nextEnd, billingDay, repaymentDay);
+      current.dueDate = dueForCycle(nextEnd, billingDay, repaymentDay, account.repaymentOffsetDays);
     }
 
     const changedCycles = adjustedCycles.slice(startIndex);
@@ -180,18 +189,20 @@ export async function PATCH(req: Request) {
       ...oldChangedCycles.map((cycle) => cycle.periodEnd.getTime()),
     ));
 
+    const useOffset = account.repaymentOffsetDays != null && account.repaymentOffsetDays > 0;
     await prisma.$transaction(async (tx) => {
       await syncCreditCardInstitutionSettings(tx, {
         householdId,
         institutionId: account.institutionId,
         billingDay,
-        repaymentDay,
+        repaymentDay: useOffset ? null : repaymentDay,
+        repaymentOffsetDays: useOffset ? account.repaymentOffsetDays : null,
         creditBillMode: account.creditBillMode,
       });
       if (!account.institutionId) {
         await tx.account.update({
           where: { id: account.id },
-          data: { billingDay, repaymentDay },
+          data: { billingDay, repaymentDay: useOffset ? null : repaymentDay },
         });
       }
 
@@ -269,7 +280,8 @@ export async function PATCH(req: Request) {
     });
     const cycleRows = buildCreditCardCyclePersistRows({
       billingDay,
-      repaymentDay,
+      repaymentDay: useOffset ? null : repaymentDay,
+      repaymentOffsetDays: useOffset ? account.repaymentOffsetDays : null,
       months: creditCascade.allMonthsForCascade,
       summaryByMonth,
       effectiveBillByMonth: creditCascade.effectiveBillByMonth,

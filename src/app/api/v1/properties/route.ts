@@ -199,23 +199,42 @@ export async function GET(req: NextRequest) {
     const { householdId } = await getApiHouseholdScope(req);
     const accountId = req.nextUrl.searchParams.get("accountId")?.trim() || "";
     if (accountId) await assertPropertyAccount(accountId, householdId);
+    // The transaction list is only needed by full property views; entry dialogs
+    // pass transactions=0 to skip the heavy query. linkedCashEntryId asks for
+    // the single property transaction linked to one cash entry (loan/fixed-asset
+    // edit prefill).
+    const includeTransactions = req.nextUrl.searchParams.get("transactions") !== "0";
+    const linkedCashEntryId = req.nextUrl.searchParams.get("linkedCashEntryId")?.trim() || "";
 
-    const [assets, transactions] = await Promise.all([
+    const [assets, transactions, linkedTransaction] = await Promise.all([
       prisma.propertyAsset.findMany({
         where: { householdId, deletedAt: null, ...(accountId ? { accountId } : {}) },
         orderBy: [{ status: "asc" }, { latestValuationDate: "desc" }, { createdAt: "asc" }],
       }),
-      prisma.propertyTransaction.findMany({
-        where: { householdId, deletedAt: null, ...(accountId ? { accountId } : {}) },
-        include: {
-          Account: true,
-          CashAccount: true,
-          PropertyAsset: true,
-          EntryBusinessLink: { where: { deletedAt: null }, select: { id: true }, take: 1 },
-        },
-        orderBy: [{ tradeDate: "desc" }, { createdAt: "desc" }],
-        take: 500,
-      }),
+      includeTransactions
+        ? prisma.propertyTransaction.findMany({
+            where: { householdId, deletedAt: null, ...(accountId ? { accountId } : {}) },
+            include: {
+              Account: true,
+              CashAccount: true,
+              PropertyAsset: true,
+              EntryBusinessLink: { where: { deletedAt: null }, select: { id: true }, take: 1 },
+            },
+            orderBy: [{ tradeDate: "desc" }, { createdAt: "desc" }],
+            take: 500,
+          })
+        : Promise.resolve([] as Array<Prisma.PropertyTransactionGetPayload<{ include: {
+            Account: true;
+            CashAccount: true;
+            PropertyAsset: true;
+            EntryBusinessLink: { where: { deletedAt: null }; select: { id: true }; take: 1 };
+          } }>>),
+      linkedCashEntryId
+        ? prisma.propertyTransaction.findFirst({
+            where: { householdId, cashEntryId: linkedCashEntryId, deletedAt: null },
+            select: { accountId: true, propertyAssetId: true },
+          })
+        : Promise.resolve(null),
     ]);
 
     return NextResponse.json({
@@ -223,6 +242,13 @@ export async function GET(req: NextRequest) {
       data: {
         assets: assets.map(serializeAsset),
         transactions: transactions.map(serializeTransaction),
+        linkedTransaction: linkedTransaction
+          ? {
+              cashEntryId: linkedCashEntryId,
+              accountId: linkedTransaction.accountId,
+              propertyAssetId: linkedTransaction.propertyAssetId,
+            }
+          : null,
       },
     }, { headers: corsHeaders() });
   } catch (error) {

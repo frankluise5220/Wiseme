@@ -13,6 +13,7 @@ import {
   INSURANCE_PRODUCT_LINK_SELECT,
   withAccountCounts,
 } from "@/lib/server/entity-account-counts";
+import { loadAccountRecordCounts } from "@/lib/server/account-record-counts";
 
 export const runtime = "nodejs";
 
@@ -73,10 +74,20 @@ export async function GET() {
       prisma.insuranceProduct.findMany({ where: hidFilter, select: INSURANCE_PRODUCT_LINK_SELECT }),
     ]);
 
+    // Per-account record counts (active + soft-deleted) shown in the settings list.
+    const recordCounts = await loadAccountRecordCounts(accounts.map((account) => account.id));
+
     return NextResponse.json({
       ok: true,
       baseCurrency,
-      accounts: accounts.map((account) => withAccountDisplayFields(account, accountLabelFields)),
+      accounts: accounts.map((account) => {
+        const counts = recordCounts.get(account.id);
+        return {
+          ...withAccountDisplayFields(account, accountLabelFields),
+          recordCount: counts?.recordCount ?? 0,
+          deletedRecordCount: counts?.deletedRecordCount ?? 0,
+        };
+      }),
       groups,
       // Related-account counts shown next to institution / family member / counterparty names.
       institutions: withAccountCounts(institutions, countAccountsByInstitution(accounts, insuranceProductLinks, institutions)),

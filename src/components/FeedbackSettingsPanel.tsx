@@ -3,15 +3,34 @@
 import { useState } from "react";
 import { Send } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import { buildFeedbackLogsPayload } from "@/lib/client/feedback-logs";
+
+type FeedbackType = "suggestion" | "bug";
 
 export function FeedbackSettingsPanel() {
   const { t } = useI18n();
+  const [feedbackType, setFeedbackType] = useState<FeedbackType>("suggestion");
   const [subject, setSubject] = useState("");
   const [content, setContent] = useState("");
   const [contact, setContact] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
+
+  const bugTemplate = t("settings.feedback.bugTemplate");
+
+  function switchType(next: FeedbackType) {
+    if (next === feedbackType) return;
+    setFeedbackType(next);
+    if (next === "bug") {
+      // Prefill the fixed bug template only when the user hasn't typed anything yet.
+      if (!content.trim()) setContent(bugTemplate);
+    } else if (content === bugTemplate) {
+      // Switching back to suggestion: drop the untouched bug template.
+      setContent("");
+    }
+    setError("");
+  }
 
   async function submit() {
     const trimmedSubject = subject.trim();
@@ -31,7 +50,13 @@ export function FeedbackSettingsPanel() {
       const res = await fetch("/api/v1/settings/feedback", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subject: trimmedSubject, content: trimmedContent, contact: contact.trim() }),
+        body: JSON.stringify({
+          type: feedbackType,
+          subject: trimmedSubject,
+          content: trimmedContent,
+          contact: contact.trim(),
+          logs: buildFeedbackLogsPayload(),
+        }),
       });
       const data = await res.json();
       if (res.ok && data.ok) {
@@ -49,11 +74,17 @@ export function FeedbackSettingsPanel() {
     }
   }
 
+  const typeOptions: Array<{ value: FeedbackType; label: string }> = [
+    { value: "suggestion", label: t("settings.feedback.typeSuggestion") },
+    { value: "bug", label: t("settings.feedback.typeBug") },
+  ];
+
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-slate-200 bg-white px-4 py-4">
         <h2 className="text-sm font-semibold text-slate-800">{t("settings.feedback.title")}</h2>
         <p className="mt-1 text-xs text-slate-500">{t("settings.feedback.description")}</p>
+        <p className="mt-1 text-xs text-slate-400">{t("settings.feedback.attachNotice")}</p>
       </div>
 
       {error && <div className="rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{error}</div>}
@@ -61,6 +92,26 @@ export function FeedbackSettingsPanel() {
 
       <div className="rounded-xl border border-slate-200 bg-white p-4">
         <div className="space-y-3">
+          <div className="space-y-1">
+            <label className="block text-xs font-medium text-slate-600">{t("settings.feedback.typeLabel")}</label>
+            <div className="inline-flex rounded-md border border-slate-200 p-0.5">
+              {typeOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => switchType(option.value)}
+                  className={
+                    feedbackType === option.value
+                      ? "rounded-[5px] bg-blue-600 px-3 py-1.5 text-xs font-medium text-white"
+                      : "rounded-[5px] px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:text-slate-900"
+                  }
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="space-y-1">
             <label className="block text-xs font-medium text-slate-600">{t("settings.feedback.subjectLabel")}</label>
             <input
@@ -76,8 +127,8 @@ export function FeedbackSettingsPanel() {
             <textarea
               value={content}
               onChange={(e) => setContent(e.target.value)}
-              placeholder={t("settings.feedback.contentPlaceholder")}
-              rows={6}
+              placeholder={feedbackType === "bug" ? t("settings.feedback.bugContentPlaceholder") : t("settings.feedback.contentPlaceholder")}
+              rows={feedbackType === "bug" ? 9 : 6}
               className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-300"
             />
           </div>

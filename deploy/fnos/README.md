@@ -119,7 +119,7 @@ mmh-fnos-v0.1.x-arm64.fpk
 - `cmd/main` 启动服务时读的是 `mmh.env` 里的 `PORT`（`export PORT="${PORT:-${env_port:-7777}}"`），不读 `.port`。所以改端口必须同时更新这两个文件，只改 `.port` 不会生效。
 - 实测记录：FN 软仓客户端的“更新”实际执行的是**先卸载再重装**（客户端日志依次为 `卸载: mmh`、`向导安装命令: ... install-fpk ... --env .../wizard.env`、`安装完成: mmh 带向导安装`），并不调用 `cmd/upgrade_init` / `cmd/upgrade_callback`。因此端口与数据的沿用完全依赖卸载时保留的应用数据目录，`uninstall_init` 的备份兜底不能移除。
 - 数据库结构变化必须通过包内 SQLite 运行时迁移处理。新增字段应使用幂等 `ALTER TABLE ADD COLUMN`；字段重命名、拆分或表结构重组必须写显式迁移和数据回填，不能靠重建数据库或清空表来“适配”新版。
-- `uninstall_init` 只作为用户主动卸载或异常恢复时的数据兜底；正常升级验收不能依赖卸载重装。生命周期在检测到 `data/mmh.db` 时，会先把应用数据目录复制到同级的 `mmh-upgrade-backups` 目录。用户仍应优先在 MMH 里导出 `.mmh-backup` 后再做高风险操作。
+- `uninstall_init` 只作为用户主动卸载或异常恢复时的数据兜底；正常升级验收不能依赖卸载重装。生命周期在检测到 `data/mmh.db` 时，会先把应用数据目录复制到同级的 `mmh-upgrade-backups` 目录。用户仍应优先在 MMH 里导出 `.mmhbackup` 后再做高风险操作。
 - 生命周期脚本不能默认以 `mmh` 包用户运行。`install_init` / `upgrade_init` / `uninstall_init` 需要由应用中心/root 完成安装前权限准备和同级备份；`cmd/main start` 再把数据目录归属修正为 `mmh:mmh`，并降权到 `mmh` 用户运行 Node 服务。
 - 面向普通用户的正式升级必须走飞牛官方应用中心上架/审核后的版本发布链路。只有官方应用中心记录了同一个 `appname` 的新版本，后续用户才应在飞牛自身应用中心里看到并执行升级。
 

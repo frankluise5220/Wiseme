@@ -32,6 +32,7 @@ type SelectedBillAccount = {
   kind: AccountKind;
   billingDay: number | null;
   repaymentDay: number | null;
+  repaymentOffsetDays: number | null;
 };
 
 export type CreditBillPageData = {
@@ -197,6 +198,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
       months: [currentMonth, nextMonth],
       billingDayRules,
       repaymentDay: selectedAccount.repaymentDay ?? null,
+      repaymentOffsetDays: selectedAccount.repaymentOffsetDays ?? null,
       now: creditBillNow,
       fallbackBillingDay,
     });
@@ -336,6 +338,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
             months: Array.from(candidateMonths),
             billingDayRules,
             repaymentDay: selectedAccount.repaymentDay ?? null,
+            repaymentOffsetDays: selectedAccount.repaymentOffsetDays ?? null,
             now: creditBillNow,
             fallbackBillingDay,
           });
@@ -379,6 +382,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
                   statementMonth: selectedBillMonth,
                   billingDayRules,
                   repaymentDay: selectedAccount.repaymentDay ?? null,
+                  repaymentOffsetDays: selectedAccount.repaymentOffsetDays ?? null,
                   now: creditBillNow,
                   fallbackBillingDay,
                 });
@@ -387,6 +391,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
                 statementMonth: currentStatementMonth,
                 billingDayRules,
                 repaymentDay: selectedAccount.repaymentDay ?? null,
+                repaymentOffsetDays: selectedAccount.repaymentOffsetDays ?? null,
                 now: creditBillNow,
                 fallbackBillingDay,
               });
@@ -550,6 +555,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
     months: Array.from(new Set([...billMonthsForCumulative, ...billMonthsForList, currentStatementMonth, selectedBillMonth].filter(Boolean))),
     billingDayRules,
     repaymentDay: selectedAccount?.repaymentDay ?? null,
+    repaymentOffsetDays: selectedAccount?.repaymentOffsetDays ?? null,
     now: creditBillNow,
     fallbackBillingDay,
   });
@@ -723,6 +729,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
     summaryByMonth: billSummaryByMonth,
     billingDay: selectedAccount?.billingDay ?? 1,
     repaymentDay: selectedAccount?.repaymentDay ?? null,
+    repaymentOffsetDays: selectedAccount?.repaymentOffsetDays ?? null,
     now: creditBillNow,
     cycleByMonth: cycleDefinitionByMonth,
   });
@@ -776,6 +783,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
   const creditCardCyclePersistRows = buildCreditCardCyclePersistRows({
     billingDay: selectedAccount?.billingDay ?? 1,
     repaymentDay: selectedAccount?.repaymentDay ?? null,
+    repaymentOffsetDays: selectedAccount?.repaymentOffsetDays ?? null,
     months: allMonthsForCascade,
     summaryByMonth: billSummaryByMonth,
     effectiveBillByMonth,
@@ -1046,6 +1054,7 @@ export async function refreshCreditCardCycleCachesForAccountIds(params: {
       kind: true,
       billingDay: true,
       repaymentDay: true,
+      repaymentOffsetDays: true,
       creditBillMode: true,
     },
   });

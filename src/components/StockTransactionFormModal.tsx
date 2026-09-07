@@ -197,6 +197,13 @@ const SHARE_CHANGE_ACTIONS = [
   { key: "split_share", labelKey: "stockTx.shareChange.splitShare" },
   { key: "merge_share", labelKey: "stockTx.shareChange.mergeShare" },
 ];
+
+/** Required-field red ring (same convention as TransactionFormModal / RegularInvestForm). */
+const REQUIRED_FIELD_CLASS = "rounded-[10px] ring-1 ring-rose-200/80";
+
+/** Not-applicable fields (no need to fill in for the current dividend mode): grayed out and non-interactive. */
+const NOT_APPLICABLE_FIELD_CLASS = "pointer-events-none opacity-50 grayscale";
+
 function parseNumber(value: string) {
   const num = Number(String(value).replace(/,/g, "").trim());
   return Number.isFinite(num) && num >= 0 ? num : 0;
@@ -470,6 +477,8 @@ export function StockTransactionFormModal({
   const [sellHoldings, setSellHoldings] = useState<SellStockHolding[]>([]);
   const [sellHoldingsLoading, setSellHoldingsLoading] = useState(false);
   const [sellHoldingsError, setSellHoldingsError] = useState("");
+  // 日期变化后待验证的持仓选中：新日期持仓列表返回后，若仍包含该股票则恢复/保留选中，否则清空。
+  const pendingHoldingsSecurityIdRef = useRef<string | null>(null);
   const [tradeDate, setTradeDate] = useState(today);
   const [quantity, setQuantity] = useState("");
   const [price, setPrice] = useState("");
@@ -630,6 +639,7 @@ export function StockTransactionFormModal({
   const selectedSellHolding = sellHoldings.find((holding) => holding.securityId === selectedSecurityId) ?? null;
 
   function changeModalAction(nextAction: StockModalAction) {
+    pendingHoldingsSecurityIdRef.current = null;
     setAction(nextAction);
     if (nextAction !== "dividend") setDividendMode("cash");
     setSelectedSecurityId("");
@@ -643,14 +653,14 @@ export function StockTransactionFormModal({
   function handleTradeDateChange(value: string) {
     setTradeDate(value);
     if (action === "sell" || action === "dividend" || action === "share_change") {
-      setSelectedSecurityId("");
-      setStockCode("");
-      setStockName("");
-      setQuantity("");
+      // 日期变化会重新拉取持仓列表：先记住当前选中，待新列表返回后验证。
+      // 新列表仍包含该股票则保留选中（连同已填金额/数量），否则由加载逻辑清空。
+      pendingHoldingsSecurityIdRef.current = selectedSecurityId || null;
     }
   }
 
   function selectHolding(id: string) {
+    pendingHoldingsSecurityIdRef.current = null;
     const holding = sellHoldings.find((item) => item.securityId === id) ?? null;
     if (!holding) return;
     setSelectedSecurityId(holding.securityId);
@@ -673,6 +683,9 @@ export function StockTransactionFormModal({
   const isDividendAction = action === "dividend";
   const isShareAction = action === "share_change";
   const isCashAmountAction = action === "buy" || action === "sell" || isDividendCash || isDividendCashShares;
+  // 资金账户：买卖/现金分红/现金+送转必有资金流 → 必填（红框）；送股/转增与股本变动不产生资金流 → 无需填写（置灰）。
+  const cashAccountRequired = isCashAmountAction;
+  const cashAccountNotApplicable = !isBuySell && !isCashAmountAction;
   const showQuantityField = isBuySell || isShareAction || isDividendShares || isDividendCashShares;
   const showPriceField = isBuySell;
   const showAmountField = isCashAmountAction;
@@ -822,6 +835,7 @@ export function StockTransactionFormModal({
     setSellHoldings([]);
     setSellHoldingsLoading(false);
     setSellHoldingsError("");
+    pendingHoldingsSecurityIdRef.current = null;
     setTradeDate(detail?.defaultDate ?? todayDateInputValue());
     setQuantity("");
     setPrice("");
@@ -867,6 +881,7 @@ export function StockTransactionFormModal({
     setSellHoldings([]);
     setSellHoldingsLoading(false);
     setSellHoldingsError("");
+    pendingHoldingsSecurityIdRef.current = null;
     setTradeDate(tx.tradeDate || todayDateInputValue());
     setQuantity(tx.quantity == null ? "" : formatStockQuantity(Number(tx.quantity), language));
     setPrice(tx.price == null ? "" : String(Number(tx.price)));
@@ -1179,11 +1194,26 @@ export function StockTransactionFormModal({
       .then((res) => res.json().catch(() => null))
       .then((data: StockHoldingsResponse | null) => {
         if (!data?.ok) throw new Error(data?.error ?? t("stockTx.error.holdingsLoadFailed"));
-        setSellHoldings(Array.isArray(data.data?.holdings) ? data.data.holdings : []);
+        const nextHoldings = Array.isArray(data.data?.holdings) ? data.data.holdings : [];
+        setSellHoldings(nextHoldings);
+        // 日期变化后验证原选中：新日期仍持有该股票则保留选中，否则清空待用户重选。
+        const pendingSecurityId = pendingHoldingsSecurityIdRef.current;
+        pendingHoldingsSecurityIdRef.current = null;
+        if (pendingSecurityId && !nextHoldings.some((holding) => holding.securityId === pendingSecurityId)) {
+          setSelectedSecurityId("");
+          setStockCode("");
+          setStockName("");
+          setQuantity("");
+        }
       })
       .catch((error) => {
         if ((error as Error)?.name === "AbortError") return;
         setSellHoldings([]);
+        pendingHoldingsSecurityIdRef.current = null;
+        setSelectedSecurityId("");
+        setStockCode("");
+        setStockName("");
+        setQuantity("");
         setSellHoldingsError(error instanceof Error ? error.message : t("stockTx.error.holdingsLoadFailed"));
       })
       .finally(() => {
@@ -1299,6 +1329,10 @@ export function StockTransactionFormModal({
       window.alert(t("stockTx.alert.selectStockAccount"));
       return;
     }
+    if (isCashAmountAction && !selectedCashAccount?.id && !cashAccountId) {
+      window.alert(t("stockTx.alert.selectCashAccount"));
+      return;
+    }
     const normalizedCode = normalizeStockCode(stockCode);
     if (isHoldingSelectionAction && !selectedSecurityId) {
       window.alert(action === "sell" || action === "share_change" ? t("stockTx.alert.selectHoldingStock") : t("stockTx.alert.selectDividendStock"));
@@ -1386,9 +1420,13 @@ export function StockTransactionFormModal({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        const data = await res.json().catch(() => null) as { ok?: boolean; error?: string; data?: { transaction?: { id?: string; cashEntryId?: string | null } | null } } | null;
+        const data = await res.json().catch(() => null) as { ok?: boolean; code?: string; error?: string; data?: { transaction?: { id?: string; cashEntryId?: string | null } | null } } | null;
         if (!res.ok || !data?.ok) {
-          throw new Error(data?.error ?? t("stockTx.error.saveFailed"));
+          throw new Error(
+            data?.code === "CASH_ACCOUNT_UNDETERMINED"
+              ? t("stockTx.error.cashAccountUndetermined")
+              : data?.error ?? t("stockTx.error.saveFailed"),
+          );
         }
         return data;
       };
@@ -1498,6 +1536,7 @@ export function StockTransactionFormModal({
                       cashAccountTouchedRef.current = false;
                       setStockAccountId(id);
                       if (isHoldingSelectionAction) {
+                        pendingHoldingsSecurityIdRef.current = null;
                         setSelectedSecurityId("");
                         setStockCode("");
                         setStockName("");
@@ -1514,21 +1553,23 @@ export function StockTransactionFormModal({
                   />
                   {autoCreateError ? <div className="text-[11px] text-rose-600">{autoCreateError}</div> : null}
                 </div>
-                <div className="space-y-1">
+                <div className={`space-y-1 ${cashAccountNotApplicable ? NOT_APPLICABLE_FIELD_CLASS : ""}`}>
                   <div className="form-label">{t("txForm.cashAccount")}</div>
-                  <SmartSelect
-                    mode="single"
-                    value={selectedCashAccount?.id ?? cashAccountId}
-                    onChange={(value) => {
-                      cashAccountTouchedRef.current = true;
-                      setCashAccountId(value);
-                    }}
-                    options={sortOptionsByRecent(eligibleCashAccountOptions, recentAccountIds)}
-                    placeholder={eligibleCashAccountOptions.length > 0 ? t("stockTx.selectCashAccount") : t("stockTx.addCashAccount")}
-                    onCreateClick={openNestedCashAccountCreate}
-                    createLabel={t("stockTx.addCashAccount")}
-                    behavior={{ search: true, density: "compact", minDropdownWidth: 260 }}
-                  />
+                  <div className={cashAccountRequired ? REQUIRED_FIELD_CLASS : undefined}>
+                    <SmartSelect
+                      mode="single"
+                      value={selectedCashAccount?.id ?? cashAccountId}
+                      onChange={(value) => {
+                        cashAccountTouchedRef.current = true;
+                        setCashAccountId(value);
+                      }}
+                      options={sortOptionsByRecent(eligibleCashAccountOptions, recentAccountIds)}
+                      placeholder={eligibleCashAccountOptions.length > 0 ? t("stockTx.selectCashAccount") : t("stockTx.addCashAccount")}
+                      onCreateClick={cashAccountNotApplicable ? undefined : openNestedCashAccountCreate}
+                      createLabel={t("stockTx.addCashAccount")}
+                      behavior={{ search: true, density: "compact", minDropdownWidth: 260 }}
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -1615,13 +1656,17 @@ export function StockTransactionFormModal({
                     {dividendMode === "shares" ? (
                       <div className="space-y-1">
                         <div className="form-label">{t("stockTx.dividendShares")}</div>
-                        <CalcInput value={quantity} onChange={setQuantity} placeholder={t("stockTx.dividendShares")} label={t("stockTx.dividendShares")} precision={4} />
+                        <div className={REQUIRED_FIELD_CLASS}>
+                          <CalcInput value={quantity} onChange={setQuantity} placeholder={t("stockTx.dividendShares")} label={t("stockTx.dividendShares")} precision={4} />
+                        </div>
                       </div>
                     ) : (
                       <>
                         <div className="space-y-1">
                           <div className="form-label">{t("stockTx.dividendAmount")}</div>
-                          <CalcInput value={grossAmount} onChange={setGrossAmount} placeholder={t("stockTx.dividendAmount")} label={t("stockTx.dividendAmount")} precision={2} />
+                          <div className={REQUIRED_FIELD_CLASS}>
+                            <CalcInput value={grossAmount} onChange={setGrossAmount} placeholder={t("stockTx.dividendAmount")} label={t("stockTx.dividendAmount")} precision={2} />
+                          </div>
                         </div>
                         <div className="space-y-1">
                           <div className="form-label">{t("stockTx.netArrival")}</div>
@@ -1630,7 +1675,9 @@ export function StockTransactionFormModal({
                         {dividendMode === "cash_shares" ? (
                           <div className="space-y-1">
                             <div className="form-label">{t("stockTx.dividendShares")}</div>
-                            <CalcInput value={quantity} onChange={setQuantity} placeholder={t("stockTx.dividendShares")} label={t("stockTx.dividendShares")} precision={4} />
+                            <div className={REQUIRED_FIELD_CLASS}>
+                              <CalcInput value={quantity} onChange={setQuantity} placeholder={t("stockTx.dividendShares")} label={t("stockTx.dividendShares")} precision={4} />
+                            </div>
                           </div>
                         ) : null}
                       </>

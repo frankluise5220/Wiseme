@@ -123,10 +123,10 @@ restart_and_build.ps1
 email-settings*.png
 settings-accounts*.png
 
-# personal docs (only nas-install-manual.md is kept)
-docs/迁移指南.md
-docs/local-install.md
-docs/local-install.private.md
+# personal docs（docs 下仅保留用户可见文档：安装手册 + 架构说明，其余只保存在本地）
+docs/*
+!docs/nas-install-manual.md
+!docs/architecture.md
 
 # personal data files
 cookies*.txt
@@ -164,7 +164,6 @@ _tmp_*
 
 # FN 软仓自建源（运维部署文件保留在 VPS/本地，不进公开仓库）
 deploy/fnos/selfhosted-source/
-docs/fnos-selfhosted-source.md
 
 # local test artifacts
 public/test-results.json

@@ -18,6 +18,7 @@ import type { CategorySmartSelectOption } from "@/components/categorySmartSelect
 import { addWorkdaysUtc, formatDateUtc } from "@/lib/date-utils";
 import type { AccountDisplayOption } from "@/lib/account-display";
 import { scheduledTaskTypeLabel, type LoanScheduledPlanRole, type ScheduledTaskType } from "@/lib/scheduled-task";
+import { showBlockingLoading } from "@/lib/client/blocking-loading";
 import { showConfirmDialog } from "@/lib/client/confirm-dialog";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { clearBackgroundTaskProgress, dispatchBackgroundTaskProgress } from "@/lib/client/background-tasks";
@@ -1097,11 +1098,14 @@ export function RegularInvestClient({
       tone: "danger",
     });
     if (!confirmed) return;
+    const closeBlocking = showBlockingLoading(t("common.batchDeleting"));
     try {
       await deleteRegularInvestRecordIds(recordIds, selectedPlan);
       await updateAfterRecordDelete(recordIds);
     } catch (error) {
       window.alert(error instanceof Error ? error.message : t("settingsDelete.deleteFailed"));
+    } finally {
+      closeBlocking();
     }
   }
 

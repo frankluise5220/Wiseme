@@ -18,6 +18,7 @@ import {
   INSURANCE_PRODUCT_LINK_SELECT,
   withAccountCounts,
 } from "@/lib/server/entity-account-counts";
+import { loadAccountRecordCounts } from "@/lib/server/account-record-counts";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -96,8 +97,19 @@ export async function GET(request: Request) {
     const institutionsWithCounts = withAccountCounts(institutions, countAccountsByInstitution(accounts, insuranceProductLinks, institutions));
     const counterpartiesWithCounts = withAccountCounts(counterparties, countAccountsByCounterparty(accounts, counterparties));
 
+    // Per-account record counts (active + soft-deleted) shown in the settings list.
+    const recordCounts = await loadAccountRecordCounts(accounts.map((account) => account.id));
+    const withRecordCounts = <T extends { id: string }>(account: T) => {
+      const counts = recordCounts.get(account.id);
+      return {
+        ...account,
+        recordCount: counts?.recordCount ?? 0,
+        deletedRecordCount: counts?.deletedRecordCount ?? 0,
+      };
+    };
+
     if (!includeBalances) {
-      return NextResponse.json({ ok: true, baseCurrency, accounts: accounts.map((account) => withAccountDisplayFields(account, accountLabelFields)), groups, institutions: institutionsWithCounts, counterparties: counterpartiesWithCounts, users });
+      return NextResponse.json({ ok: true, baseCurrency, accounts: accounts.map((account) => withRecordCounts(withAccountDisplayFields(account, accountLabelFields))), groups, institutions: institutionsWithCounts, counterparties: counterpartiesWithCounts, users });
     }
 
     // For investment accounts, use market value instead of raw balance
@@ -190,7 +202,7 @@ export async function GET(request: Request) {
       totalConvertedBalance: conversion.total,
       missingFxCurrencies: conversion.missingCurrencies,
       rates: conversion.rates,
-      accounts: convertedAccounts.map((account) => withAccountDisplayFields(account, accountLabelFields)),
+      accounts: convertedAccounts.map((account) => withRecordCounts(withAccountDisplayFields(account, accountLabelFields))),
       groups,
       institutions: institutionsWithCounts,
       counterparties: counterpartiesWithCounts,

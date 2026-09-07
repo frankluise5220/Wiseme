@@ -33,6 +33,9 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Verify Docker entrypoint
+        run: npm run check:docker
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:

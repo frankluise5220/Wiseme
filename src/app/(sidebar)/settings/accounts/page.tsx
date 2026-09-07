@@ -64,7 +64,7 @@ type Account = {
   Institution: { id: string; name: string; shortName?: string | null } | null;
   Counterparty?: { id: string; name: string; shortName?: string | null; type?: string | null } | null;
   AccountGroup: { id: string; name: string } | null;
-  billingDay: number | null; repaymentDay: number | null;
+  billingDay: number | null; repaymentDay: number | null; repaymentOffsetDays?: number | null;
   creditBillMode?: "separate" | "consolidated";
   creditLimit: string | null; numberMasked: string | null;
   investProductType: string | null; costBasisMethod: string | null;
@@ -75,6 +75,8 @@ type Account = {
   loanType?: string | null;
   debtDirection?: string | null;
   usageCount?: number;
+  recordCount?: number;
+  deletedRecordCount?: number;
 };
 
 const investmentProductTypeOptions = PRODUCT_TYPES
@@ -256,6 +258,8 @@ export default function SettingsAccountsPage() {
       counterpartyId: editKind === "settlement" ? a.counterpartyId || "" : "",
       billingDay: a.billingDay?.toString() || "",
       repaymentDay: a.repaymentDay?.toString() || "",
+      repaymentOffsetDays: a.repaymentOffsetDays?.toString() || "",
+      repaymentDayMode: a.repaymentOffsetDays != null ? "offset" : "fixed",
       creditLimit: a.creditLimit || "",
       creditBillMode: a.creditBillMode === "consolidated" ? "consolidated" : "separate",
       numberMasked: a.numberMasked || "",
@@ -343,6 +347,7 @@ export default function SettingsAccountsPage() {
         String(previousAccount.institutionId ?? "") !== String(editForm.institutionId ?? "") ||
         String(previousAccount.billingDay ?? "") !== String(editForm.billingDay ?? "") ||
         String(previousAccount.repaymentDay ?? "") !== String(editForm.repaymentDay ?? "") ||
+        String(previousAccount.repaymentOffsetDays ?? "") !== String(editForm.repaymentOffsetDays ?? "") ||
         String(previousAccount.creditBillMode ?? "separate") !== String(editForm.creditBillMode ?? "separate")
       ),
     );
@@ -369,6 +374,8 @@ export default function SettingsAccountsPage() {
       ...current,
       billingDay: result.data.billingDay == null ? "" : String(result.data.billingDay),
       repaymentDay: result.data.repaymentDay == null ? "" : String(result.data.repaymentDay),
+      repaymentOffsetDays: result.data.repaymentOffsetDays == null ? "" : String(result.data.repaymentOffsetDays),
+      repaymentDayMode: result.data.repaymentOffsetDays != null ? "offset" : "fixed",
       creditBillMode: result.data.creditBillMode === "consolidated" ? "consolidated" : "separate",
     }));
   }
@@ -723,6 +730,16 @@ export default function SettingsAccountsPage() {
                       {a.note && (
                         <span className="max-w-[260px] truncate text-xs text-slate-400" title={a.note}>{t("settings.accounts.notePrefix")}{a.note}</span>
                       )}
+                      <span
+                        className="text-[10px] text-slate-400 shrink-0"
+                        title={tf("settings.accounts.recordCountTitle", {
+                          count: a.recordCount ?? 0,
+                          deleted: a.deletedRecordCount ?? 0,
+                        })}
+                      >
+                        {t("settings.accounts.recordCountShort", { count: a.recordCount ?? 0 })}
+                        {a.deletedRecordCount ? ` · ${t("settings.accounts.deletedRecordCountShort", { count: a.deletedRecordCount })}` : ""}
+                      </span>
                     </div>
                     <div className="flex items-center gap-1 shrink-0 ml-3">
                       {!a.isPlaceholder && (
@@ -1206,10 +1223,29 @@ export default function SettingsAccountsPage() {
                           className="h-8 w-full rounded-md border border-slate-200 px-2 text-sm outline-none" placeholder="1-31" />
                       </div>
                       <div>
-                        <label className="block text-xs text-slate-500 mb-1">{t("settings.accounts.repaymentDayLabel")}</label>
-                        <input value={editForm.repaymentDay || ""} onChange={e => setEditForm(f => ({ ...f, repaymentDay: e.target.value }))}
-                          className="h-8 w-full rounded-md border border-slate-200 px-2 text-sm outline-none" placeholder="1-31" />
+                        <label className="block text-xs text-slate-500 mb-1">{t("settings.accounts.repaymentDayModeLabel")}</label>
+                        <select
+                          value={editForm.repaymentDayMode || "fixed"}
+                          onChange={e => setEditForm(f => ({ ...f, repaymentDayMode: e.target.value }))}
+                          className="h-8 w-full rounded-md border border-slate-200 px-2 text-sm outline-none"
+                        >
+                          <option value="fixed">{t("entityForm.repaymentDayMode.fixed")}</option>
+                          <option value="offset">{t("entityForm.repaymentDayMode.offset")}</option>
+                        </select>
                       </div>
+                      {editForm.repaymentDayMode !== "offset" ? (
+                        <div>
+                          <label className="block text-xs text-slate-500 mb-1">{t("settings.accounts.repaymentDayLabel")}</label>
+                          <input value={editForm.repaymentDay || ""} onChange={e => setEditForm(f => ({ ...f, repaymentDay: e.target.value }))}
+                            className="h-8 w-full rounded-md border border-slate-200 px-2 text-sm outline-none" placeholder="1-31" />
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="block text-xs text-slate-500 mb-1">{t("settings.accounts.repaymentOffsetDaysLabel")}</label>
+                          <input value={editForm.repaymentOffsetDays || ""} onChange={e => setEditForm(f => ({ ...f, repaymentOffsetDays: e.target.value }))}
+                            className="h-8 w-full rounded-md border border-slate-200 px-2 text-sm outline-none" placeholder={t("entityForm.repaymentOffsetDaysPlaceholder")} />
+                        </div>
+                      )}
                       <div>
                         <label className="block text-xs text-slate-500 mb-1">{t("settings.accounts.creditLimitLabel")}</label>
                         <input value={editForm.creditLimit || ""} onChange={e => setEditForm(f => ({ ...f, creditLimit: e.target.value }))}

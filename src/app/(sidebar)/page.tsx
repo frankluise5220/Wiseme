@@ -163,6 +163,7 @@ type AccountQuickEditSource = {
   loanType?: string | null;
   billingDay?: number | null;
   repaymentDay?: number | null;
+  repaymentOffsetDays?: number | null;
   creditLimit?: unknown;
   creditBillMode?: "separate" | "consolidated" | null;
   numberMasked?: string | null;
@@ -188,6 +189,7 @@ function toAccountQuickEditValue(account: AccountQuickEditSource): AccountQuickE
     loanType: account.loanType,
     billingDay: account.billingDay,
     repaymentDay: account.repaymentDay,
+    repaymentOffsetDays: account.repaymentOffsetDays,
     creditLimit: account.creditLimit == null ? null : String(account.creditLimit),
     creditBillMode: account.creditBillMode,
     numberMasked: account.numberMasked,
@@ -1455,6 +1457,29 @@ export default async function Home({
     if (!asset.mortgageLoanAccountId || mortgagedAssetByLoanAccountId.has(asset.mortgageLoanAccountId)) continue;
     mortgagedAssetByLoanAccountId.set(asset.mortgageLoanAccountId, { accountId: asset.accountId, id: asset.id });
   }
+  // 抵押物名称（按贷款账户）。读 Account.collateralAssetId —— 结清自动解除后该字段
+  // 保留，已还清的贷款记录也能表明当时使用的抵押物。
+  const collateralNameByLoanAccountId =
+    view === "debt" && debtAccounts.length > 0
+      ? await (async () => {
+          const collateralAssetIds = Array.from(
+            new Set(debtAccounts.map((account) => account.collateralAssetId).filter((id): id is string => !!id)),
+          );
+          if (collateralAssetIds.length === 0) return new Map<string, string>();
+          const collateralAssets = await prisma.propertyAsset.findMany({
+            where: { deletedAt: null, ...hid, id: { in: collateralAssetIds } },
+            select: { id: true, name: true },
+          });
+          const nameById = new Map(collateralAssets.map((asset) => [asset.id, asset.name]));
+          const map = new Map<string, string>();
+          for (const account of debtAccounts) {
+            if (!account.collateralAssetId) continue;
+            const name = nameById.get(account.collateralAssetId);
+            if (name) map.set(account.id, name);
+          }
+          return map;
+        })()
+      : new Map<string, string>();
   const {
     debtRows,
     debtRowsForShell,
@@ -1549,6 +1574,7 @@ export default async function Home({
     debtDirectionByAccountId,
     displayAccountId: accountId,
     mortgagedAssetByLoanAccountId,
+    collateralNameByLoanAccountId,
   });
 
   // Query the most recently used cash account.

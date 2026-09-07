@@ -26,7 +26,7 @@ export async function convertCaizhiBackupToMmhBackup(
   const fileName = buildBackupFileName(
     converted.payload.scope.householdName,
     converted.payload.exportedAt,
-    "mmh-backup",
+    "mmhbackup",
   );
 
   return {

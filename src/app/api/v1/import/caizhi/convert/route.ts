@@ -19,7 +19,7 @@ function asciiHeaderFileName(fileName: string) {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
   if (fallback && /[A-Za-z0-9]/.test(fallback)) return fallback;
-  return "caizhi-converted.mmh-backup";
+  return "caizhi-converted.mmhbackup";
 }
 
 function attachmentDisposition(fileName: string) {
@@ -30,7 +30,7 @@ function attachmentDisposition(fileName: string) {
  * POST /api/v1/import/caizhi/convert
  *
  * Converts a Caizhi `.mh8` / Jet database backup to an encrypted MMH
- * `.mmh-backup` package. The converted package is a household-scoped backup
+ * `.mmhbackup` package. The converted package is a household-scoped backup
  * containing accounts, categories, and daily income/expense/transfer records
  * that can be restored through the normal MMH backup restore flow.
  *

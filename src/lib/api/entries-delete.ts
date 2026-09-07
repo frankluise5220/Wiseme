@@ -1,3 +1,4 @@
+import { showBlockingLoading } from "@/lib/client/blocking-loading";
 import { showChoiceDialog, showConfirmDialog } from "@/lib/client/confirm-dialog";
 
 export type EntriesDeleteRequest = {
@@ -134,7 +135,12 @@ export async function deleteEntriesWithLinkedPrompt({
       tone: "danger",
     });
     if (!linkedAction) return { ok: false, code: "DELETE_CANCELLED", error: t("entriesDelete.cancelled") };
-    return callDeleteEntries({ entryIds, linkedAction });
+    const closeBlocking = showBlockingLoading(t("common.batchDeleting"));
+    try {
+      return await callDeleteEntries({ entryIds, linkedAction });
+    } finally {
+      closeBlocking();
+    }
   }
 
   const confirmed = await showConfirmDialog({
@@ -146,5 +152,10 @@ export async function deleteEntriesWithLinkedPrompt({
   });
   if (!confirmed) return { ok: false, code: "DELETE_CANCELLED", error: t("entriesDelete.cancelled") };
 
-  return callDeleteEntries({ entryIds });
+  const closeBlocking = showBlockingLoading(t("common.batchDeleting"));
+  try {
+    return await callDeleteEntries({ entryIds });
+  } finally {
+    closeBlocking();
+  }
 }

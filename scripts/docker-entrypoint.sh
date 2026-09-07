@@ -113,8 +113,8 @@ PUSH_OUTPUT="$(mktemp)"
 if ./node_modules/.bin/prisma db push >"$PUSH_OUTPUT" 2>&1; then
   cat "$PUSH_OUTPUT"
   rm -f "$PUSH_OUTPUT"
-  psql_mmh -v ON_ERROR_STOP=1 -c "UPDATE \"Account\" SET \"loanType\" = CASE WHEN \"isConsumerLoan\" = TRUE THEN 'consumer' ELSE 'home' END WHERE \"kind\" = 'loan' AND \"loanType\" IS NULL;"
-  psql_mmh -v ON_ERROR_STOP=1 -c "UPDATE \"Account\" SET \"kind\" = 'settlement', \"loanType\" = NULL, \"isConsumerLoan\" = FALSE WHERE \"kind\" = 'loan' AND \"counterpartyId\" IS NOT NULL AND COALESCE(\"isPlaceholder\", FALSE) = FALSE; UPDATE \"Account\" SET \"loanType\" = NULL, \"isConsumerLoan\" = FALSE WHERE \"kind\" = 'settlement';"
+  psql_mmh -v ON_ERROR_STOP=1 -c "UPDATE \"Account\" SET \"loanType\" = CASE WHEN \"isConsumerLoan\" = TRUE THEN 'consumer'::\"LoanType\" ELSE 'home'::\"LoanType\" END WHERE \"kind\" = 'loan'::\"AccountKind\" AND \"loanType\" IS NULL;"
+  psql_mmh -v ON_ERROR_STOP=1 -c "UPDATE \"Account\" SET \"kind\" = 'settlement'::\"AccountKind\", \"institutionId\" = NULL, \"loanType\" = NULL, \"isConsumerLoan\" = FALSE WHERE \"kind\" = 'loan'::\"AccountKind\" AND \"counterpartyId\" IS NOT NULL; UPDATE \"Account\" SET \"institutionId\" = NULL, \"loanType\" = NULL, \"isConsumerLoan\" = FALSE WHERE \"kind\" = 'settlement'::\"AccountKind\";"
   mmh_log "account-kind compatibility backfill complete."
   mmh_log "prisma setup complete, starting app..."
   exec node server.js
