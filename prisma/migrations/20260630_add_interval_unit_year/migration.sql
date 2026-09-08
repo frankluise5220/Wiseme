@@ -1,0 +1,1 @@
+ALTER TYPE "IntervalUnit" ADD VALUE IF NOT EXISTS 'year';

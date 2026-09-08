@@ -1,0 +1,224 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# local gradle home used for sandboxed Android builds
+/.gradle-home/
+
+# local db
+*.db
+*.sqlite
+*.sqlite3
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# env — real values never committed
+.env
+.env.local
+.env.*.local
+# allow the example template
+!.env.example
+
+# vercel
+.vercel
+
+# typescript build info
+*.tsbuildinfo
+next-env.d.ts
+
+# generated prisma client
+/src/generated/prisma
+
+# Claude Code session (may contain sensitive context)
+.claude/
+.codex/
+.omo/
+AGENTS.md
+CLAUDE.md
+DESIGN.md
+
+# IDE
+.vscode/
+.roo/
+
+# personal debug scripts
+check-*.ts
+check-*.js
+check_*.js
+check_*.ps1
+check-*.ps1
+tmp-*.ts
+tmp-*.js
+tmp-*.cjs
+tmp_*.js
+tmp-*.mjs
+tmp-*.diff
+.tmp*.diff
+tmp_patch*.diff
+fix-*.ts
+fix-*.js
+fix_*.js
+fix_*.ps1
+cleanup-*.ts
+recalc-*.mjs
+_fix_*.mjs
+_tmp_*.cjs
+_tmp_*.ts
+temp-*.ts
+verify-modal*.js
+verify*.js
+
+# personal test scripts
+*_debug.ps1
+*_test.ps1
+*_test*.ps1
+test_*.ps1
+test*.txt
+verify*.ps1
+debug_*.ps1
+scripts/codex-*.cjs
+scripts/mh8-csv-to-backup.cjs
+scripts/install-windows.bat
+
+# personal fetch/debug scripts
+fetch_*.ps1
+fetch*.ps1
+fetch*.py
+get*.ps1
+find*.ps1
+save_raw*.ps1
+call_*.ps1
+curlr*.ps1
+restart_and_build.ps1
+
+# personal debug data
+.dbg/
+
+# personal screenshots
+email-settings*.png
+settings-accounts*.png
+
+# personal docs（docs 目录只保存在本地、不进仓库；用户安装手册在 deploy/nas-install-manual.md）
+docs/*
+
+# personal data files
+cookies*.txt
+raw_debug.txt
+invest_raw*.txt
+fund_nav_cache.json
+tsc-errors.txt
+
+# FreeFileSync
+sync.ffs_db
+syno-mmh-sync.bat
+
+# IDE (local)
+.obsidian/
+.kombai/
+
+# local scratch
+AI_CONTEXT.md
+.github-token.txt
+page-backup.tsx
+patch*.txt
+_*.cjs
+_*.ts
+_*.mts
+_*.mjs
+_*.txt
+_*.html
+_*.json
+*.new
+_tmp_*
+
+# local tool caches
+.npm-cache-tmp/
+.pnpm-local/
+
+# FN 软仓自建源（运维部署文件保留在 VPS/本地，不进公开仓库）
+deploy/fnos/selfhosted-source/
+
+# local test artifacts
+public/test-results.json
+/src/app/test-results/
+.codex-logs/
+.playwright-cli/
+public/branding/*.preview.png
+public/branding/mmh-logo-*-directions.svg
+public/branding/mmh-logo-v*.svg
+query-fund.js
+release-artifacts/
+mmh-doc-edit/
+.next-hotfix.tar.gz
+.ssh-mmh/
+.tmp_fnos_key*
+.tmp_known_hosts*
+
+# local-only maintenance and reference files
+.agents/skills/
+skills/
+scripts/archive/
+scripts/caizhi/
+logo/logo.jpg
+.tmp-fnos-logo/
+backup-deleted-*.json
+.skill/
+.workbuddy-ai/
+UPGRADE_AUDIT.md
+preview-*.png
+scripts/diag-*.cjs
+
+# household backup data (never commit user financial data)
+*.mh8
+/mh8/
+
+# runtime user data (attachments, uploads)
+/data/
+
+# editor auto-save temp files
+*~RF*.TMP
+
+# local probes / test data
+.tmp-chrome-mobile/
+.tmp_mmh149_*
+.tmp-*
+.tmp_*
+deepseek-ai-*
+mmh-nas-v*.zip
+/tmp/
+tmp-backup-*.json
+nul
+resume_japan_network_engineer/
+output/
+regular-invest-*.png
+.tmp*.cjs
+.tmp*.tsx
+.mmh-update-task.json
+
+# temporary plans
+plans/

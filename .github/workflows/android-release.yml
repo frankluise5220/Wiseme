@@ -1,0 +1,141 @@
+name: Release Android APK
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      mmh_version:
+        description: "MMH server version (e.g. 0.1.33). Leave blank to use package.json version."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build signed Android APK
+    # Only publish an APK when the release actually changes the Android app.
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v0.1.')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect Android release scope
+        id: android
+        shell: bash
+        env:
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          set -euo pipefail
+          SHOULD_PUBLISH="true"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            if printf '%s' "${RELEASE_BODY:-}" | grep -Fq "不发布 APK"; then
+              SHOULD_PUBLISH="false"
+              echo "::notice::Skipping Android APK because the release notes explicitly say no APK should be published."
+            else
+              TAG="${{ github.event.release.tag_name }}"
+              PREV_TAG="$(git describe --tags --match 'v0.1.*' --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+              ANDROID_RELEASE_PATHS=(
+                "android/app/"
+                "android/build.gradle.kts"
+                "android/settings.gradle.kts"
+                "android/gradle.properties"
+                "android/gradle/"
+                "android/gradlew"
+                "android/gradlew.bat"
+                "docs/android-release.md"
+              )
+              if [ -n "${PREV_TAG}" ] && git diff --quiet "${PREV_TAG}" "${TAG}" -- "${ANDROID_RELEASE_PATHS[@]}"; then
+                SHOULD_PUBLISH="false"
+                echo "::notice::Skipping Android APK for ${TAG}; no Android app, build, or release-doc changes since ${PREV_TAG}."
+              fi
+            fi
+          fi
+          echo "publish=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 17
+        if: steps.android.outputs.publish == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        if: steps.android.outputs.publish == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Resolve MMH version
+        id: version
+        if: steps.android.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          else
+            VERSION="${{ github.event.inputs.mmh_version }}"
+          fi
+          VERSION="${VERSION#v}"
+          if [ -z "${VERSION}" ]; then
+            VERSION="$(node -p "require('./package.json').version")"
+          fi
+          echo "version=${VERSION}"
+          echo "asset=mmh-android-v${VERSION}.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Decode signing keystore
+        if: steps.android.outputs.publish == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p android/release
+          echo "${KEYSTORE_B64}" | base64 -d > android/release/mmh-release.jks
+
+      - name: Write keystore.properties
+        if: steps.android.outputs.publish == 'true'
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cat > android/keystore.properties <<EOF
+          storeFile=release/mmh-release.jks
+          storePassword=${STORE_PASSWORD}
+          keyAlias=${KEY_ALIAS}
+          keyPassword=${KEY_PASSWORD}
+          EOF
+
+      - name: Build signed release APK
+        if: steps.android.outputs.publish == 'true'
+        working-directory: android
+        run: ./gradlew :app:assembleRelease -PmmhVersion=${{ steps.version.outputs.version }} --no-daemon
+
+      - name: Verify APK signature
+        if: steps.android.outputs.publish == 'true'
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+        run: |
+          set -euo pipefail
+          APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          "${APKSIGNER}" verify android/app/build/outputs/apk/release/app-release.apk
+          echo "APK signature verified"
+
+      - name: Stage renamed APK
+        if: steps.android.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts/android
+          cp android/app/build/outputs/apk/release/app-release.apk "release-artifacts/android/${{ steps.version.outputs.asset }}"
+          ls -lh release-artifacts/android/
+
+      - name: Upload APK to GitHub Release
+        if: github.event_name == 'release' && steps.android.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/android/*.apk
+          overwrite_files: true

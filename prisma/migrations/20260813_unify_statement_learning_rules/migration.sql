@@ -1,0 +1,3 @@
+-- The schema changes for statement learning are applied by the adjacent
+-- recognition-rule migrations. Keep this migration as a valid no-op so the
+-- migration history remains executable.

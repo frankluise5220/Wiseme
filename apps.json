@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-08T14:28:54.185Z",
+  "source": {
+    "name": "frankluise5220/MMH",
+    "url": "https://github.com/frankluise5220/MMH"
+  },
+  "apps": [
+    {
+      "slug": "mmh",
+      "appname": "mmh",
+      "file_prefix": "mmh",
+      "display_name": "MMH 家庭财务工作台",
+      "description": "本地部署的家庭记账与资产管理工具，支持账户流水、信用卡账单、基金持仓、统计报表和数据导入，数据保存在自己的飞牛 NAS 上。",
+      "version": "0.1.2",
+      "fpk_version": "0.1.2",
+      "release_tag": "v0.1.2-fnos",
+      "service_port": 7777,
+      "homepage_url": "https://github.com/frankluise5220/MMH",
+      "icon_url": "https://cdn.jsdelivr.net/gh/frankluise5220/MMH@7f55f852dc63d93035b677b20987e0c06825af23/public/branding/mmh-logo-pageflip-192.png",
+      "platforms": [
+        "x86"
+      ],
+      "updated_at": "2026-08-08T14:28:54.185Z",
+      "download_count": 0,
+      "app_type": "native",
+      "category": "finance",
+      "download_url": "https://github.com/frankluise5220/MMH/releases/download/v0.1.2-fnos/mmh_0.1.2_x86.fpk"
+    }
+  ]
+}

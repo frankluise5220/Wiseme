@@ -1,0 +1,91 @@
+name: Build Synology DSM SQLite Stage
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/synology-stage.yml"
+      - "scripts/build-synology-*.cjs"
+      - "scripts/verify-synology-package.cjs"
+      - "scripts/generate-native-sqlite-schema.cjs"
+      - "scripts/build-fnos-package.cjs"
+      - "prisma/schema.prisma"
+      - "prisma/schema.native.prisma"
+      - "src/**/*.ts"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: "Optional package version. Leave blank to use package.json version."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-stage:
+    name: Build Linux Synology DSM SQLite stage (${{ matrix.target_arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_arch: x86_64
+            node_arch: x64
+            runner: ubuntu-22.04
+          - target_arch: arm64
+            node_arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download Linux Node runtime
+        shell: bash
+        env:
+          NODE_ARCH: ${{ matrix.node_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts/synology/runtime
+          NODE_VERSION="$(node -p "process.versions.node")"
+          NODE_TARBALL="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
+            -o "release-artifacts/synology/runtime/${NODE_TARBALL}"
+          echo "SYNOLOGY_NODE_TARBALL=${PWD}/release-artifacts/synology/runtime/${NODE_TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Build Synology SQLite app
+        env:
+          DATABASE_URL: file:./native-build.db
+          MMH_DEPLOY_TARGET: synology
+          SYNOLOGY_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run build:synology:app
+
+      - name: Build Synology stage archive
+        env:
+          SYNOLOGY_PACKAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.package_version || '' }}
+          SYNOLOGY_TARGET_ARCH: ${{ matrix.target_arch }}
+          SYNOLOGY_NODE_TARBALL: ${{ env.SYNOLOGY_NODE_TARBALL }}
+        run: npm run stage:synology
+
+      - name: Verify Synology package source
+        env:
+          SYNOLOGY_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run check:synology
+
+      - name: Upload Synology stage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmh-synology-${{ matrix.target_arch }}-stage
+          path: release-artifacts/synology/mmh-*-spk-source.tgz
+          if-no-files-found: error

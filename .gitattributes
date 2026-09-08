@@ -1,0 +1,38 @@
+* text=auto eol=lf
+
+*.ts text working-tree-encoding=UTF-8 eol=lf
+*.tsx text working-tree-encoding=UTF-8 eol=lf
+*.js text working-tree-encoding=UTF-8 eol=lf
+*.jsx text working-tree-encoding=UTF-8 eol=lf
+*.mjs text working-tree-encoding=UTF-8 eol=lf
+*.cjs text working-tree-encoding=UTF-8 eol=lf
+*.json text working-tree-encoding=UTF-8 eol=lf
+*.css text working-tree-encoding=UTF-8 eol=lf
+*.scss text working-tree-encoding=UTF-8 eol=lf
+*.md text working-tree-encoding=UTF-8 eol=lf
+*.prisma text working-tree-encoding=UTF-8 eol=lf
+*.yml text working-tree-encoding=UTF-8 eol=lf
+*.yaml text working-tree-encoding=UTF-8 eol=lf
+*.ps1 text working-tree-encoding=UTF-8 eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.db binary
+
+# Release archives should omit local-only docs, skills, and one-off tools.
+.github/** export-ignore
+docs/** export-ignore
+deploy/** export-ignore
+skills/** export-ignore
+scripts/archive/** export-ignore
+scripts/caizhi/** export-ignore
+scripts/codex-*.cjs export-ignore
+scripts/mh8-csv-to-backup.cjs export-ignore
+scripts/install-windows.bat export-ignore
+logo/logo.jpg export-ignore

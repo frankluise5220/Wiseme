@@ -1,0 +1,48 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+      - duplicate
+      - invalid
+      - question
+      - wontfix
+    authors:
+      - github-actions[bot]
+  categories:
+    - title: Web 与界面
+      labels:
+        - ui
+        - web
+        - overview
+        - table
+    - title: Android 客户端
+      labels:
+        - android
+        - mobile
+    - title: 基金与投资
+      labels:
+        - fund
+        - investment
+    - title: 保险与负债
+      labels:
+        - insurance
+        - debt
+        - loan
+    - title: API 与数据
+      labels:
+        - api
+        - data
+        - prisma
+        - database
+    - title: 部署与更新
+      labels:
+        - deploy
+        - docker
+        - nas
+        - release
+    - title: 文档
+      labels:
+        - docs
+    - title: 其他改动
+      labels:
+        - "*"

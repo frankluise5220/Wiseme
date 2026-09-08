@@ -1,0 +1,97 @@
+name: Release Synology DSM SQLite SPK
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: "Optional package version. Leave blank to use package.json version."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-spk:
+    # Keep Synology deferred when the release notes explicitly state that
+    # the current package is not ready for real DSM installation.
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.release.body, '群晖 DSM（官方 SPK）：本次暂缓发布')
+    name: Build and upload Synology DSM SQLite SPK (${{ matrix.target_arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_arch: x86_64
+            node_arch: x64
+            runner: ubuntu-22.04
+          - target_arch: arm64
+            node_arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify Synology package sources
+        env:
+          SYNOLOGY_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run check:synology
+
+      - name: Download Linux Node runtime
+        shell: bash
+        env:
+          NODE_ARCH: ${{ matrix.node_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts/synology/runtime
+          NODE_VERSION="$(node -p "process.versions.node")"
+          NODE_TARBALL="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
+            -o "release-artifacts/synology/runtime/${NODE_TARBALL}"
+          echo "SYNOLOGY_NODE_TARBALL=${PWD}/release-artifacts/synology/runtime/${NODE_TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Build Synology SQLite app
+        env:
+          DATABASE_URL: file:./native-build.db
+          MMH_DEPLOY_TARGET: synology
+          SYNOLOGY_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run build:synology:app
+
+      - name: Build Synology SPK
+        env:
+          SYNOLOGY_PACKAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.package_version || github.event.release.tag_name || '' }}
+          SYNOLOGY_TARGET_ARCH: ${{ matrix.target_arch }}
+          SYNOLOGY_NODE_TARBALL: ${{ env.SYNOLOGY_NODE_TARBALL }}
+        run: npm run build:synology
+
+      - name: Verify built Synology SPK
+        env:
+          SYNOLOGY_VERIFY_BUILT_SPK: "1"
+          SYNOLOGY_PACKAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.package_version || github.event.release.tag_name || '' }}
+          SYNOLOGY_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run check:synology
+
+      - name: Upload Synology SPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmh-synology-${{ matrix.target_arch }}-spk
+          path: release-artifacts/synology/*.spk
+          if-no-files-found: error
+
+      - name: Upload Synology SPK to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/synology/*.spk
+          overwrite_files: true

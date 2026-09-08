@@ -1,0 +1,90 @@
+name: Build fnOS SQLite Stage
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fnos-stage.yml"
+      - "scripts/build-fnos-*.cjs"
+      - "scripts/generate-native-sqlite-schema.cjs"
+      - "scripts/verify-fnos-package.cjs"
+      - "prisma/schema.prisma"
+      - "prisma/schema.native.prisma"
+      - "src/**/*.ts"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: "Optional package version. Leave blank to use package.json version."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-stage:
+    name: Build Linux fnOS SQLite stage (${{ matrix.target_arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_arch: x86
+            node_arch: x64
+            runner: ubuntu-22.04
+          - target_arch: arm64
+            node_arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download Linux Node runtime
+        shell: bash
+        env:
+          NODE_ARCH: ${{ matrix.node_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts/fnos/runtime
+          NODE_VERSION="$(node -p "process.versions.node")"
+          NODE_TARBALL="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
+            -o "release-artifacts/fnos/runtime/${NODE_TARBALL}"
+          echo "FNOS_NODE_TARBALL=${PWD}/release-artifacts/fnos/runtime/${NODE_TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Build fnOS SQLite app
+        env:
+          DATABASE_URL: file:./native-build.db
+          MMH_DEPLOY_TARGET: fnos
+          FNOS_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run build:fnos:app
+
+      - name: Build fnOS stage archive
+        env:
+          FNOS_PACKAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.package_version || '' }}
+          FNOS_TARGET_ARCH: ${{ matrix.target_arch }}
+          FNOS_NODE_TARBALL: ${{ env.FNOS_NODE_TARBALL }}
+        run: npm run stage:fnos
+
+      - name: Verify fnOS package source
+        env:
+          FNOS_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run check:fnos
+
+      - name: Upload fnOS stage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmh-fnos-${{ matrix.target_arch }}-stage
+          path: release-artifacts/fnos/mmh-*-fpk-source.tgz
+          if-no-files-found: error

@@ -1,0 +1,214 @@
+{
+  "schemaVersion": 1,
+  "id": "mmh-settings-catalog",
+  "title": "系统设置",
+  "description": "MMH Web 和 Android 共用的设置目录。客户端按 surface 过滤可用项，按 id 绑定具体页面、路由或偏好项。",
+  "groups": [
+    {
+      "id": "profile",
+      "label": "我的",
+      "description": "服务器、账簿、用户和当前会话",
+      "items": [
+        {
+          "id": "server",
+          "label": "服务器设置",
+          "description": "服务器地址、HTTPS、当前账簿和登录用户",
+          "icon": "server",
+          "surfaces": ["android"],
+          "androidRoute": "server_settings",
+          "apiRefs": ["/api/v1/auth/session"]
+        },
+        {
+          "id": "ledgers",
+          "label": "账簿",
+          "description": "当前账簿和基础资料",
+          "icon": "book-open",
+          "surfaces": ["web"],
+          "webHref": "/settings/ledgers"
+        },
+        {
+          "id": "users",
+          "label": "用户管理",
+          "description": "账簿用户、角色和登录身份",
+          "icon": "users",
+          "surfaces": ["web"],
+          "webHref": "/settings/users",
+          "apiRefs": ["/api/v1/settings/users"]
+        }
+      ]
+    },
+    {
+      "id": "master-data",
+      "label": "基础资料",
+      "description": "账户、机构、对象、分类和标签",
+      "items": [
+        {
+          "id": "accounts",
+          "label": "账户",
+          "description": "账户、所有人、账户类型和账单设置",
+          "icon": "users",
+          "surfaces": ["web"],
+          "webHref": "/settings/accounts"
+        },
+        {
+          "id": "institutions",
+          "label": "机构",
+          "description": "银行、保险、券商和支付机构",
+          "icon": "building-2",
+          "surfaces": ["web"],
+          "webHref": "/settings/institutions"
+        },
+        {
+          "id": "counterparties",
+          "label": "往来对象",
+          "description": "往来人员和往来组织",
+          "icon": "handshake",
+          "surfaces": ["web"],
+          "webHref": "/settings/counterparties"
+        },
+        {
+          "id": "family-members",
+          "label": "家庭成员",
+          "description": "投保人、被保险人等家庭资料",
+          "icon": "heart-handshake",
+          "surfaces": ["web"],
+          "webHref": "/settings/family-members"
+        },
+        {
+          "id": "categories",
+          "label": "分类管理",
+          "description": "收入、支出、代付、转账和投资分类",
+          "icon": "tag",
+          "surfaces": ["web"],
+          "webHref": "/settings/categories"
+        },
+        {
+          "id": "tags",
+          "label": "标签管理",
+          "description": "给流水和业务记录添加标签",
+          "icon": "hash",
+          "surfaces": ["web"],
+          "webHref": "/settings/tags"
+        }
+      ]
+    },
+    {
+      "id": "automation",
+      "label": "自动化与接入",
+      "description": "邮箱、AI、基金净值源和外部 API",
+      "items": [
+        {
+          "id": "email",
+          "label": "邮箱账户",
+          "description": "账单读取和发件账户",
+          "icon": "mail",
+          "surfaces": ["web"],
+          "webHref": "/settings/email",
+          "apiRefs": ["/api/v1/settings/email", "/api/v1/settings/email-accounts"]
+        },
+        {
+          "id": "password-recovery",
+          "label": "密码找回",
+          "description": "找回密码开关和发件设置",
+          "icon": "key-round",
+          "surfaces": ["web"],
+          "webHref": "/settings/password-recovery",
+          "apiRefs": ["/api/v1/settings/resend"]
+        },
+        {
+          "id": "ai",
+          "label": "AI 模型",
+          "description": "识别和分析模型配置",
+          "icon": "cpu",
+          "surfaces": ["web"],
+          "webHref": "/settings/ai",
+          "apiRefs": ["/api/v1/settings/ai-config"]
+        },
+        {
+          "id": "api",
+          "label": "外接 API",
+          "description": "外部 Agent 和自动化访问密钥",
+          "icon": "key",
+          "surfaces": ["web"],
+          "webHref": "/settings/api",
+          "apiRefs": ["/api/v1/settings/access-keys"]
+        },
+        {
+          "id": "fund-api",
+          "label": "基金 API",
+          "description": "基金净值查询来源和优先级",
+          "icon": "globe",
+          "surfaces": ["web"],
+          "webHref": "/settings/fund-api",
+          "apiRefs": ["/api/v1/settings/fund-query-api"]
+        }
+      ]
+    },
+    {
+      "id": "display",
+      "label": "显示偏好",
+      "description": "颜色、时间和界面偏好",
+      "items": [
+        {
+          "id": "display",
+          "label": "显示",
+          "description": "颜色、时间和界面偏好",
+          "icon": "palette",
+          "surfaces": ["web", "android"],
+          "webHref": "/settings/display",
+          "preferenceKeys": ["colorScheme", "language", "sidebar"]
+        },
+        {
+          "id": "color-scheme",
+          "label": "涨跌颜色",
+          "description": "红涨绿跌或绿涨红跌",
+          "icon": "palette",
+          "surfaces": ["android"],
+          "preferenceKeys": ["colorScheme"],
+          "apiRefs": ["/api/v1/settings/color-scheme"]
+        }
+      ]
+    },
+    {
+      "id": "system",
+      "label": "系统与维护",
+      "description": "数据库、备份、更新和维护入口",
+      "items": [
+        {
+          "id": "database",
+          "label": "数据库",
+          "description": "备份、维护和数据连接",
+          "icon": "database",
+          "surfaces": ["web"],
+          "webHref": "/settings/database",
+          "apiRefs": ["/api/v1/settings/backup"]
+        },
+        {
+          "id": "system-update",
+          "label": "系统更新",
+          "description": "NAS Docker 更新和版本检查",
+          "icon": "refresh-cw",
+          "surfaces": ["web"],
+          "webHref": "/settings/system-update",
+          "apiRefs": ["/api/v1/settings/system-update"]
+        }
+      ]
+    },
+    {
+      "id": "feedback",
+      "label": "意见建议",
+      "description": "反馈问题、建议和想法",
+      "items": [
+        {
+          "id": "feedback",
+          "label": "意见建议",
+          "description": "通过邮件向我们反馈问题和建议",
+          "icon": "mail",
+          "surfaces": ["web"],
+          "webHref": "/settings/feedback",
+          "apiRefs": ["/api/v1/settings/feedback"]
+        }
+      ]
+    }
+  ]
+}

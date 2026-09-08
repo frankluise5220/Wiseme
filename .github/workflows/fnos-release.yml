@@ -1,0 +1,121 @@
+name: Release fnOS SQLite FPK
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: "Optional package version. Leave blank to use package.json version."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  FNOS_FNPACK_VERSION: 1.2.1
+
+jobs:
+  build-fpk:
+    name: Build and upload fnOS SQLite FPK (${{ matrix.target_arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_arch: x86
+            node_arch: x64
+            fnpack_arch: amd64
+            runner: ubuntu-22.04
+          - target_arch: arm64
+            node_arch: arm64
+            fnpack_arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify fnOS package sources
+        env:
+          FNOS_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run check:fnos
+
+      - name: Install fnpack
+        shell: bash
+        env:
+          FNPACK_ARCH: ${{ matrix.fnpack_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/fnpack/bin"
+          curl -fsSL "https://static2.fnnas.com/fnpack/fnpack-${FNOS_FNPACK_VERSION}-linux-${FNPACK_ARCH}" \
+            -o "${RUNNER_TEMP}/fnpack/bin/fnpack"
+          chmod +x "${RUNNER_TEMP}/fnpack/bin/fnpack"
+          echo "${RUNNER_TEMP}/fnpack/bin" >> "$GITHUB_PATH"
+
+      - name: Verify fnpack
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v fnpack >/dev/null 2>&1; then
+            echo "::error::fnpack was not found. Install fnpack on the release runner before publishing fnOS .fpk assets."
+            echo "::error::Do not upload release-artifacts/fnos/*-fpk-source.tgz as a user package; only .fpk is valid for release."
+            exit 1
+          fi
+
+      - name: Download Linux Node runtime
+        shell: bash
+        env:
+          NODE_ARCH: ${{ matrix.node_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts/fnos/runtime
+          NODE_VERSION="$(node -p "process.versions.node")"
+          NODE_TARBALL="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
+            -o "release-artifacts/fnos/runtime/${NODE_TARBALL}"
+          echo "FNOS_NODE_TARBALL=${PWD}/release-artifacts/fnos/runtime/${NODE_TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Build fnOS SQLite app
+        env:
+          DATABASE_URL: file:./native-build.db
+          MMH_DEPLOY_TARGET: fnos
+          FNOS_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run build:fnos:app
+
+      - name: Build fnOS FPK
+        env:
+          FNOS_PACKAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.package_version || github.event.release.tag_name || '' }}
+          FNOS_TARGET_ARCH: ${{ matrix.target_arch }}
+          FNOS_NODE_TARBALL: ${{ env.FNOS_NODE_TARBALL }}
+        run: npm run build:fnos
+
+      - name: Verify built fnOS FPK
+        env:
+          FNOS_VERIFY_BUILT_FPK: "1"
+          FNOS_PACKAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.package_version || github.event.release.tag_name || '' }}
+          FNOS_TARGET_ARCH: ${{ matrix.target_arch }}
+        run: npm run check:fnos
+
+      - name: Upload fnOS FPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmh-fnos-${{ matrix.target_arch }}-fpk
+          path: release-artifacts/fnos/*.fpk
+          if-no-files-found: error
+
+      - name: Upload fnOS FPK to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/fnos/*.fpk
+          overwrite_files: true

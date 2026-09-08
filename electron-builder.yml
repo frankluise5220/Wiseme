@@ -1,0 +1,78 @@
+# MMH Windows desktop packaging config (electron-builder).
+# The standalone Next.js app and the portable Node runtime are staged into
+# release-artifacts/win/stage by scripts/build-win-desktop.cjs and shipped as
+# extraResources (never packed into asar, because they contain native modules
+# and runtime binaries).
+
+appId: com.mmh.desktop
+productName: MMH
+copyright: Copyright © 2026 MMH
+
+# The standalone server runs on the bundled portable Node (resources/node),
+# never on Electron's own runtime, so native modules must NOT be rebuilt for
+# Electron. They were already rebuilt for Node 22 ABI during staging.
+npmRebuild: false
+
+directories:
+  output: release-artifacts/win/dist
+  buildResources: release-artifacts/win/build
+
+files:
+  - electron/main.cjs
+  - "!node_modules/**"
+  - "!**/node_modules/**"
+  # electron-updater and its runtime deps (the standalone server keeps its
+  # own node_modules under extraResources, so only the updater goes into asar).
+  - "node_modules/electron-updater/**"
+  - "node_modules/builder-util-runtime/**"
+  - "node_modules/fs-extra/**"
+  - "node_modules/graceful-fs/**"
+  - "node_modules/jsonfile/**"
+  - "node_modules/universalify/**"
+  - "node_modules/js-yaml/**"
+  - "node_modules/argparse/**"
+  - "node_modules/lazy-val/**"
+  - "node_modules/lodash.escaperegexp/**"
+  - "node_modules/lodash.isequal/**"
+  - "node_modules/semver/**"
+  - "node_modules/tiny-typed-emitter/**"
+  - "node_modules/debug/**"
+  - "node_modules/ms/**"
+  - "node_modules/sax/**"
+
+publish:
+  provider: generic
+  url: http://fnapp.floatingice.win:5660/mmh/
+
+extraResources:
+  - from: release-artifacts/win/stage/app
+    to: app
+    filter:
+      - "**/*"
+  - from: release-artifacts/win/stage/node
+    to: node
+    filter:
+      - "**/*"
+  - from: release-artifacts/win/build/icon.png
+    to: icon.png
+
+win:
+  icon: release-artifacts/win/build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MMH
+  artifactName: MMH-Setup-${version}.${ext}
+  deleteAppDataOnUninstall: false
+  include: electron/installer.nsh
+
+electronLanguages:
+  - zh-CN
+  - en-US
