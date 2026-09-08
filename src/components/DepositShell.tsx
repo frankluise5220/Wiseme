@@ -80,7 +80,13 @@ export function DepositShell({
   lots: DepositLot[];
   cashAccounts?: Array<{ id: string; label: string }>;
 }) {
-  const [selectedLotId, setSelectedLotId] = useState<string | null>(null);
+  // Default to the largest open deposit lot, matching the list's amount-desc order.
+  const [selectedLotId, setSelectedLotId] = useState<string | null>(() => {
+    const sorted = lots
+      .filter((lot) => lot.status === "open")
+      .sort((a, b) => b.originalAmount - a.originalAmount);
+    return sorted[0]?.id ?? null;
+  });
   const [lotTab, setLotTab] = useState<LotTab>("held");
   const [selectedEntryIds, setSelectedEntryIds] = useState<Set<string>>(new Set());
   const [linkingIds, setLinkingIds] = useState<Set<string>>(new Set());

@@ -51,6 +51,11 @@ function signedRemainingTotal(net: number, remainingPrincipal: number, remaining
   return net < 0 ? -total : total;
 }
 
+/** Keep this aligned with DebtShell.isSettledDebtRow (SETTLED_DEBT_EPSILON = 0.005). */
+function isSettledDebtViewRow(row: DebtViewRow) {
+  return Math.abs(row.net) < ACTIVE_DEBT_EPSILON && row.payable + row.receivable < ACTIVE_DEBT_EPSILON;
+}
+
 export type DebtViewAccount = {
   id: string;
   name: string;
@@ -97,6 +102,13 @@ export type DebtViewRow = {
   objectType: string;
   objectName: string;
   itemName: string;
+  /**
+   * The account's real stored name. `name` is the row display name, which
+   * prepends the object name for non-grouped rows; edit dialogs must prefill
+   * from `accountName` so saving never writes the display prefix back into
+   * the account name (that is how "农行 | 农行 | 材料款" accumulated).
+   */
+  accountName: string;
   accountId: string;
   institutionId: string;
   counterpartyId: string;
@@ -709,7 +721,11 @@ export function buildDebtDetailEntriesViewData({
               mode: debtEditMode,
               dialogType: isSelectedBankLoan ? "loan" : "debt",
               defaultDebtAccountId: debtSideAccountId,
-              defaultDebtAccountName: selectedDebtRow?.name ?? null,
+              // Prefill the account's real stored name, not the row display
+              // name: `name` already contains the `objectName | itemName`
+              // prefix, and writing it back on save re-prepends the
+              // institution on every edit (the tripled "农行" bug).
+              defaultDebtAccountName: selectedDebtRow?.accountName ?? null,
               defaultLoanPurposeCategoryId: debtEditMode === "borrow_in" ? (entry.categoryId ?? null) : null,
               defaultCashAccountId: entry.source === "debt_financed_purchase" ? defaultAutoDebitCashAccountId : cashSideAccountId,
               defaultAutoDebitCashAccountId,
@@ -1132,6 +1148,7 @@ export function buildDebtRowsViewData({
       objectType: accountObjectType,
       objectName,
       itemName,
+      accountName: account.name,
       accountId: account.id,
       institutionId: account.institutionId ?? "",
       counterpartyId: account.counterpartyId ?? "",
@@ -1216,6 +1233,7 @@ export function buildDebtRowsViewData({
       objectType: first.objectType,
       objectName: first.objectName,
       itemName: SETTLEMENT_ITEM_NAME,
+      accountName: "",
       accountId: "",
       institutionId: institutionIds[0] ?? "",
       counterpartyId: counterpartyIds[0] ?? "",
@@ -1274,7 +1292,7 @@ export function buildDebtRowsViewData({
   const legacyCounterpartyDebtRow = debtPersonParam.startsWith("counterparty:")
     ? debtRows.find((row) => row.key === debtGroupKeyByCounterpartyId.get(debtPersonParam.slice("counterparty:".length)))
     : null;
-  const selectedDebtKey = debtRows.some((row) => row.key === debtPersonParam)
+  const explicitSelectedDebtKey = debtRows.some((row) => row.key === debtPersonParam)
     ? debtPersonParam
     : legacyInstitutionDebtRow
       ? legacyInstitutionDebtRow.key
@@ -1283,15 +1301,24 @@ export function buildDebtRowsViewData({
     : debtRows.some((row) => row.key === derivedDebtKey)
       ? derivedDebtKey
       : "";
-  const selectedDebtRow = debtRows.find((row) => row.key === selectedDebtKey) ?? null;
   const ordinaryDebtAccountIdSet = new Set(ordinaryDebtAccountIds);
-  const selectedDebtRowIsOrdinary = !!selectedDebtRow?.accountIds?.some((id) => ordinaryDebtAccountIdSet.has(id));
   const ordinaryDebtRows = debtRows.filter((row) => row.accountIds.some((id) => ordinaryDebtAccountIdSet.has(id)));
   const selectedLoanTypeRows = selectedDebtLoanType
     ? debtRows.filter((row) => !row.parentKey && row.isLoan && row.loanType === selectedDebtLoanType)
     : [];
-  // 选中某笔贷款时只做“高亮 + 下方详情定位”，列表仍展示全部同类债务行，
-  // 否则点击一行后整个表格只剩这一行，用户会以为其他贷款记录丢了。
+  // When no debtPerson query explicitly selects a row, select the first visible
+  // shell row by default (skipping settled rows) so details are visible on open.
+  // The fallback comes from the unselected shell list, so the default selection
+  // does not narrow the table above.
+  const fallbackShellRows = selectedDebtLoanType ? selectedLoanTypeRows : ordinaryDebtRows;
+  const fallbackSelectedDebtRow =
+    fallbackShellRows.find((row) => !isSettledDebtViewRow(row)) ?? fallbackShellRows[0] ?? null;
+  const selectedDebtKey = explicitSelectedDebtKey || fallbackSelectedDebtRow?.key || "";
+  const selectedDebtRow = debtRows.find((row) => row.key === selectedDebtKey) ?? null;
+  const selectedDebtRowIsOrdinary = !!selectedDebtRow?.accountIds?.some((id) => ordinaryDebtAccountIdSet.has(id));
+  // Selecting a specific loan should only highlight it and focus the detail
+  // panel. Keep the list showing all same-type debt rows so other loans do not
+  // appear to disappear after a click.
   const debtRowsForShell = selectedDebtLoanType
     ? selectedLoanTypeRows
     : selectedDebtRow && !selectedDebtRowIsOrdinary

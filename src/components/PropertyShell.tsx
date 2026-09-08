@@ -381,7 +381,11 @@ export function PropertyShell({
   const floatingPnL = totalMarketValue - totalCost;
   const floatingRate = totalCost > 0 ? floatingPnL / totalCost : 0;
   const pnlCls = useCallback((value: number) => pnlClassFromRedUp(value, isRedUp), [isRedUp]);
-  const [selectedAssetId, setSelectedAssetId] = useState("");
+  // Default to the first asset (server-sorted by market value) so details show on open.
+  const [selectedAssetId, setSelectedAssetId] = useState(() => {
+    const first = positions[0];
+    return first ? (first.propertyAssetId ?? first.fundCode) : "";
+  });
   const [editValue, setEditValue] = useState<FixedAssetEditValue | null>(null);
   const [editMeta, setEditMeta] = useState<FixedAssetEditMeta | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);

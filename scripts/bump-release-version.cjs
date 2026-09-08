@@ -161,6 +161,26 @@ function updateLegacyFnosAppstore(version, releaseNotes) {
   writeJson(file, payload);
 }
 
+function readFnosAppDescription() {
+  const file = path.join(root, "deploy", "fnos", "repository", "fnpack.json");
+  const payload = readJson(file);
+  const description = payload.apps?.mmh?.desc;
+  return typeof description === "string" ? description.trim() : "";
+}
+
+function updateSelfhostedFnosSource(version) {
+  const file = path.join(root, "deploy", "fnos", "selfhosted-source", "data", "fn-appstores.json");
+  if (!fs.existsSync(file)) return;
+  const payload = readJson(file);
+  const description = readFnosAppDescription();
+  for (const app of Array.isArray(payload) ? payload : []) {
+    if (app.id !== "mmh") continue;
+    app.version = version;
+    if (description) app.desc = description;
+  }
+  writeJson(file, payload);
+}
+
 const pkg = readJson(path.join(root, "package.json"));
 const version = nextVersion(pkg.version);
 const releaseNotes = getReleaseNotes(pkg);
@@ -171,5 +191,6 @@ updateFnosRepositoryJson(version, path.join("deploy", "fnos", "repository", "app
 updateFnosRepositoryJson(version, path.join("deploy", "fnos", "repository", "api", "apps"), undefined, releaseNotes);
 updateFndepotFnpackJson(version, releaseNotes);
 updateLegacyFnosAppstore(version, releaseNotes);
+updateSelfhostedFnosSource(version);
 
 console.log(`MMH release version bumped to ${version}.`);

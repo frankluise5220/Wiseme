@@ -420,6 +420,13 @@ export function alignStatementIncomeRefunds<T extends StatementImportItemLike>(i
   });
 }
 
+// Whole-row learned templates ("2 支出 132.00 墨斗鱼·招行·9447 保险") always
+// contain transaction-type words after normalization, and account display
+// fragments joined with "·" also appear in most rows. They are not category
+// evidence; exclude them so one template does not boost every expense for the
+// same owner/account into the wrong category.
+const CATEGORY_EVIDENCE_STOPWORD_TOKENS = new Set(["支出", "收入", "转账", "转入", "转出", "还款"]);
+
 function matchHistoricalCategoryName(item: StatementImportItemLike, samples: StatementHistoricalCategorySample[]) {
   const type = item.type === "income" ? "income" : item.type === "expense" ? "expense" : "";
   if (!type) return undefined;
@@ -452,6 +459,7 @@ function matchHistoricalCategoryName(item: StatementImportItemLike, samples: Sta
       }
     }
     for (const token of sampleTokens) {
+      if (CATEGORY_EVIDENCE_STOPWORD_TOKENS.has(token) || token.includes("·")) continue;
       if (sourceTokens.has(token)) score += Math.min(12, token.length * 2);
       else if (token.length >= 4 && sourceText.includes(token)) score += Math.min(10, token.length);
     }

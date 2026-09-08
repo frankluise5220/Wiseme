@@ -1627,6 +1627,17 @@ export function FundShell(props: Props) {
 
   }, [baseQuery, view, showCleared, fundCode, fundChartOpen, sortedPositions, sortedClearedPositions, isWealthAccount, positionAssetKey]);
 
+  // Default to the first holding so its transaction details are visible on open.
+  const initialFundSelectionRef = useRef(false);
+  useEffect(() => {
+    if (initialFundSelectionRef.current || fundCode || showCleared || isWealthAccount) return;
+    const first = sortedPositions[0];
+    const firstKey = first ? positionAssetKey(first) : "";
+    if (!firstKey) return;
+    initialFundSelectionRef.current = true;
+    switchFund(firstKey);
+  }, [fundCode, isWealthAccount, positionAssetKey, showCleared, sortedPositions, switchFund]);
+
 
   const positionDisplayMetrics = useCallback((p: any) => {
     const adj = adjustedNavByCode[p.fundCode];

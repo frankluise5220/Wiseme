@@ -13,6 +13,7 @@ const osMinVersion = process.env.FNOS_OS_MIN_VERSION || "0.9.0";
 const packageReleaseNotes = typeof pkg.mmhReleaseNotes === "string" ? pkg.mmhReleaseNotes.trim() : "";
 const changelog = process.env.FNOS_PACKAGE_CHANGELOG || packageReleaseNotes || "更新 MMH 飞牛 SQLite 原生包，优化本地安装、启动和更新验证流程。";
 const manifestChangelog = toSingleLineText(changelog);
+const appDescription = toSingleLineText(readFnosAppDescription());
 const appName = "mmh";
 const target = normalizeFnosTarget(process.env.FNOS_TARGET_ARCH || process.env.FNOS_TARGET || "x86");
 const outDir = path.join(root, "release-artifacts", "fnos");
@@ -40,6 +41,18 @@ function toSingleLineText(value) {
     .map((line) => line.trim())
     .filter(Boolean)
     .join(" ");
+}
+
+function readFnosAppDescription() {
+  const fnpackPath = path.join(root, "deploy", "fnos", "repository", "fnpack.json");
+  try {
+    const source = JSON.parse(fs.readFileSync(fnpackPath, "utf8"));
+    const description = source?.apps?.mmh?.desc;
+    if (typeof description === "string" && description.trim()) return description;
+  } catch (error) {
+    console.warn(`Could not read fnOS app description from ${path.relative(root, fnpackPath)}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return "一套本地部署、致力于化繁为简的家庭账务管理系统。";
 }
 
 function makeFnosPackageEntriesReadable(dir) {
@@ -538,7 +551,7 @@ if (generatedSchema.status !== 0) process.exit(generatedSchema.status || 1);
 write(path.join(stageDir, "manifest"), `
 appname=${appName}
 version=${version}
-desc=一套本地部署、致力于化繁为简的家庭账务管理系统。
+desc=${appDescription}
 display_name=MMH
 arch=${target.manifestArch}
 platform=${target.manifestPlatform}

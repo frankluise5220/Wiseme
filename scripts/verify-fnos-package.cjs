@@ -107,6 +107,31 @@ function readIfExists(file) {
   return fs.readFileSync(file, "utf8");
 }
 
+function parseJsonText(text, label) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    failures.push(`Could not parse ${label}: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+function toSingleLineText(value) {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function manifestField(manifest, key) {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^\\s*${escapedKey}\\s*=\\s*(.*)$`);
+  const line = manifest.split(/\r?\n/).find((item) => pattern.test(item));
+  return line ? line.match(pattern)?.[1] || "" : "";
+}
+
 function readTarEntry(archive, entry) {
   if (!fs.existsSync(archive)) return "";
   const result = spawnSync("tar", ["-xOf", archive, entry], {
@@ -267,6 +292,7 @@ const scheduledTaskLock = read(path.join(root, "src", "lib", "server", "schedule
 const fundProfileSource = read(path.join(root, "src", "lib", "fund", "fundProfile.ts"));
 const repositoryExample = read(path.join(root, "deploy", "fnos", "repository", "apps.example.json"));
 const repositoryApiApps = read(path.join(root, "deploy", "fnos", "repository", "api", "apps"));
+const repositoryFnpack = read(path.join(root, "deploy", "fnos", "repository", "fnpack.json"));
 const fnosReadme = read(path.join(root, "deploy", "fnos", "README.md"));
 const fnosPackagePlanPath = path.join(root, "docs", "fnos-package-plan.md");
 const fnosPackagePlan = readIfExists(fnosPackagePlanPath);
@@ -281,6 +307,9 @@ const persistedPortFileIndex = buildScript.indexOf('if [ -f "$port_file" ]; then
 const persistedEnvPortIndex = buildScript.indexOf('env_port="$(read_env_value PORT');
 const fnosInitSqliteIndex = buildScript.indexOf('(cd "$SERVER_DIR" && "$NODE_BIN" "$SERVER_DIR/scripts/init-sqlite.cjs")');
 const fnosPidCheckIndex = buildScript.indexOf('if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")"');
+const repositoryFnpackJson = parseJsonText(repositoryFnpack, "deploy/fnos/repository/fnpack.json");
+const appCenterDescription = repositoryFnpackJson?.apps?.mmh?.desc || "";
+const manifestDescription = toSingleLineText(appCenterDescription);
 
 expect(/provider = "sqlite"/.test(schemaScript), "Native schema generator must switch datasource provider to sqlite.");
 expect(/@db\\\./.test(schemaScript), "Native schema generator must strip PostgreSQL native column annotations.");
@@ -296,6 +325,8 @@ expect(/os_min_version=\$\{osMinVersion\}/.test(buildScript), "fnOS manifest mus
 expect(/function toSingleLineText\(value\)/.test(buildScript), "fnOS package build must normalize release notes into single-line manifest text.");
 expect(/const manifestChangelog = toSingleLineText\(changelog\);/.test(buildScript), "fnOS package build must derive a single-line manifest changelog.");
 expect(/changelog=\$\{manifestChangelog\}/.test(buildScript), "fnOS manifest must include a changelog for official submission.");
+expect(/readFnosAppDescription/.test(buildScript) && /const appDescription = toSingleLineText\(readFnosAppDescription\(\)\);/.test(buildScript), "fnOS package build must source the App Center description from the fnOS repository metadata.");
+expect(/desc=\$\{appDescription\}/.test(buildScript), "fnOS package manifest must use the full app description instead of a short hardcoded sentence.");
 expect(/mmhReleaseNotes/.test(buildScript), "fnOS package build must copy release notes into the runtime package.json.");
 expect(!/path\.join\(stageDir,\s*"wizard",\s*"install"\)/.test(buildScript), "fnOS package must not ship wizard/install; the FN soft-store client only parses that file, and shipping it makes every update wait for the service port again.");
 expect(!/path\.join\(stageDir,\s*"wizard",\s*"upgrade"\)/.test(buildScript), "fnOS package must not ship wizard/upgrade; updates must not ask for the service port.");
@@ -481,33 +512,41 @@ expect(/"platform"\s*:\s*"x86"/.test(repositoryApiApps), "fnOS repository api/ap
 expect(/"platforms"\s*:\s*\[\s*"x86"\s*,\s*"arm"\s*\]/.test(repositoryApiApps), "fnOS repository api/apps must list x86 and arm platforms.");
 expect(/"download_urls"/.test(repositoryApiApps) && /"x86_64"/.test(repositoryApiApps) && /"arm64"/.test(repositoryApiApps), "fnOS repository api/apps must include exactly the x86_64 and arm64 download_urls.");
 expect(!/"x86"\s*:/.test(repositoryApiApps), "fnOS repository api/apps must not include a third x86 alias download URL.");
+expect(
+  appCenterDescription.length >= 300 && /MoneyMoneyHome/.test(appCenterDescription) && /AI 助手/.test(appCenterDescription),
+  "fnOS repository metadata must keep the full App Center description, not the old one-sentence summary.",
+);
 
 if (fs.existsSync(stageDir)) {
   const stageManifest = read(path.join(stageDir, "manifest"));
-  const stagePrivilege = read(path.join(stageDir, "config", "privilege"));
-  const stageMainScript = read(path.join(stageDir, "cmd", "main"));
-  const stageApplySettingsScript = read(path.join(stageDir, "cmd", "apply-settings"));
-  expect(new RegExp(`arch\\s*=\\s*${verifyTarget.manifestArch}`).test(stageManifest), `fnOS ${verifyTarget.id} stage manifest must declare arch=${verifyTarget.manifestArch}.`);
-  expect(new RegExp(`platform\\s*=\\s*${verifyTarget.manifestPlatform}`).test(stageManifest), `fnOS ${verifyTarget.id} stage manifest must declare platform=${verifyTarget.manifestPlatform}.`);
-  expect(!/"run-as"\s*:\s*"package"/.test(stagePrivilege), `fnOS ${verifyTarget.id} stage privilege must not run lifecycle scripts as the package user.`);
-  expect(/"username"\s*:\s*"mmh"/.test(stagePrivilege) && /"groupname"\s*:\s*"mmh"/.test(stagePrivilege), `fnOS ${verifyTarget.id} stage privilege must still declare the mmh package user and group.`);
-  expect(/restart_start_as_package_user/.test(stageMainScript) && /runuser -u mmh/.test(stageMainScript), `fnOS ${verifyTarget.id} stage cmd/main must drop root-started service execution to the mmh user.`);
-  expect(/@appcenter\/"\$appname"/.test(stageMainScript), `fnOS ${verifyTarget.id} stage cmd/main must rediscover the appcenter install directory without TRIM_APPDEST.`);
-  expect(/MMH_SESSION_SECRET/.test(stageMainScript) && /mmh-session-secret\.txt/.test(stageMainScript), `fnOS ${verifyTarget.id} stage cmd/main must export and persist MMH_SESSION_SECRET.`);
-  expect(/resolve_session_secret/.test(stageApplySettingsScript) && /MMH_SESSION_SECRET=\$\{session_secret\}/.test(stageApplySettingsScript), `fnOS ${verifyTarget.id} stage cmd/apply-settings must persist MMH_SESSION_SECRET into mmh.env.`);
-  expect(!fs.existsSync(path.join(stageDir, "wizard", "install")), `fnOS ${verifyTarget.id} stage must not include wizard/install; the FN soft-store client parses it and would block silent updates on user input.`);
-  expect(fs.existsSync(path.join(stageDir, "wizard", "config")), `fnOS ${verifyTarget.id} stage must include wizard/config so the service port stays editable after a silent install.`);
-  for (const envFile of [".env", ".env.local", ".env.production", ".env.development"]) {
-    expect(!fs.existsSync(path.join(stageDir, "app", "server", envFile)), `fnOS stage must not include ${envFile}.`);
+  const stageVersion = manifestField(stageManifest, "version");
+  if (!stageVersion || stageVersion === verifyVersion) {
+    const stagePrivilege = read(path.join(stageDir, "config", "privilege"));
+    const stageMainScript = read(path.join(stageDir, "cmd", "main"));
+    const stageApplySettingsScript = read(path.join(stageDir, "cmd", "apply-settings"));
+    expect(new RegExp(`arch\\s*=\\s*${verifyTarget.manifestArch}`).test(stageManifest), `fnOS ${verifyTarget.id} stage manifest must declare arch=${verifyTarget.manifestArch}.`);
+    expect(new RegExp(`platform\\s*=\\s*${verifyTarget.manifestPlatform}`).test(stageManifest), `fnOS ${verifyTarget.id} stage manifest must declare platform=${verifyTarget.manifestPlatform}.`);
+    expect(manifestField(stageManifest, "desc") === manifestDescription, `fnOS ${verifyTarget.id} stage manifest must include the full App Center description.`);
+    expect(!/"run-as"\s*:\s*"package"/.test(stagePrivilege), `fnOS ${verifyTarget.id} stage privilege must not run lifecycle scripts as the package user.`);
+    expect(/"username"\s*:\s*"mmh"/.test(stagePrivilege) && /"groupname"\s*:\s*"mmh"/.test(stagePrivilege), `fnOS ${verifyTarget.id} stage privilege must still declare the mmh package user and group.`);
+    expect(/restart_start_as_package_user/.test(stageMainScript) && /runuser -u mmh/.test(stageMainScript), `fnOS ${verifyTarget.id} stage cmd/main must drop root-started service execution to the mmh user.`);
+    expect(/@appcenter\/"\$appname"/.test(stageMainScript), `fnOS ${verifyTarget.id} stage cmd/main must rediscover the appcenter install directory without TRIM_APPDEST.`);
+    expect(/MMH_SESSION_SECRET/.test(stageMainScript) && /mmh-session-secret\.txt/.test(stageMainScript), `fnOS ${verifyTarget.id} stage cmd/main must export and persist MMH_SESSION_SECRET.`);
+    expect(/resolve_session_secret/.test(stageApplySettingsScript) && /MMH_SESSION_SECRET=\$\{session_secret\}/.test(stageApplySettingsScript), `fnOS ${verifyTarget.id} stage cmd/apply-settings must persist MMH_SESSION_SECRET into mmh.env.`);
+    expect(!fs.existsSync(path.join(stageDir, "wizard", "install")), `fnOS ${verifyTarget.id} stage must not include wizard/install; the FN soft-store client parses it and would block silent updates on user input.`);
+    expect(fs.existsSync(path.join(stageDir, "wizard", "config")), `fnOS ${verifyTarget.id} stage must include wizard/config so the service port stays editable after a silent install.`);
+    for (const envFile of [".env", ".env.local", ".env.production", ".env.development"]) {
+      expect(!fs.existsSync(path.join(stageDir, "app", "server", envFile)), `fnOS stage must not include ${envFile}.`);
+    }
+    expectPngSize(path.join(stageDir, "ICON.PNG"), 64);
+    expectPngSize(path.join(stageDir, "ICON_256.PNG"), 256);
+    if (fs.existsSync(path.join(stageDir, "app"))) {
+      expectPngSize(path.join(stageDir, "app", "ui", "images", "icon_64.png"), 64);
+      expectPngSize(path.join(stageDir, "app", "ui", "images", "icon_256.png"), 256);
+    }
+    const publicDir = path.join(stageDir, "app", "server", "public");
+    if (fs.existsSync(publicDir)) expectFnosPublicFiles(listFilesRelative(publicDir), "fnOS stage public");
   }
-  expectPngSize(path.join(stageDir, "ICON.PNG"), 64);
-  expectPngSize(path.join(stageDir, "ICON_256.PNG"), 256);
-  if (fs.existsSync(path.join(stageDir, "app"))) {
-    expectPngSize(path.join(stageDir, "app", "ui", "images", "icon_64.png"), 64);
-    expectPngSize(path.join(stageDir, "app", "ui", "images", "icon_256.png"), 256);
-  }
-  const publicDir = path.join(stageDir, "app", "server", "public");
-  if (fs.existsSync(publicDir)) expectFnosPublicFiles(listFilesRelative(publicDir), "fnOS stage public");
 }
 
 const builtFpk = path.join(root, "release-artifacts", "fnos", verifyTarget.builtFpkName);
@@ -519,6 +558,7 @@ if (process.env.FNOS_VERIFY_BUILT_FPK === "1") {
   expect(/version\s*=/.test(manifest), "Built fnOS .fpk manifest must include a version.");
   expect(new RegExp(`arch\\s*=\\s*${verifyTarget.manifestArch}`).test(manifest), `Built fnOS .fpk manifest must declare arch=${verifyTarget.manifestArch}.`);
   expect(new RegExp(`platform\\s*=\\s*${verifyTarget.manifestPlatform}`).test(manifest), `Built fnOS .fpk manifest must declare platform=${verifyTarget.manifestPlatform}.`);
+  expect(manifestField(manifest, "desc") === manifestDescription, "Built fnOS .fpk manifest must include the full App Center description.");
   expect(!tarHasEntryOrChild(builtFpk, "wizard/install"), "Built fnOS .fpk must not include wizard/install; the FN soft-store client parses it and would block silent updates on user input.");
   expect(!tarHasEntryOrChild(builtFpk, "wizard/upgrade"), "Built fnOS .fpk must not include wizard/upgrade; updates must not ask for the service port.");
   expect(!tarHasEntryOrChild(builtFpk, "wizard/uninstall"), "Built fnOS .fpk must not include wizard/uninstall; uninstall must stay non-interactive.");

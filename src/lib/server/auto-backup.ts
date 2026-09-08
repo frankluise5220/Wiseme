@@ -68,6 +68,7 @@ const DEFAULT_CONFIG: AutoBackupConfig = {
   path: "",
   keepCount: 7,
 };
+const WINDOWS_STARTUP_BACKUP_STALE_MS = 24 * 3600_000;
 
 function configError(message: string): never {
   throw new Error(message);
@@ -290,6 +291,33 @@ export function cleanupOldBackups(targetDir: string, keepCount: number): void {
   }
 }
 
+export function getLatestAutoBackupFileMtime(targetDir: string): Date | null {
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(targetDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  let latest = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^.+\.mmhbackup$/.test(entry.name)) continue;
+    try {
+      const mtime = fs.statSync(path.join(targetDir, entry.name)).mtimeMs;
+      if (Number.isFinite(mtime) && mtime > latest) latest = mtime;
+    } catch {
+      // Ignore files that disappear while scanning the backup directory.
+    }
+  }
+  return latest > 0 ? new Date(latest) : null;
+}
+
+export function isAutoBackupFileStale(targetDir: string, now: Date, staleMs = WINDOWS_STARTUP_BACKUP_STALE_MS): boolean {
+  const latest = getLatestAutoBackupFileMtime(targetDir);
+  if (!latest) return true;
+  return now.getTime() - latest.getTime() >= staleMs;
+}
+
 /**
  * Runs one automatic backup now: resolves the target directory, writes
  * encrypted packages (whole-db snapshot for scope=system on SQLite, otherwise
@@ -385,6 +413,50 @@ export async function runAutoBackupTick(): Promise<AutoBackupRunResult | null> {
       });
     } catch {
       // Never let status persistence failures escape the tick.
+    }
+    return null;
+  }
+}
+
+/**
+ * Windows desktop does not keep the server alive after the app is closed, so
+ * a scheduled backup may be missed. On startup, catch up in the background when
+ * automatic backup is enabled and the newest backup file is at least 24h old.
+ */
+export async function runWindowsStartupAutoBackupIfStale(): Promise<AutoBackupRunResult | null> {
+  if (String(process.env.MMH_DEPLOY_TARGET ?? "").trim().toLowerCase() !== "windows") return null;
+
+  let config: AutoBackupConfig | null = null;
+  const now = new Date();
+  try {
+    config = await loadAutoBackupConfig();
+    if (!config.enabled) return null;
+
+    const targetDir = config.path || defaultAutoBackupDir();
+    if (!isAutoBackupFileStale(targetDir, now)) return null;
+
+    const result = await runAutoBackupNow(config, { force: true });
+    await saveAutoBackupStatus({
+      lastRunAt: now.toISOString(),
+      lastRunOk: true,
+      lastError: null,
+      nextRunAt: computeNextRunAt(config, now, now).toISOString(),
+    });
+    logger.info(`windows startup auto backup completed: ${result.files.join(", ")}`, "auto-backup");
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error(`windows startup auto backup failed: ${message}`, "auto-backup");
+    try {
+      const fallbackConfig = config ?? (await loadAutoBackupConfig());
+      await saveAutoBackupStatus({
+        lastRunAt: now.toISOString(),
+        lastRunOk: false,
+        lastError: message,
+        nextRunAt: fallbackConfig.enabled ? computeNextRunAt(fallbackConfig, now, now).toISOString() : null,
+      });
+    } catch {
+      // Keep startup non-blocking even if status persistence fails.
     }
     return null;
   }

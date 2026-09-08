@@ -339,6 +339,16 @@ export function StockHoldingsPanel({
     return () => window.removeEventListener("mmh:stock:edit:success", onEditSaved);
   }, [loadTransactions, reloadHoldings, selectedPosition]);
 
+  // Default to the largest holding, matching the list's market-value order.
+  const initialStockSelectionRef = useRef(false);
+  useEffect(() => {
+    if (initialStockSelectionRef.current || selectedKey || showCleared || positions.length === 0) return;
+    const first = [...positions].sort((a, b) => b.marketValue - a.marketValue)[0];
+    if (!first) return;
+    initialStockSelectionRef.current = true;
+    void loadTransactions(first);
+  }, [loadTransactions, positions, selectedKey, showCleared]);
+
   async function refreshClosingPrices() {
     if (positions.length === 0 || refreshingPrice) return;
     setRefreshingPrice(true);

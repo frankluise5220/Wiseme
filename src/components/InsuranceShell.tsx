@@ -724,6 +724,13 @@ export function InsuranceShell({
     () => visibleHoldings.find((holding) => holding.id === selectedHoldingId) ?? null,
     [selectedHoldingId, visibleHoldings],
   );
+  // Default to the first visible policy so related entries are visible on open.
+  const initialInsuranceSelectionRef = useRef(false);
+  useEffect(() => {
+    if (initialInsuranceSelectionRef.current || selectedHoldingId || visibleHoldings.length === 0) return;
+    initialInsuranceSelectionRef.current = true;
+    setSelectedHoldingId(visibleHoldings[0].id);
+  }, [selectedHoldingId, visibleHoldings]);
   const productEditOptions = useMemo<InsuranceProductEditOption[]>(
     () => currentHoldings.map((holding) => ({ id: holding.id, label: holding.label })),
     [currentHoldings],
@@ -1415,6 +1422,5 @@ export function InsuranceShell({
     </div>
   );
 }
-
 
 

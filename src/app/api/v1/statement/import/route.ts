@@ -6,7 +6,7 @@ import { prisma } from "@/lib/db/prisma";
 import { addDaysUtc, parseFlexibleDateToYmd, toStatementMonth } from "@/lib/date-utils";
 import { getCurrentUser } from "@/lib/server/auth";
 import { getHouseholdScope } from "@/lib/server/household-scope";
-import { normalizeDefaultCategoryHierarchyForHousehold, resolveCategorySnapshot } from "@/lib/default-categories";
+import { normalizeDefaultCategoryHierarchyForHousehold, resolveCategorySnapshot, type CategorySnapshot, type DefaultCategoryType } from "@/lib/default-categories";
 import { normalizeCurrency, resolveSameCurrencyTransfer } from "@/lib/currency";
 import {
   expandImportBankName,
@@ -103,7 +103,47 @@ type ImportOptions = {
   importBatchId?: string | null;
   createdAccounts?: Array<{ id: string; name: string; kind: string; institutionName?: string | null }>;
   accountGroups?: Array<{ id: string; name: string }>;
+  /**
+   * Per-request lookup cache for bulk imports. The per-item loop repeats the
+   * same account/category/institution lookups thousands of times; without the
+   * cache each item costs 6-10 sequential DB round trips (~140ms/row, ~7min
+   * for 3000 rows). Only successful resolutions are cached; accounts and
+   * institutions created during the import are appended to the cached lists
+   * so later items still see them.
+   */
+  lookupCache?: StatementImportLookupCache;
 };
+
+type ImportAccountListRow = {
+  id: string;
+  name: string;
+  kind: string;
+  numberMasked: string | null;
+  Institution: { name: string; shortName: string | null } | null;
+  AccountAlias: Array<{ alias: string }>;
+};
+
+type StatementImportLookupCache = {
+  institutionList: Array<{ id: string; name: string; shortName: string | null; type: string | null }> | null;
+  importAccountList: ImportAccountListRow[] | null;
+  resolvedAccountIdByName: Map<string, string>;
+  accountBaseMetaById: Map<string, { name: string; kind: string; billingDay: number | null; currency: string | null } | null>;
+  categorySnapshotByKey: Map<string, CategorySnapshot | null>;
+  billAccountByCandidateKey: Map<string, Awaited<ReturnType<typeof loadStatementBillCandidateAccounts>>[number] | null>;
+  billAccountIdsByAccountId: Map<string, string[]>;
+};
+
+function createStatementImportLookupCache(): StatementImportLookupCache {
+  return {
+    institutionList: null,
+    importAccountList: null,
+    resolvedAccountIdByName: new Map(),
+    accountBaseMetaById: new Map(),
+    categorySnapshotByKey: new Map(),
+    billAccountByCandidateKey: new Map(),
+    billAccountIdsByAccountId: new Map(),
+  };
+}
 
 const MailSourceSchema = z.object({
   emailAccountId: z.string().min(1),
@@ -205,13 +245,30 @@ function formatDateUtc(date?: Date | null) {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
-async function statementMonthForAccountId(tx: Db, accountId: string | null, date: Date) {
+async function statementMonthForAccountId(tx: Db, accountId: string | null, date: Date, cache?: StatementImportLookupCache) {
   if (!accountId) return null;
-  const acc = await tx.account.findUnique({ where: { id: accountId }, select: { kind: true, billingDay: true } });
-  if (!acc) return null;
-  if (acc.kind !== AccountKind.bank_credit && acc.kind !== AccountKind.loan) return null;
-  if (!acc.billingDay) return null;
-  return toStatementMonth(date, acc.billingDay);
+  const meta = await getAccountBaseMetaCached(tx, accountId, cache);
+  if (!meta) return null;
+  if (meta.kind !== AccountKind.bank_credit && meta.kind !== AccountKind.loan) return null;
+  if (meta.billingDay == null) return null;
+  return toStatementMonth(date, meta.billingDay);
+}
+
+async function getAccountBaseMetaCached(tx: Db, accountId: string | null, cache?: StatementImportLookupCache) {
+  if (!accountId) return null;
+  if (cache) {
+    const cached = cache.accountBaseMetaById.get(accountId);
+    if (cached !== undefined) return cached;
+  }
+  const account = await tx.account.findUnique({
+    where: { id: accountId },
+    select: { name: true, kind: true, billingDay: true, currency: true },
+  });
+  const meta = account
+    ? { name: account.name, kind: account.kind, billingDay: account.billingDay, currency: account.currency }
+    : null;
+  if (cache) cache.accountBaseMetaById.set(accountId, meta);
+  return meta;
 }
 
 type StatementBillLock = {
@@ -336,15 +393,8 @@ async function detectManualRecordConflicts(
   return { total, details };
 }
 
-async function statementBillLockForImportedRecord(tx: Db, householdId: string, item: ParsedItem, record: { accountId: string | null; toAccountId: string | null }): Promise<StatementBillLock | null> {
-  const amount = Number.isFinite(item._meta?.statementAmount) ? item._meta?.statementAmount : undefined;
-  const periodStart = parseDateOnlyUtc(item._meta?.statementPeriodStart);
-  const periodEnd = parseDateOnlyUtc(item._meta?.statementPeriodEnd);
-  const dueDate = parseDateOnlyUtc(item._meta?.statementDueDate);
-  if (amount === undefined && !periodStart && !periodEnd && !dueDate) return null;
-  const candidateIds = [record.toAccountId, record.accountId].filter((id): id is string => Boolean(id));
-  if (candidateIds.length === 0) return null;
-  const accounts = await tx.account.findMany({
+async function loadStatementBillCandidateAccounts(tx: Db, householdId: string, candidateIds: string[]) {
+  return tx.account.findMany({
     where: {
       id: { in: candidateIds },
       householdId,
@@ -360,11 +410,40 @@ async function statementBillLockForImportedRecord(tx: Db, householdId: string, i
       creditBillMode: true,
     },
   });
-  const accountById = new Map(accounts.map((account) => [account.id, account]));
-  const account = candidateIds.map((id) => accountById.get(id)).find(Boolean);
+}
+
+async function statementBillLockForImportedRecord(tx: Db, householdId: string, item: ParsedItem, record: { accountId: string | null; toAccountId: string | null }, cache?: StatementImportLookupCache): Promise<StatementBillLock | null> {
+  const amount = Number.isFinite(item._meta?.statementAmount) ? item._meta?.statementAmount : undefined;
+  const periodStart = parseDateOnlyUtc(item._meta?.statementPeriodStart);
+  const periodEnd = parseDateOnlyUtc(item._meta?.statementPeriodEnd);
+  const dueDate = parseDateOnlyUtc(item._meta?.statementDueDate);
+  if (amount === undefined && !periodStart && !periodEnd && !dueDate) return null;
+  const candidateIds = [record.toAccountId, record.accountId].filter((id): id is string => Boolean(id));
+  if (candidateIds.length === 0) return null;
+  const candidateKey = candidateIds.join("|");
+  let account: Awaited<ReturnType<typeof loadStatementBillCandidateAccounts>>[number] | null = null;
+  if (cache) {
+    const cached = cache.billAccountByCandidateKey.get(candidateKey);
+    if (cached !== undefined) {
+      account = cached;
+    } else {
+      const accounts = await loadStatementBillCandidateAccounts(tx, householdId, candidateIds);
+      const accountById = new Map(accounts.map((row) => [row.id, row]));
+      account = candidateIds.map((id) => accountById.get(id)).find(Boolean) ?? null;
+      cache.billAccountByCandidateKey.set(candidateKey, account);
+    }
+  } else {
+    const accounts = await loadStatementBillCandidateAccounts(tx, householdId, candidateIds);
+    const accountById = new Map(accounts.map((row) => [row.id, row]));
+    account = candidateIds.map((id) => accountById.get(id)).find(Boolean) ?? null;
+  }
   if (!account?.billingDay) return null;
 
-  const billAccountIds = await getCreditBillAccountIds(tx, account);
+  let billAccountIds: string[] | undefined = cache?.billAccountIdsByAccountId.get(account.id);
+  if (!billAccountIds) {
+    billAccountIds = await getCreditBillAccountIds(tx, account);
+    cache?.billAccountIdsByAccountId.set(account.id, billAccountIds);
+  }
   const statementMonth = toStatementMonth(periodEnd ?? postedDateForStatement(item, parseDate(item.date)), account.billingDay);
   return {
     storageAccountId: billAccountIds[0] ?? account.id,
@@ -470,12 +549,10 @@ async function lockImportedStatementBills(tx: Db, locks: StatementBillLock[]) {
   return uniqueLocks;
 }
 
-async function accountCurrencyMeta(tx: Db, accountId: string | null) {
+async function accountCurrencyMeta(tx: Db, accountId: string | null, cache?: StatementImportLookupCache) {
   if (!accountId) return null;
-  return tx.account.findUnique({
-    where: { id: accountId },
-    select: { name: true, currency: true },
-  });
+  const meta = await getAccountBaseMetaCached(tx, accountId, cache);
+  return meta ? { name: meta.name, currency: meta.currency } : null;
 }
 
 function postedDateForStatement(item: ParsedItem, fallbackDate: Date) {
@@ -573,16 +650,33 @@ function normalizeInstitutionKey(value: string) {
   return normalizeImportAccountMatchKey(value);
 }
 
-async function findInstitution(tx: Db, householdId: string, institutionName?: string) {
-  const name = String(institutionName ?? "").trim();
-  if (!name) return null;
-  const targetKeys = expandImportBankName(name).map(normalizeInstitutionKey).filter(Boolean);
-  const key = normalizeInstitutionKey(name);
-  if (!targetKeys.includes(key)) targetKeys.push(key);
-  const institutions = await tx.institution.findMany({
+async function loadIncomeExpenseInstitutions(tx: Db, householdId: string, cache?: StatementImportLookupCache) {
+  if (!cache) {
+    return tx.institution.findMany({
+      where: { householdId, type: { in: [...INCOME_EXPENSE_INSTITUTION_TYPES] } },
+      select: { id: true, name: true, shortName: true, type: true },
+    });
+  }
+  cache.institutionList = cache.institutionList ?? await tx.institution.findMany({
     where: { householdId, type: { in: [...INCOME_EXPENSE_INSTITUTION_TYPES] } },
     select: { id: true, name: true, shortName: true, type: true },
   });
+  return cache.institutionList;
+}
+
+function appendInstitutionToLookupCache(cache: StatementImportLookupCache | undefined, created: { id: string; name: string; type: string | null }) {
+  if (!cache || !created.name) return;
+  cache.institutionList = cache.institutionList ?? [];
+  cache.institutionList.push({ id: created.id, name: created.name, shortName: null, type: created.type });
+}
+
+async function findInstitution(tx: Db, householdId: string, institutionName?: string, cache?: StatementImportLookupCache) {
+  const name = String(institutionName ?? "").trim();
+  if (!name) return null;
+  const institutions = await loadIncomeExpenseInstitutions(tx, householdId, cache);
+  const targetKeys = expandImportBankName(name).map(normalizeInstitutionKey).filter(Boolean);
+  const key = normalizeInstitutionKey(name);
+  if (!targetKeys.includes(key)) targetKeys.push(key);
   const exactKey = normalizeInstitutionKey(name);
   const exact = institutions.find((item) => {
     const nameKey = normalizeInstitutionKey(item.name);
@@ -603,8 +697,27 @@ async function findInstitution(tx: Db, householdId: string, institutionName?: st
   }) ?? null;
 }
 
-async function findExistingImportAccount(tx: Db, householdId: string, accountName: string) {
-  const accounts = await tx.account.findMany({
+async function loadImportAccountList(tx: Db, householdId: string, cache?: StatementImportLookupCache): Promise<ImportAccountListRow[]> {
+  if (cache) {
+    if (!cache.importAccountList) {
+      cache.importAccountList = await tx.account.findMany({
+        where: {
+          householdId,
+          isPlaceholder: { not: true },
+        },
+        select: {
+          id: true,
+          name: true,
+          kind: true,
+          numberMasked: true,
+          Institution: { select: { name: true, shortName: true } },
+          AccountAlias: { select: { alias: true } },
+        },
+      });
+    }
+    return cache.importAccountList;
+  }
+  return tx.account.findMany({
     where: {
       householdId,
       isPlaceholder: { not: true },
@@ -618,13 +731,17 @@ async function findExistingImportAccount(tx: Db, householdId: string, accountNam
       AccountAlias: { select: { alias: true } },
     },
   });
+}
+
+async function findExistingImportAccount(tx: Db, householdId: string, accountName: string, cache?: StatementImportLookupCache) {
+  const accounts = await loadImportAccountList(tx, householdId, cache);
   return resolveImportAccountFromList(accountName, accounts);
 }
 
-async function ensureBankInstitutionId(tx: Db, householdId: string, institutionName?: string) {
+async function ensureBankInstitutionId(tx: Db, householdId: string, institutionName?: string, cache?: StatementImportLookupCache) {
   const name = String(institutionName ?? "").trim();
   if (!name) return null;
-  const existing = await findInstitution(tx, householdId, name);
+  const existing = await findInstitution(tx, householdId, name, cache);
   if (existing) return existing.id;
   await assertInstitutionDisplayNamesUnique(tx, { householdId, name });
   const created = await tx.institution.create({
@@ -635,6 +752,7 @@ async function ensureBankInstitutionId(tx: Db, householdId: string, institutionN
       householdId,
     },
   });
+  appendInstitutionToLookupCache(cache, created);
   return created.id;
 }
 
@@ -643,10 +761,11 @@ async function ensureOwnedMoneyInstitutionId(
   householdId: string,
   institutionName: string | undefined,
   kind: "bank_debit" | "ewallet" | "cash" | "investment",
+  cache?: StatementImportLookupCache,
 ) {
   const name = String(institutionName ?? "").trim();
   if (!name || kind === "cash") return null;
-  const existing = await findInstitution(tx, householdId, name);
+  const existing = await findInstitution(tx, householdId, name, cache);
   if (existing) return existing.id;
   await assertInstitutionDisplayNamesUnique(tx, { householdId, name });
   const created = await tx.institution.create({
@@ -656,8 +775,9 @@ async function ensureOwnedMoneyInstitutionId(
       type: kind === "ewallet" ? "payment" : "bank",
       householdId,
     },
-    select: { id: true },
+    select: { id: true, name: true, type: true },
   });
+  appendInstitutionToLookupCache(cache, created);
   return created.id;
 }
 
@@ -693,7 +813,7 @@ async function createOwnedMoneyAccountFromImportName(
   if (!candidate) return null;
   const group = groups.find((item) => normalizeImportAccountMatchKey(item.name) === normalizeImportAccountMatchKey(candidate.ownerName));
   if (!group?.id) return null;
-  const institutionId = await ensureOwnedMoneyInstitutionId(tx, householdId, candidate.institutionName, candidate.kind);
+  const institutionId = await ensureOwnedMoneyInstitutionId(tx, householdId, candidate.institutionName, candidate.kind, options.lookupCache);
   await assertAccountIdentityUnique(tx, {
     householdId,
     groupId: group.id,
@@ -717,6 +837,7 @@ async function createOwnedMoneyAccountFromImportName(
     },
     select: { id: true, name: true, kind: true, Institution: { select: { name: true } } },
   });
+  if (options.lookupCache) options.lookupCache.importAccountList = null;
   options.createdAccounts?.push({
     id: created.id,
     name: created.name,
@@ -726,9 +847,9 @@ async function createOwnedMoneyAccountFromImportName(
   return created.id;
 }
 
-async function findCreditAccount(tx: Db, householdId: string, accountName: string, meta?: ParsedItemMeta) {
+async function findCreditAccount(tx: Db, householdId: string, accountName: string, meta?: ParsedItemMeta, cache?: StatementImportLookupCache) {
   const last4 = inferCardLast4(accountName, meta);
-  const bank = await findInstitution(tx, householdId, meta?.institutionName);
+  const bank = await findInstitution(tx, householdId, meta?.institutionName, cache);
   const exactName = normalizeAccountCell(accountName);
   const sharedCandidates = await tx.account.findMany({
     where: {
@@ -883,7 +1004,7 @@ async function findCreditAccount(tx: Db, householdId: string, accountName: strin
   return matches.length === 1 ? matches[0] : null;
 }
 
-async function updateCreditAccountMeta(tx: Db, householdId: string, accountId: string, meta?: ParsedItemMeta) {
+async function updateCreditAccountMeta(tx: Db, householdId: string, accountId: string, meta?: ParsedItemMeta, cache?: StatementImportLookupCache) {
   if (!meta) return;
   const existing = await tx.account.findUnique({
     where: { id: accountId },
@@ -906,7 +1027,7 @@ async function updateCreditAccountMeta(tx: Db, householdId: string, accountId: s
     data.debtDirection = "payable";
   }
   if (!existing.institutionId && meta.institutionName) {
-    data.institutionId = await ensureBankInstitutionId(tx, householdId, meta.institutionName);
+    data.institutionId = await ensureBankInstitutionId(tx, householdId, meta.institutionName, cache);
   }
   if (!existing.userId && meta.ownerName) {
     data.userId = await resolveUserIdByName(tx, householdId, meta.ownerName);
@@ -920,12 +1041,33 @@ async function updateCreditAccountMeta(tx: Db, householdId: string, accountId: s
   const filtered = Object.fromEntries(Object.entries(data).filter(([, value]) => value != null && value !== ""));
   if (Object.keys(filtered).length > 0) {
     await tx.account.update({ where: { id: accountId }, data: filtered });
+    // kind/billingDay/currency feed the cached account base meta; drop the
+    // stale entry so later items compute statement months from fresh values.
+    cache?.accountBaseMetaById.delete(accountId);
   }
 }
 
 async function ensureAccountId(tx: Db, householdId: string, accountName?: string, _meta?: ParsedItemMeta, options: ImportOptions = { autoCreateAccounts: true }) {
   const name = normalizeAccountCell(accountName);
   if (!name) return null;
+  const cache = options.lookupCache;
+  if (cache) {
+    // Meta fields influence account matching (card last-4, bank, owner), so
+    // different metas resolve independently instead of sharing one cached id.
+    const memoKey = `${name}|${_meta ? JSON.stringify(_meta) : ""}`;
+    const cached = cache.resolvedAccountIdByName.get(memoKey);
+    if (cached != null) return cached;
+    const resolved = await ensureAccountIdUncached(tx, householdId, name, _meta, options);
+    if (resolved) cache.resolvedAccountIdByName.set(memoKey, resolved);
+    return resolved;
+  }
+  return ensureAccountIdUncached(tx, householdId, name, _meta, options);
+}
+
+async function ensureAccountIdUncached(tx: Db, householdId: string, accountName?: string, _meta?: ParsedItemMeta, options: ImportOptions = { autoCreateAccounts: true }) {
+  const name = normalizeAccountCell(accountName);
+  if (!name) return null;
+  const cache = options.lookupCache;
   const directAccountId = parseImportAccountId(name);
   if (directAccountId) {
     const found = await tx.account.findFirst({
@@ -936,7 +1078,7 @@ async function ensureAccountId(tx: Db, householdId: string, accountName?: string
     throw new Error(`账户不存在：${name}`);
   }
   if (isImportPaymentTailSourceHint(name)) {
-    const matchedTailAccount = await findExistingImportAccount(tx, householdId, name);
+    const matchedTailAccount = await findExistingImportAccount(tx, householdId, name, cache);
     if (matchedTailAccount?.id) return matchedTailAccount.id;
     throw new Error(`未找到付款尾号对应账户：${name}`);
   }
@@ -950,21 +1092,21 @@ async function ensureAccountId(tx: Db, householdId: string, accountName?: string
   if (debtAccountId) return debtAccountId;
   const inferredLast4 = inferCardLast4(name, _meta);
   const isCreditCard = !!(_meta?.cardNumberMasked || isCreditAccountText(name));
-  const existingCredit = isCreditCard ? await findCreditAccount(tx, householdId, name, _meta) : null;
+  const existingCredit = isCreditCard ? await findCreditAccount(tx, householdId, name, _meta, cache) : null;
   if (existingCredit?.id) {
-    await updateCreditAccountMeta(tx, householdId, existingCredit.id, _meta);
+    await updateCreditAccountMeta(tx, householdId, existingCredit.id, _meta, cache);
     return existingCredit.id;
   }
 
-  const matchedAccount = await findExistingImportAccount(tx, householdId, name);
+  const matchedAccount = await findExistingImportAccount(tx, householdId, name, cache);
   if (matchedAccount?.id) {
-    if (isCreditCard) await updateCreditAccountMeta(tx, householdId, matchedAccount.id, _meta);
+    if (isCreditCard) await updateCreditAccountMeta(tx, householdId, matchedAccount.id, _meta, cache);
     return matchedAccount.id;
   }
 
   const existingId = await resolveAccountId(tx, householdId, name);
   if (existingId) {
-    if (isCreditCard) await updateCreditAccountMeta(tx, householdId, existingId, _meta);
+    if (isCreditCard) await updateCreditAccountMeta(tx, householdId, existingId, _meta, cache);
     return existingId;
   }
 
@@ -983,7 +1125,7 @@ async function ensureAccountId(tx: Db, householdId: string, accountName?: string
   if (isCreditCard) {
     accountData.kind = AccountKind.bank_credit;
     accountData.debtDirection = "payable";
-    accountData.institutionId = await ensureBankInstitutionId(tx, householdId, _meta?.institutionName);
+    accountData.institutionId = await ensureBankInstitutionId(tx, householdId, _meta?.institutionName, cache);
     accountData.userId = await resolveUserIdByName(tx, householdId, _meta?.ownerName);
     accountData.numberMasked = inferredLast4 || null;
     accountData.currency = normalizeCurrency(_meta?.statementCurrency);
@@ -994,6 +1136,8 @@ async function ensureAccountId(tx: Db, householdId: string, accountName?: string
 
   try {
     const created = await tx.account.create({ data: accountData });
+    // New accounts must be visible to later in-request lookups.
+    if (cache) cache.importAccountList = null;
     options.createdAccounts?.push({
       id: created.id,
       name: created.name,
@@ -1006,11 +1150,31 @@ async function ensureAccountId(tx: Db, householdId: string, accountName?: string
   }
 }
 
-async function resolveInstitution(tx: Db, householdId: string, institutionName?: string) {
+async function resolveInstitution(tx: Db, householdId: string, institutionName?: string, cache?: StatementImportLookupCache) {
   const name = String(institutionName ?? "").trim();
   if (!name) return { id: null as string | null, name: null as string | null };
-  const found = await findInstitution(tx, householdId, name);
+  const found = await findInstitution(tx, householdId, name, cache);
   return { id: found?.id ?? null, name: found?.name ?? null };
+}
+
+/**
+ * Read-only memoized wrapper around `resolveCategorySnapshot`. Category
+ * resolution is repeated for every row with the same name+type in bulk
+ * imports; the underlying snapshot never changes mid-import.
+ */
+async function resolveCategorySnapshotCached(
+  tx: Db,
+  householdId: string,
+  input: { categoryId?: string | null; categoryName?: string | null; type?: DefaultCategoryType | null },
+  cache?: StatementImportLookupCache,
+) {
+  if (!cache) return resolveCategorySnapshot(tx, householdId, input);
+  const key = `${input.categoryId ?? ""}|${input.categoryName ?? ""}|${input.type ?? ""}`;
+  const cached = cache.categorySnapshotByKey.get(key);
+  if (cached !== undefined) return cached;
+  const snapshot = await resolveCategorySnapshot(tx, householdId, input);
+  cache.categorySnapshotByKey.set(key, snapshot);
+  return snapshot;
 }
 
 function sourceKeywordForInstitutionLearning(item: ParsedItem) {
@@ -1031,7 +1195,8 @@ async function createTransactionFromItem(tx: Db, householdId: string, item: Pars
   const date = parseDate(item.date);
   const confirmDate = postedDateForStatement(item, date);
   const meta = item._meta;
-  const counterpartyInstitution = await resolveInstitution(tx, householdId, item.institution);
+  const lookupCache = options.lookupCache;
+  const counterpartyInstitution = await resolveInstitution(tx, householdId, item.institution, lookupCache);
   const note = buildNote(item);
 
   if (item.type === "transfer") {
@@ -1063,10 +1228,10 @@ async function createTransactionFromItem(tx: Db, householdId: string, item: Pars
       throw new Error("转账账户未匹配，不能导入");
     }
 
-    const fromStatementMonth = await statementMonthForAccountId(tx, fromAccountId, confirmDate);
+    const fromStatementMonth = await statementMonthForAccountId(tx, fromAccountId, confirmDate, lookupCache);
     const [fromCurrencyMeta, toCurrencyMeta] = await Promise.all([
-      accountCurrencyMeta(tx, fromAccountId),
-      accountCurrencyMeta(tx, toAccountId),
+      accountCurrencyMeta(tx, fromAccountId, lookupCache),
+      accountCurrencyMeta(tx, toAccountId, lookupCache),
     ]);
     const transactionCurrency = item.type === "transfer" && fromCurrencyMeta && toCurrencyMeta
       ? resolveSameCurrencyTransfer(fromCurrencyMeta, toCurrencyMeta)
@@ -1121,16 +1286,16 @@ async function createTransactionFromItem(tx: Db, householdId: string, item: Pars
   const accountName = pickAccountName(item.account, defaultAccountName);
   const [accountId, category] = await Promise.all([
     ensureAccountId(tx, householdId, accountName, meta, options),
-    resolveCategorySnapshot(tx, householdId, {
+    resolveCategorySnapshotCached(tx, householdId, {
       categoryName: item.category,
       type: item.type === "income" ? "income" : item.type === "expense" ? "expense" : null,
-    }),
+    }, lookupCache),
   ]);
   if (!accountId) {
     throw new Error("Account is required and must match an existing account");
   }
-  const statementMonth = await statementMonthForAccountId(tx, accountId, confirmDate);
-  const currencyMeta = await accountCurrencyMeta(tx, accountId);
+  const statementMonth = await statementMonthForAccountId(tx, accountId, confirmDate, lookupCache);
+  const currencyMeta = await accountCurrencyMeta(tx, accountId, lookupCache);
 
   const inflowAbs = Number.isFinite(item.inflow) ? Math.abs(item.inflow ?? 0) : 0;
   const outflowAbs = Number.isFinite(item.outflow) ? Math.abs(item.outflow ?? 0) : 0;
@@ -1285,6 +1450,7 @@ export async function POST(req: Request) {
     createDebtAccounts: parse.data.createDebtAccounts,
     forceCreateOwnedMoneyAccounts: parse.data.forceCreateOwnedMoneyAccounts,
     createdAccounts: [],
+    lookupCache: createStatementImportLookupCache(),
   };
   const { householdId } = await getHouseholdScope();
   await normalizeDefaultCategoryHierarchyForHousehold(prisma, householdId);
@@ -1371,7 +1537,7 @@ export async function POST(req: Request) {
       const statementBillLock = await statementBillLockForImportedRecord(prisma, householdId, item, {
         accountId: createdRecord.accountId,
         toAccountId: createdRecord.toAccountId,
-      });
+      }, options.lookupCache);
       if (statementBillLock) statementBillLocks.push(statementBillLock);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "导入失败";

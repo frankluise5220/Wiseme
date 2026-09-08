@@ -1,5 +1,5 @@
 import { runDueSystemTasks } from "@/lib/server/system-tasks";
-import { runAutoBackupTick } from "@/lib/server/auto-backup";
+import { runAutoBackupTick, runWindowsStartupAutoBackupIfStale } from "@/lib/server/auto-backup";
 
 /**
  * System-level scheduled task runner.
@@ -32,11 +32,16 @@ async function runSystemTaskTick() {
 // Automatic backup runs on the same tick but independently: a failure there
 // must never prevent due installments (or vice versa) from being processed.
 let autoBackupRunning = false;
+let windowsStartupAutoBackupChecked = false;
 
-async function runAutoBackupTickGuarded() {
+async function runAutoBackupTickGuarded(options: { checkWindowsStartup?: boolean } = {}) {
   if (autoBackupRunning) return;
   autoBackupRunning = true;
   try {
+    if (options.checkWindowsStartup && !windowsStartupAutoBackupChecked) {
+      windowsStartupAutoBackupChecked = true;
+      await runWindowsStartupAutoBackupIfStale();
+    }
     await runAutoBackupTick();
   } catch (error) {
     console.error("[auto-backup] tick failed:", error);
@@ -51,7 +56,7 @@ export function registerNodeRuntime() {
 
   const firstRun = setTimeout(() => {
     void runSystemTaskTick();
-    void runAutoBackupTickGuarded();
+    void runAutoBackupTickGuarded({ checkWindowsStartup: true });
   }, 30_000);
   firstRun.unref?.();
 

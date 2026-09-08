@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ArrowDownLeft, ArrowLeft, ArrowLeftRight, ArrowUpRight, MoreHorizontal, Pencil, ReceiptText, Trash2, TrendingUp } from "lucide-react";
 import { formatMoneyYuan } from "@/lib/format";
 import { showConfirmDialog } from "@/lib/client/confirm-dialog";
-import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
+import { dispatchFinanceDataChanged, FINANCE_DATA_CHANGED_EVENT } from "@/lib/client/refresh";
 import { useI18n } from "@/lib/i18n";
 import {
   APP_PREFS_EVENT,
@@ -38,6 +39,7 @@ type AccountSummary = {
 
 export function MobileTransactions({ entries, accountSummary }: { entries: MobileTransactionRow[]; accountSummary?: AccountSummary }) {
   const { t } = useI18n();
+  const router = useRouter();
   const [dateDisplayFormat, setDateDisplayFormat] = useState<DateDisplayFormat>("yyyy-mm-dd");
   const [visibleEntries, setVisibleEntries] = useState(entries);
   const [filter, setFilter] = useState<Filter>("all");
@@ -59,6 +61,19 @@ export function MobileTransactions({ entries, accountSummary }: { entries: Mobil
   useEffect(() => {
     setVisibleEntries(entries);
   }, [entries]);
+
+  // Mobile pages are server-rendered: after any finance data change (edit save,
+  // create, delete, ...), the list and its expanded detail must refresh from the
+  // server instead of showing stale entries. Desktop views refetch individually;
+  // here a router.refresh() re-runs the current route's server components and
+  // feeds fresh `entries` props into this component.
+  useEffect(() => {
+    const refreshList = () => {
+      router.refresh();
+    };
+    window.addEventListener(FINANCE_DATA_CHANGED_EVENT, refreshList);
+    return () => window.removeEventListener(FINANCE_DATA_CHANGED_EVENT, refreshList);
+  }, [router]);
 
   const filteredEntries = useMemo(() => {
     const needle = query.trim().toLowerCase();

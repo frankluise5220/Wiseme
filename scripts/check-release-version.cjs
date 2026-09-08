@@ -90,6 +90,10 @@ const fndepotFnpack = readJson("deploy/fnos/repository/fnpack.json");
 const fndepotApp = fndepotFnpack.apps?.mmh;
 expect(fndepotApp, "deploy/fnos/repository/fnpack.json must contain the mmh app entry under apps for FnDepot.");
 if (fndepotApp) {
+  expect(
+    typeof fndepotApp.desc === "string" && fndepotApp.desc.length >= 300 && /MoneyMoneyHome/.test(fndepotApp.desc),
+    "deploy/fnos/repository/fnpack.json must keep the full app-center description.",
+  );
   const releaseVersions = Object.keys(fndepotApp.releases || {})
     .filter((releaseVersion) => parseVersion(releaseVersion) !== null)
     .sort(compareVersions);
@@ -118,6 +122,14 @@ if (legacyApp) {
   expect(legacyApp.download_urls?.x86_64 === downloadUrls.x86_64, "fn-appstores.json _manual download_urls.x86_64 must use the unified Release tag.");
   expect(legacyApp.download_urls?.arm64 === downloadUrls.arm64, "fn-appstores.json _manual download_urls.arm64 must use the unified Release tag.");
   expect(legacyApp.changelog === releaseNotes, "fn-appstores.json _manual changelog must match package.json mmhReleaseNotes.");
+}
+
+const selfhostedSource = readJson("deploy/fnos/selfhosted-source/data/fn-appstores.json");
+const selfhostedApp = Array.isArray(selfhostedSource) ? selfhostedSource.find((app) => app.id === "mmh") : null;
+expect(selfhostedApp, "deploy/fnos/selfhosted-source/data/fn-appstores.json must contain the mmh app entry.");
+if (selfhostedApp) {
+  expect(selfhostedApp.version === version, "deploy/fnos/selfhosted-source/data/fn-appstores.json version must match package.json.");
+  expect(selfhostedApp.desc === fndepotApp?.desc, "deploy/fnos/selfhosted-source/data/fn-appstores.json desc must match the FnDepot app description.");
 }
 
 const dockerWorkflow = read(".github/workflows/docker-build.yml");

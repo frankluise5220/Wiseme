@@ -339,10 +339,27 @@ export function createImportAccountIdentityConflictChecker<T extends ImportAccou
   };
 }
 
+// Bare bank-name match keys ("招商银行"/"招行"/"招商", etc.). Account-side
+// candidates still generate them so bank-only statement cells can match by
+// institution, but composite input text must not collapse to these keys.
+const BARE_BANK_NAME_MATCH_KEYS = new Set(
+  BANK_ALIASES.flatMap((item) => [item.canonical, ...item.aliases])
+    .map((name) => normalizeImportAccountMatchKey(name))
+    .filter(Boolean),
+);
+
 export function buildImportAccountInputCandidates(value?: string) {
   const raw = String(value ?? "").trim();
   if (!raw) return [];
-  return expandImportAccountName(raw);
+  const candidates = expandImportAccountName(raw);
+  // Composite inputs such as "张四·招行·8848" must not generate bare bank-name
+  // exact candidates; otherwise they can exactly match every account at that
+  // bank and turn an identifiable account into a false ambiguous match.
+  // Preserve the old behavior only when the input itself is a bare bank name.
+  if (BARE_BANK_NAME_MATCH_KEYS.has(normalizeImportAccountMatchKey(raw))) return candidates;
+  return candidates.filter(
+    (candidate) => !BARE_BANK_NAME_MATCH_KEYS.has(normalizeImportAccountMatchKey(candidate)),
+  );
 }
 
 export function buildImportAccountCandidates(account: ImportAccountMatchSource) {
