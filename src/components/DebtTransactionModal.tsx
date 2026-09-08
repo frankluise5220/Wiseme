@@ -1360,6 +1360,8 @@ export function DebtTransactionModal({
     formData.set("note", note);
     if (isLoanDialog && mode === "borrow_in") {
       formData.set("loanPurposeCategoryId", loanPurposeCategoryId);
+      // 显式提交固定资产开关态：编辑时关掉开关 = 服务端删除已有资产关联。
+      formData.set("fixedAssetLinked", fixedAssetLinked ? "true" : "false");
       if (requiresFixedAssetSelection && fixedAssetAccountId) {
         formData.set("fixedAssetAccountId", fixedAssetAccountId);
         if (fixedAssetAssetId) formData.set("fixedAssetAssetId", fixedAssetAssetId);

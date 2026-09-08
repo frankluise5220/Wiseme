@@ -32,7 +32,7 @@ import {
 } from "@/lib/scheduled-task";
 import { calcInitialScheduledRunDate, calcNextScheduledRunDate } from "@/lib/scheduled-task-date";
 import { formatDateUtc, toNumber, toStatementMonth } from "@/lib/date-utils";
-import { linkExpenseToFixedAsset } from "@/lib/property/transactions";
+import { linkExpenseToFixedAsset, recalcPropertyAssetsFromTransactions } from "@/lib/property/transactions";
 import { releaseMortgagedAssetsForSettledLoanAccounts } from "@/lib/server/collateral-mortgage";
 import { ACTIVE_DEBT_EPSILON } from "@/lib/server/debt-view-data";
 import { assertAccountIdentityUnique } from "@/lib/server/account-identity-unique";
@@ -327,6 +327,9 @@ export async function createDebtTransaction(formData: FormData) {
   const loanPurposeCategoryId = String(formData.get("loanPurposeCategoryId") ?? "").trim();
   const fixedAssetAccountId = String(formData.get("fixedAssetAccountId") ?? "").trim();
   const fixedAssetAssetId = String(formData.get("fixedAssetAssetId") ?? "").trim();
+  // 借入弹窗固定资产开关的显式提交态："false" = 编辑时把开关关掉，需删除已有
+  // 关联；未提交（旧客户端/其他入口）时保持原行为，不触碰关联。
+  const fixedAssetToggleSubmitted = String(formData.get("fixedAssetLinked") ?? "").trim();
   const tagIdsWereSubmitted = formData.has("tagIds");
   let tagIds: string[] = [];
   try {
@@ -779,6 +782,32 @@ export async function createDebtTransaction(formData: FormData) {
         }
         if (mode === "borrow_in" && isCollateralLoanTypeValue) {
           await syncCollateralAssetLink();
+        } else if (mode === "borrow_in" && fixedAssetToggleSubmitted === "false") {
+          // 编辑借入记录时把固定资产开关关掉 → 删除借入记录与固定资产的关联
+          // （软删 PropertyTransaction + 业务联动，重算资产成本/价值与抵押标记）。
+          const existingLink = await tx.propertyTransaction.findFirst({
+            where: { householdId, cashEntryId: original.id, deletedAt: null },
+            select: { id: true, propertyAssetId: true, accountId: true },
+          });
+          if (existingLink) {
+            await tx.propertyTransaction.update({
+              where: { id: existingLink.id },
+              data: { deletedAt: new Date() },
+            });
+            await tx.entryBusinessLink.updateMany({
+              where: {
+                householdId,
+                deletedAt: null,
+                OR: [{ cashEntryId: original.id }, { propertyTransactionId: existingLink.id }],
+              },
+              data: { deletedAt: new Date() },
+            });
+            await recalcPropertyAssetsFromTransactions(tx, {
+              householdId,
+              propertyAssetIds: [existingLink.propertyAssetId],
+            });
+            if (existingLink.accountId) affectedAccountIds.add(existingLink.accountId);
+          }
         } else if (mode === "borrow_in" && fixedAssetAccountId) {
           // 直购型贷款（消费贷/房贷/其他）编辑借入记录时同步固定资产关联：
           // 关联 = 给固定资产增加成本（PropertyTransaction）；抵押状态展示只
