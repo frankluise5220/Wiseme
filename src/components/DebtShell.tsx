@@ -266,27 +266,33 @@ function makeRateDraft(
   };
 }
 
-function buildSimpleLoanRateDrafts(row: DebtRow, todayKey: string) {
-  const loanDate = row.loanStartDate || row.loanRateAdjustments[0]?.effectiveDate || todayKey;
-  const byDate = new Map(
-    row.loanRateAdjustments
-      .map((item) => ({
-        effectiveDate: String(item.effectiveDate ?? "").slice(0, 10),
-        annualRate: Number(item.annualRate),
-      }))
-      .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) && Number.isFinite(item.annualRate) && item.annualRate >= 0)
-      .map((item) => [item.effectiveDate, item] as const),
-  );
-  const initialRate = byDate.get(loanDate)?.annualRate ?? row.baseAnnualRate ?? row.annualRate ?? 0;
-  const drafts = [makeRateDraft(loanDate, initialRate, { isInitial: true })];
-  const seenDates = new Set([loanDate]);
-  const laterRows = Array.from(byDate.values())
-    .filter((item) => !seenDates.has(item.effectiveDate))
-    .sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate));
-  for (const item of laterRows) {
-    seenDates.add(item.effectiveDate);
-    drafts.push(makeRateDraft(item.effectiveDate, item.annualRate));
+// 房贷/消费贷共用的利率调整草稿构建：
+// - 空表 + 房贷折扣：先按折扣生成 LPR 历史（含放款日行）；
+// - 空表：起始利率行 = 放款日（或今天）+ 初始利率；
+// - 已有行：按日期升序原样映射，首行恒视为起始利率行（isInitial：日期锁定、不可删）。
+function buildLoanRateDrafts(row: DebtRow, options: { todayKey: string; generateFromLprDiscount: boolean }) {
+  if (
+    options.generateFromLprDiscount &&
+    row.loanRateAdjustments.length === 0 &&
+    row.mortgageLprDiscount != null && row.mortgageLprDiscount > 0
+  ) {
+    const generated = buildMortgageLprRateAdjustments({
+      discount: row.mortgageLprDiscount,
+      throughDate: options.todayKey,
+      fromDate: row.loanStartDate || undefined,
+    }).map((item) => makeRateDraft(item.effectiveDate, item.annualRate, {
+      // 首行 = 放款日当天的执行利率，与消费贷起始行一致：日期锁定、不可删除。
+      isInitial: !!row.loanStartDate && item.effectiveDate === row.loanStartDate,
+    }));
+    if (generated.length > 0) return generated;
   }
+
+  const loanDate = row.loanStartDate || row.loanRateAdjustments[0]?.effectiveDate || options.todayKey;
+  if (row.loanRateAdjustments.length === 0) {
+    return [makeRateDraft(loanDate, row.baseAnnualRate ?? row.annualRate ?? 0, { isInitial: true })];
+  }
+  const drafts = row.loanRateAdjustments.map((item) => makeRateDraft(item.effectiveDate, item.annualRate));
+  if (drafts.length > 0) drafts[0] = { ...drafts[0], isInitial: true };
   return drafts;
 }
 
@@ -691,52 +697,7 @@ export function DebtShell({
     const isConsumerLoanRow = rowLoanType === "consumer" || row.isConsumerLoan === true;
     const isHomeLoanRow = row.isConsumerLoan !== true && (rowLoanType == null || rowLoanType === "home");
     if (!isHomeLoanRow && !isConsumerLoanRow) return;
-    const canGenerateMortgageLpr = isHomeLoanRow;
-    if (!canGenerateMortgageLpr) {
-      setRateDrafts(buildSimpleLoanRateDrafts(row, todayKey));
-      setRateCardOpen(true);
-      return;
-    }
-    const generatedDrafts = canGenerateMortgageLpr && row.loanRateAdjustments.length === 0 && row.mortgageLprDiscount != null && row.mortgageLprDiscount > 0
-      ? buildMortgageLprRateAdjustments({
-          discount: row.mortgageLprDiscount,
-          throughDate: todayKey,
-          fromDate: row.loanStartDate || undefined,
-        }).map((item) => ({
-          id: makeDraftId(),
-          effectiveDate: item.effectiveDate,
-          annualRate: formatRateDraftValue(item.annualRate),
-          originalEffectiveDate: item.effectiveDate,
-          originalAnnualRate: item.annualRate,
-          isEditing: false,
-          // 首行 = 放款日当天的执行利率，与消费贷一致：日期锁定、不可删除。
-          isInitial: !!row.loanStartDate && item.effectiveDate === row.loanStartDate,
-        }))
-      : [];
-    // Loaded/generated rows render read-only in the table; each row switches
-    // to edit mode only via its own edit button.
-    const drafts = row.loanRateAdjustments.length > 0
-      ? row.loanRateAdjustments.map((item) => ({
-          id: makeDraftId(),
-          effectiveDate: item.effectiveDate,
-          annualRate: formatRateDraftValue(item.annualRate),
-          originalEffectiveDate: item.effectiveDate,
-          originalAnnualRate: item.annualRate,
-          isEditing: false,
-          isInitial: !!row.loanStartDate && item.effectiveDate === row.loanStartDate,
-        }))
-      : generatedDrafts.length > 0
-        ? generatedDrafts
-      : [{
-          id: makeDraftId(),
-          effectiveDate: row.loanStartDate || todayKey,
-          annualRate: formatRateDraftValue(row.baseAnnualRate ?? row.annualRate ?? 0),
-          originalEffectiveDate: row.loanStartDate || todayKey,
-          originalAnnualRate: row.baseAnnualRate ?? row.annualRate ?? 0,
-          isEditing: false,
-          isInitial: !!row.loanStartDate,
-        }];
-    setRateDrafts(drafts);
+    setRateDrafts(buildLoanRateDrafts(row, { todayKey, generateFromLprDiscount: isHomeLoanRow }));
     setRateCardOpen(true);
   }
 
@@ -832,6 +793,126 @@ export function DebtShell({
       annualRate: formatRateDraftValue(annualRate),
       isEditing: false,
     });
+  }
+
+  // 房贷/消费贷共用的利率调整草稿表：房贷多一列折扣，其余交互完全一致。
+  function renderRateDraftsTable(options: { showDiscountColumn: boolean }) {
+    const columnCount = options.showDiscountColumn ? 4 : 3;
+    return (
+      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <div className="max-h-[260px] overflow-y-auto">
+          <table className="min-w-full table-fixed text-sm">
+            <thead className="sticky top-0 bg-slate-50 text-xs font-medium text-slate-500 shadow-[0_1px_0_0_#e2e8f0]">
+              <tr>
+                <th className={`${options.showDiscountColumn ? "w-[28%]" : "w-[38%]"} px-3 py-2 text-left`}>{t("debtShell.rateAdjust.effectiveDate")}</th>
+                <th className={`${options.showDiscountColumn ? "w-[22%]" : "w-[32%]"} px-3 py-2 text-right`}>{t("debtShell.rateAdjust.annualRateLabel")}</th>
+                {options.showDiscountColumn ? (
+                  <th className="w-[16%] px-3 py-2 text-right">{t("debtShell.rateAdjust.discountLabel")}</th>
+                ) : null}
+                <th className={`${options.showDiscountColumn ? "w-[28%]" : "w-[30%]"} px-3 py-2 text-right`}>{t("detail.column.actions")}</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rateDrafts.length === 0 ? (
+                <tr>
+                  <td colSpan={columnCount} className="px-3 py-8 text-center text-sm text-slate-500">
+                    {t("debtShell.rateAdjust.empty")}
+                  </td>
+                </tr>
+              ) : rateDrafts.map((item) => {
+                const draftRate = rateDraftAnnualRateNumber(item.annualRate);
+                // 首行（放款日）利率 = 执行利率×折扣，不能由 LPR+加点反推，
+                // 折扣列直接用贷款的 LPR 折扣；无折扣时退回按行反推。
+                const draftDiscount = !options.showDiscountColumn || draftRate == null
+                  ? null
+                  : (item.isInitial && selectedRow?.mortgageLprDiscount != null
+                      ? selectedRow.mortgageLprDiscount
+                      : inferRowLprDiscount(item.effectiveDate, draftRate));
+                return (
+                  <tr key={item.id} className={item.isEditing ? "bg-amber-50/50" : item.isInitial ? "bg-blue-50/50" : "bg-white"}>
+                    <td className="px-3 py-2 align-middle">
+                      {item.isEditing && !item.isInitial ? (
+                        <DateStepper
+                          value={item.effectiveDate}
+                          onChange={(value) => updateRateDraft(item.id, { effectiveDate: value })}
+                        />
+                      ) : (
+                        <span className="tabular-nums text-slate-700">{item.effectiveDate}</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right align-middle">
+                      {item.isEditing ? (
+                        <input
+                          value={item.annualRate}
+                          onChange={(event) => updateRateDraft(item.id, { annualRate: event.target.value })}
+                          inputMode="decimal"
+                          placeholder={t("debtShell.rateAdjust.annualRatePlaceholder")}
+                          className="form-input text-right"
+                        />
+                      ) : (
+                        <span className="tabular-nums text-slate-700">{formatRate(draftRate, language)}</span>
+                      )}
+                    </td>
+                    {options.showDiscountColumn ? (
+                      <td className="px-3 py-2 text-right align-middle text-xs tabular-nums text-slate-600" title={t("debtShell.rateAdjust.discountTitle")}>
+                        {draftDiscount != null ? formatDiscountValue(draftDiscount) : "-"}
+                      </td>
+                    ) : null}
+                    <td className="px-3 py-2 text-right align-middle">
+                      <div className="inline-flex items-center gap-1.5">
+                        {item.isEditing ? (
+                          <button
+                            type="button"
+                            onClick={() => saveRateDraftRow(item.id)}
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-emerald-600 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={rateSaving}
+                            title={t("common.save")}
+                            aria-label={t("common.save")}
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => updateRateDraft(item.id, { isEditing: true })}
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 transition-colors hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={rateSaving}
+                            title={t("common.edit")}
+                            aria-label={t("common.edit")}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => { void openRebuildDialogForDate(item.effectiveDate); }}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={rebuildBusy || rateSaving}
+                          title={t("debtShell.rebuild.buttonTitle")}
+                          aria-label={t("debtShell.recalc")}
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteRateDraft(item.id)}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-rose-600 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={rateSaving || item.isInitial}
+                          title={item.isInitial ? t("debtShell.rateAdjust.initialDeleteDisabled") : t("common.delete")}
+                          aria-label={t("common.delete")}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
   }
 
   async function recalculateRepaymentPlanFromDate(accountId: string, startDate: string) {
@@ -1008,7 +1089,7 @@ export function DebtShell({
       duplicateDates.add(item.effectiveDate);
     }
     const changedStartDate = !isSelectedMortgageLoan
-      ? getSimpleLoanRateChangedStartDate(buildSimpleLoanRateDrafts(selectedRow, todayKey), filledRateDrafts)
+      ? getSimpleLoanRateChangedStartDate(buildLoanRateDrafts(selectedRow, { todayKey, generateFromLprDiscount: false }), filledRateDrafts)
       : null;
 
     setRateSaving(true);
@@ -1516,218 +1597,7 @@ export function DebtShell({
                   {t(isSelectedMortgageLoan ? "debtShell.rateAdjust.hint" : "debtShell.rateAdjust.simpleHint")}
                 </div>
 
-                {isSelectedMortgageLoan ? (
-                  <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                    <div className="max-h-[260px] overflow-y-auto">
-                      <table className="min-w-full table-fixed text-sm">
-                        <thead className="sticky top-0 bg-slate-50 text-xs font-medium text-slate-500 shadow-[0_1px_0_0_#e2e8f0]">
-                          <tr>
-                            <th className="w-[28%] px-3 py-2 text-left">{t("debtShell.rateAdjust.effectiveDate")}</th>
-                            <th className="w-[22%] px-3 py-2 text-right">{t("debtShell.rateAdjust.annualRateLabel")}</th>
-                            <th className="w-[16%] px-3 py-2 text-right">{t("debtShell.rateAdjust.discountLabel")}</th>
-                            <th className="w-[28%] px-3 py-2 text-right">{t("detail.column.actions")}</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {rateDrafts.length === 0 ? (
-                            <tr>
-                              <td colSpan={4} className="px-3 py-8 text-center text-sm text-slate-500">
-                                {t("debtShell.rateAdjust.empty")}
-                              </td>
-                            </tr>
-                          ) : rateDrafts.map((item) => {
-                            const draftRate = rateDraftAnnualRateNumber(item.annualRate);
-                            // 首行（放款日）利率 = 执行利率×折扣，不能由 LPR+加点反推，
-                            // 折扣列直接用贷款的 LPR 折扣；无折扣时退回按行反推。
-                            const draftDiscount = draftRate != null
-                              ? (item.isInitial && selectedRow?.mortgageLprDiscount != null
-                                  ? selectedRow.mortgageLprDiscount
-                                  : inferRowLprDiscount(item.effectiveDate, draftRate))
-                              : null;
-                            return (
-                              <tr key={item.id} className={item.isEditing ? "bg-amber-50/50" : item.isInitial ? "bg-blue-50/50" : "bg-white"}>
-                                <td className="px-3 py-2 align-middle">
-                                  {item.isEditing && !item.isInitial ? (
-                                    <DateStepper
-                                      value={item.effectiveDate}
-                                      onChange={(value) => updateRateDraft(item.id, { effectiveDate: value })}
-                                    />
-                                  ) : (
-                                    <span className="tabular-nums text-slate-700">{item.effectiveDate}</span>
-                                  )}
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  {item.isEditing ? (
-                                    <input
-                                      value={item.annualRate}
-                                      onChange={(event) => updateRateDraft(item.id, { annualRate: event.target.value })}
-                                      inputMode="decimal"
-                                      placeholder={t("debtShell.rateAdjust.annualRatePlaceholder")}
-                                      className="form-input text-right"
-                                    />
-                                  ) : (
-                                    <span className="tabular-nums text-slate-700">{formatRate(draftRate, language)}</span>
-                                  )}
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle text-xs tabular-nums text-slate-600" title={t("debtShell.rateAdjust.discountTitle")}>
-                                  {draftDiscount != null ? formatDiscountValue(draftDiscount) : "-"}
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  <div className="inline-flex items-center gap-1.5">
-                                    {item.isEditing ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => saveRateDraftRow(item.id)}
-                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-emerald-600 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
-                                        disabled={rateSaving}
-                                        title={t("common.save")}
-                                        aria-label={t("common.save")}
-                                      >
-                                        <Check className="h-3.5 w-3.5" />
-                                      </button>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        onClick={() => updateRateDraft(item.id, { isEditing: true })}
-                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 transition-colors hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
-                                        disabled={rateSaving}
-                                        title={t("common.edit")}
-                                        aria-label={t("common.edit")}
-                                      >
-                                        <Pencil className="h-3.5 w-3.5" />
-                                      </button>
-                                    )}
-                                    <button
-                                      type="button"
-                                      onClick={() => { void openRebuildDialogForDate(item.effectiveDate); }}
-                                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
-                                      disabled={rebuildBusy || rateSaving}
-                                      title={t("debtShell.rebuild.buttonTitle")}
-                                      aria-label={t("debtShell.recalc")}
-                                    >
-                                      <RefreshCw className="h-3.5 w-3.5" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => deleteRateDraft(item.id)}
-                                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-rose-600 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
-                                      disabled={rateSaving || item.isInitial}
-                                      title={item.isInitial ? t("debtShell.rateAdjust.initialDeleteDisabled") : t("common.delete")}
-                                      aria-label={t("common.delete")}
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                    <div className="max-h-[260px] overflow-y-auto">
-                      <table className="min-w-full table-fixed text-sm">
-                        <thead className="sticky top-0 bg-slate-50 text-xs font-medium text-slate-500 shadow-[0_1px_0_0_#e2e8f0]">
-                          <tr>
-                            <th className="w-[38%] px-3 py-2 text-left">{t("debtShell.rateAdjust.effectiveDate")}</th>
-                            <th className="w-[32%] px-3 py-2 text-right">{t("debtShell.rateAdjust.annualRateLabel")}</th>
-                            <th className="w-[30%] px-3 py-2 text-right">{t("detail.column.actions")}</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {rateDrafts.length === 0 ? (
-                            <tr>
-                              <td colSpan={3} className="px-3 py-8 text-center text-sm text-slate-500">
-                                {t("debtShell.rateAdjust.empty")}
-                              </td>
-                            </tr>
-                          ) : rateDrafts.map((item) => {
-                            const annualRate = rateDraftAnnualRateNumber(item.annualRate);
-                            return (
-                              <tr key={item.id} className={item.isInitial ? "bg-blue-50/50" : "bg-white"}>
-                                <td className="px-3 py-2 align-middle">
-                                  {item.isEditing && !item.isInitial ? (
-                                    <DateStepper
-                                      value={item.effectiveDate}
-                                      onChange={(value) => updateRateDraft(item.id, { effectiveDate: value })}
-                                    />
-                                  ) : (
-                                    <span className="tabular-nums text-slate-700">{item.effectiveDate}</span>
-                                  )}
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  {item.isEditing ? (
-                                    <input
-                                      value={item.annualRate}
-                                      onChange={(event) => updateRateDraft(item.id, { annualRate: event.target.value })}
-                                      inputMode="decimal"
-                                      placeholder={t("debtShell.rateAdjust.annualRatePlaceholder")}
-                                      className="form-input text-right"
-                                    />
-                                  ) : (
-                                    <span className="tabular-nums text-slate-700">{formatRate(annualRate, language)}</span>
-                                  )}
-                                </td>
-                                <td className="px-3 py-2 text-right align-middle">
-                                  <div className="inline-flex items-center gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => { void openRebuildDialogForDate(item.effectiveDate); }}
-                                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
-                                      disabled={rebuildBusy || rateSaving}
-                                      title={t("debtShell.rebuild.buttonTitle")}
-                                      aria-label={t("debtShell.recalc")}
-                                    >
-                                      <RefreshCw className="h-3.5 w-3.5" />
-                                    </button>
-                                    {item.isEditing ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => saveRateDraftRow(item.id)}
-                                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-emerald-600 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
-                                        disabled={rateSaving}
-                                        title={t("common.save")}
-                                        aria-label={t("common.save")}
-                                      >
-                                        <Check className="h-3.5 w-3.5" />
-                                      </button>
-                                    ) : (
-                                      <>
-                                        <button
-                                          type="button"
-                                          onClick={() => updateRateDraft(item.id, { isEditing: true })}
-                                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 transition-colors hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
-                                          disabled={rateSaving}
-                                          title={t("common.edit")}
-                                          aria-label={t("common.edit")}
-                                        >
-                                          <Pencil className="h-3.5 w-3.5" />
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => deleteRateDraft(item.id)}
-                                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-rose-600 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
-                                          disabled={rateSaving || item.isInitial}
-                                          title={item.isInitial ? t("debtShell.rateAdjust.initialDeleteDisabled") : t("common.delete")}
-                                          aria-label={t("common.delete")}
-                                        >
-                                          <Trash2 className="h-3.5 w-3.5" />
-                                        </button>
-                                      </>
-                                    )}
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
+                {renderRateDraftsTable({ showDiscountColumn: isSelectedMortgageLoan })}
 
                 <div className="flex items-center justify-between border-t border-slate-100 pt-3">
                   <div className="flex items-center gap-2">
