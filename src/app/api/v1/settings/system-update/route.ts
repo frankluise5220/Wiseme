@@ -54,6 +54,11 @@ type VersionInfo = {
   versionSource: "git" | "env";
 };
 
+type GitHubVersionInfo = Pick<
+  VersionInfo,
+  "githubUrl" | "githubVersion" | "githubCommit" | "githubCommitMsg" | "githubCommitDate" | "githubCanCheck" | "githubFetchError"
+>;
+
 type ImageSourceConfig = {
   source: string;
   appImage: string;
@@ -65,7 +70,8 @@ type ImageSourceConfig = {
 
 let updateRunning = false;
 const DEFAULT_GITHUB_REPO_URL = "https://github.com/frankluise5220/MMH.git";
-const IMAGE_FALLBACK_ORDER = ["dockerproxy", "nju", "ghcr", "daocloud", "custom"];
+const GITHUB_REPO_API_URL = "https://api.github.com/repos/frankluise5220/MMH";
+const IMAGE_FALLBACK_ORDER = ["fnvps", "dockerproxy", "nju", "ghcr", "daocloud", "custom"];
 const STANDARD_IMAGE_SOURCE_ORDER = IMAGE_FALLBACK_ORDER.filter((source) => source !== "custom");
 const UPDATER_DEFAULT_TIMEOUT_MS = 5_000;
 const VERSION_CHECK_TIMEOUT_MS = 5_000;
@@ -186,71 +192,145 @@ function commandErrorMessage(error: unknown) {
   return (stderr || stdout || e.message || "未知错误").trim();
 }
 
-async function getGitHubVersionInfo(projectRoot: string) {
-  const githubVersion = await getGitHubPackageVersion();
+async function fetchGitHubJson<T>(path: string) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), VERSION_CHECK_TIMEOUT_MS);
   try {
-    const line = readCommandWithTimeout(projectRoot, `git ls-remote ${DEFAULT_GITHUB_REPO_URL} refs/heads/main`, VERSION_CHECK_TIMEOUT_MS);
-    const commit = line.split(/\s+/)[0]?.trim() || "unknown";
-    let commitDate = "";
-    let commitMsg = "";
-    if (commit !== "unknown") {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), VERSION_CHECK_TIMEOUT_MS);
-        const res = await fetch("https://api.github.com/repos/frankluise5220/MMH/commits/main", {
-          headers: { Accept: "application/vnd.github+json" },
-          cache: "no-store",
-          signal: controller.signal,
-        }).finally(() => clearTimeout(timer));
-        if (res.ok) {
-          const data = await res.json() as {
-            sha?: string;
-            commit?: { message?: string; committer?: { date?: string } };
-          };
-          if (data.sha?.startsWith(commit.slice(0, 12))) {
-            commitMsg = String(data.commit?.message ?? "").split("\n")[0] ?? "";
-            commitDate = String(data.commit?.committer?.date ?? "");
-          }
-        }
-      } catch {
-        // The commit hash is enough for update comparison; date/message are display-only.
-      }
+    const res = await fetch(`${GITHUB_REPO_API_URL}${path}`, {
+      headers: { Accept: "application/vnd.github+json" },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`GitHub request failed: ${res.status}`);
+    return await res.json() as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function versionFromReleaseTag(tagName: string) {
+  return tagName.trim().replace(/^v/i, "");
+}
+
+function parseReleaseVersion(value: string) {
+  const version = versionFromReleaseTag(value);
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) return null;
+  const parts = match.slice(1).map((part) => Number(part));
+  if (parts.some((part) => !Number.isSafeInteger(part))) return null;
+  // Ignore old calendar/test tags such as v2026.08.05 when the GitHub API is
+  // unreachable and we have to fall back to raw tag listing.
+  if (parts[0]! > 99) return null;
+  return { version, parts };
+}
+
+function compareReleaseVersions(
+  a: { parts: number[] },
+  b: { parts: number[] },
+) {
+  for (let index = 0; index < 3; index += 1) {
+    const diff = (a.parts[index] ?? 0) - (b.parts[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function latestReleaseTagFromLsRemote(output: string) {
+  const tags = new Map<string, { tagName: string; version: string; parts: number[]; commit: string }>();
+  for (const line of output.split(/\r?\n/)) {
+    const [commit = "", ref = ""] = line.trim().split(/\s+/);
+    const peeled = ref.endsWith("^{}");
+    const tagName = ref.replace(/^refs\/tags\//, "").replace(/\^\{\}$/, "");
+    const parsed = parseReleaseVersion(tagName);
+    if (!commit || !parsed) continue;
+    const current = tags.get(tagName);
+    if (!current || peeled) {
+      tags.set(tagName, { tagName, version: parsed.version, parts: parsed.parts, commit });
     }
-    return {
-      githubUrl: DEFAULT_GITHUB_REPO_URL,
-      githubVersion,
-      githubCommit: commit === "unknown" ? "unknown" : commit.slice(0, 7),
-      githubCommitMsg: commitMsg,
-      githubCommitDate: commitDate,
-      githubCanCheck: commit !== "unknown",
-    };
+  }
+  return [...tags.values()].sort((a, b) => compareReleaseVersions(b, a))[0] ?? null;
+}
+
+function githubVersionInfoFromRelease(params: {
+  version: string;
+  commit: string;
+  commitMsg?: string;
+  commitDate?: string;
+}): GitHubVersionInfo {
+  return {
+    githubUrl: DEFAULT_GITHUB_REPO_URL,
+    githubVersion: params.version,
+    githubCommit: params.commit ? params.commit.slice(0, 7) : "unknown",
+    githubCommitMsg: params.commitMsg ?? "",
+    githubCommitDate: params.commitDate ?? "",
+    githubCanCheck: Boolean(params.commit),
+  };
+}
+
+async function getGitHubVersionInfo(projectRoot: string): Promise<GitHubVersionInfo> {
+  let releaseFetchError: unknown = null;
+  try {
+    const release = await fetchGitHubJson<{
+      tag_name?: string;
+      target_commitish?: string;
+      published_at?: string;
+    }>("/releases/latest");
+    const tagName = String(release.tag_name ?? "").trim();
+    if (!tagName) throw new Error("Latest GitHub release has no tag");
+
+    let commit = "";
+    let commitMsg = "";
+    let commitDate = String(release.published_at ?? "");
+    try {
+      const data = await fetchGitHubJson<{
+        sha?: string;
+        commit?: { message?: string; committer?: { date?: string } };
+      }>(`/commits/${encodeURIComponent(tagName)}`);
+      commit = String(data.sha ?? "").trim();
+      commitMsg = String(data.commit?.message ?? "").split("\n")[0] ?? "";
+      commitDate = String(data.commit?.committer?.date ?? commitDate);
+    } catch {
+      const target = String(release.target_commitish ?? "").trim();
+      commit = /^[a-f0-9]{40}$/i.test(target) ? target : "";
+    }
+
+    return githubVersionInfoFromRelease({
+      version: versionFromReleaseTag(tagName),
+      commit,
+      commitMsg,
+      commitDate,
+    });
   } catch (error) {
+    releaseFetchError = error;
+  }
+
+  try {
+    const refs = readCommandWithTimeout(
+      projectRoot,
+      `git ls-remote --tags ${DEFAULT_GITHUB_REPO_URL} "refs/tags/v*"`,
+      VERSION_CHECK_TIMEOUT_MS,
+    );
+    const latest = latestReleaseTagFromLsRemote(refs);
+    if (latest) {
+      return githubVersionInfoFromRelease({
+        version: latest.version,
+        commit: latest.commit,
+      });
+    }
+    throw new Error("No formal release tags found");
+  } catch (tagError) {
     return {
       githubUrl: DEFAULT_GITHUB_REPO_URL,
-      githubVersion,
+      githubVersion: "",
       githubCommit: "unknown",
       githubCommitMsg: "",
       githubCommitDate: "",
       githubCanCheck: false,
-      githubFetchError: commandErrorMessage(error),
+      githubFetchError: [releaseFetchError, tagError]
+        .map(commandErrorMessage)
+        .filter(Boolean)
+        .join("; "),
     };
-  }
-}
-
-async function getGitHubPackageVersion() {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), VERSION_CHECK_TIMEOUT_MS);
-    const res = await fetch("https://raw.githubusercontent.com/frankluise5220/MMH/main/package.json", {
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-      signal: controller.signal,
-    }).finally(() => clearTimeout(timer));
-    if (!res.ok) return "";
-    const pkg = await res.json() as { version?: string };
-    return String(pkg.version || "").trim();
-  } catch {
-    return "";
   }
 }
 
@@ -279,7 +359,7 @@ async function getGitVersionInfo(projectRoot: string): Promise<VersionInfo> {
       ...local,
       ...github,
       remoteName: "github",
-      remoteBranch: "main",
+      remoteBranch: "latest",
       remoteUrl,
       remoteVersion: github.githubVersion,
       remoteCommit: githubCommit,
@@ -514,7 +594,7 @@ export async function GET(req: NextRequest) {
           ...localOnlyVersionInfo,
           ...github,
           remoteName: "github",
-          remoteBranch: "main",
+          remoteBranch: "latest",
           remoteUrl: DEFAULT_GITHUB_REPO_URL,
           remoteVersion: github.githubVersion,
           remoteCommit: githubCommit,

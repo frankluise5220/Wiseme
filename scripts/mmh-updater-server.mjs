@@ -28,7 +28,7 @@ const imageSources = {
   fnvps: { name: "FN VPS", app: fnvpsImage, updater: fnvpsUpdaterImage },
 };
 
-const autoImageSourceOrder = ["dockerproxy", "nju", "ghcr", "daocloud"];
+const autoImageSourceOrder = ["fnvps", "dockerproxy", "nju", "ghcr", "daocloud"];
 
 let task = {
   running: false,
@@ -169,14 +169,14 @@ function composeCommand(args) {
 
 function syncDeployFilesCommand() {
   return [
-    `if [ -d ${quotedWorkdir}/.git ]; then`,
-    `git config --global --add safe.directory ${quotedWorkdir} >/dev/null 2>&1 || true;`,
-    `git -C ${quotedWorkdir} pull --ff-only;`,
-    `elif [ -f /updater/deploy/docker-compose.yml ]; then`,
+    `if [ -f /updater/deploy/docker-compose.yml ]; then`,
     `cp /updater/deploy/docker-compose.yml ${quotedWorkdir}/docker-compose.yml;`,
     `cp /updater/deploy/postgres-entrypoint.sh ${quotedWorkdir}/postgres-entrypoint.sh;`,
     `chmod +x ${quotedWorkdir}/postgres-entrypoint.sh;`,
     `echo "已从更新器镜像同步部署文件";`,
+    `elif [ -d ${quotedWorkdir}/.git ]; then`,
+    `git config --global --add safe.directory ${quotedWorkdir} >/dev/null 2>&1 || true;`,
+    `git -C ${quotedWorkdir} pull --ff-only;`,
     `else echo "未发现 Git 仓库或内置部署文件，跳过部署文件同步"; fi`,
   ].join(" ");
 }

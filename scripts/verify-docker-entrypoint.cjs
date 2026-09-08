@@ -6,6 +6,8 @@ const path = require("node:path");
 const root = path.resolve(__dirname, "..");
 const entrypoint = fs.readFileSync(path.join(root, "scripts", "docker-entrypoint.sh"), "utf8");
 const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "docker-build.yml"), "utf8");
+const systemUpdateRoute = fs.readFileSync(path.join(root, "src", "app", "api", "v1", "settings", "system-update", "route.ts"), "utf8");
+const updaterServer = fs.readFileSync(path.join(root, "scripts", "mmh-updater-server.mjs"), "utf8");
 const failures = [];
 
 function expect(condition, message) {
@@ -31,6 +33,23 @@ expect(
 expect(
   /npm run check:docker/.test(workflow),
   "Docker image workflow must run check:docker before publishing images.",
+);
+
+expect(
+  /\/releases\/latest/.test(systemUpdateRoute) &&
+    /git ls-remote --tags/.test(systemUpdateRoute) &&
+    /IMAGE_FALLBACK_ORDER = \["fnvps", "dockerproxy", "nju", "ghcr", "daocloud", "custom"\]/.test(systemUpdateRoute) &&
+    !/raw\.githubusercontent\.com\/frankluise5220\/MMH\/main\/package\.json/.test(systemUpdateRoute) &&
+    !/refs\/heads\/main/.test(systemUpdateRoute),
+  "Docker update version checks must use the latest GitHub Release/tag and image mirrors, not the main branch.",
+);
+
+expect(
+  /const autoImageSourceOrder = \["fnvps", "dockerproxy", "nju", "ghcr", "daocloud"\]/.test(updaterServer) &&
+  updaterServer.indexOf("if [ -f /updater/deploy/docker-compose.yml ]; then") >= 0 &&
+    updaterServer.indexOf("git -C ${quotedWorkdir} pull --ff-only;") >
+      updaterServer.indexOf("if [ -f /updater/deploy/docker-compose.yml ]; then"),
+  "Docker updater must prefer release-bundled deploy files before falling back to git pull.",
 );
 
 if (failures.length > 0) {
