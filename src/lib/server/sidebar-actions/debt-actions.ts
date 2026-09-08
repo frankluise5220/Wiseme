@@ -743,7 +743,7 @@ export async function createDebtTransaction(formData: FormData) {
           transferToAccount.billingDay
             ? toStatementMonth(date, transferToAccount.billingDay)
             : null;
-        await tx.txRecord.update({
+        const updatedOriginal = await tx.txRecord.update({
           where: { id: original.id },
           data: {
             accountId: transferFromAccount.id,
@@ -777,7 +777,32 @@ export async function createDebtTransaction(formData: FormData) {
         if (tagIdsWereSubmitted) {
           await replaceEntryTags({ tx, entryId: original.id, householdId, tagIds });
         }
-        await syncCollateralAssetLink();
+        if (mode === "borrow_in" && isCollateralLoanTypeValue) {
+          await syncCollateralAssetLink();
+        } else if (mode === "borrow_in" && fixedAssetAccountId) {
+          // 直购型贷款（消费贷/房贷/其他）编辑借入记录时同步固定资产关联：
+          // 关联 = 给固定资产增加成本（PropertyTransaction）；抵押状态展示只
+          // 属于抵押贷（syncCollateralAssetLink）。与创建链路同口径，否则
+          // 编辑时提交的 fixedAssetAccountId 会被静默丢弃。
+          const fixedAssetFundingAccount = isFinancedPurchaseForRecord ? debtAccount : cashAccount ?? debtAccount;
+          await linkExpenseToFixedAsset(tx, {
+            householdId,
+            propertyAccountId: fixedAssetAccountId,
+            propertyAssetId: fixedAssetAssetId || undefined,
+            cashEntry: {
+              id: updatedOriginal.id,
+              accountId: fixedAssetFundingAccount.id,
+              accountName: fixedAssetFundingAccount.name,
+              amount: updatedOriginal.amount,
+              type: "expense",
+              date: updatedOriginal.date,
+              postedAt: updatedOriginal.postedAt,
+              currency: updatedOriginal.currency,
+              note: updatedOriginal.note,
+            },
+            propertyName: undefined,
+          });
+        }
         if (mode === "prepay_out" && transferToAccount?.id) {
           recalculateAfterSave = {
             accountId: transferToAccount.id,
