@@ -120,9 +120,8 @@ restart_and_build.ps1
 email-settings*.png
 settings-accounts*.png
 
-# personal docs（docs 下仅保留用户安装手册，其余只保存在本地、不进仓库）
+# personal docs（docs 目录只保存在本地、不进仓库；用户安装手册在 deploy/nas-install-manual.md）
 docs/*
-!docs/nas-install-manual.md
 
 # personal data files
 cookies*.txt

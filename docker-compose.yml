@@ -1,6 +1,6 @@
 # 本仓库内开发与调试用 Compose（ghcr.io 直连镜像，Postgres 仅绑定 127.0.0.1）。
-# 这不是 NAS 安装方式：NAS 部署请按 docs/nas-install-manual.md 使用 deploy/nas/ 下的部署文件。
-# Dev/repo-only Compose. For NAS deployment use deploy/nas/ per docs/nas-install-manual.md.
+# 这不是 NAS 安装方式：NAS 部署请按 deploy/nas-install-manual.md 使用 deploy/nas/ 下的部署文件。
+# Dev/repo-only Compose. For NAS deployment use deploy/nas/ per deploy/nas-install-manual.md.
 services:
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:15-alpine}

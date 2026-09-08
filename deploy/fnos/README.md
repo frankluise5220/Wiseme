@@ -6,7 +6,7 @@
 mmh
 ```
 
-现有 MMH 普通 NAS 安装与更新主线仍然是 Docker，继续参考 `docs/nas-install-manual.md` 和 `deploy/nas/`。飞牛版只是额外的 `.fpk` 分发形式，不把普通 NAS 安装改成 SQLite。
+现有 MMH 普通 NAS 安装与更新主线仍然是 Docker，继续参考 `deploy/nas-install-manual.md` 和 `deploy/nas/`。飞牛版只是额外的 `.fpk` 分发形式，不把普通 NAS 安装改成 SQLite。
 
 飞牛专用 `.fpk` 使用 SQLite 原生运行方式：包内包含 Next standalone、Linux Node runtime、Prisma runtime、SQLite 初始化脚本和应用入口，不依赖 Docker/PostgreSQL。它不是源码包，也不是调试归档。由于包含原生二进制，正式 Release 资产只按架构发布两个文件：`mmh-fnos-v0.1.x-x86_64.fpk` 和 `mmh-fnos-v0.1.x-arm64.fpk`，但应用 ID 仍然是同一个 `mmh`。
 
