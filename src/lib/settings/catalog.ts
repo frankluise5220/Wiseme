@@ -103,6 +103,7 @@ const SETTINGS_ITEM_LABEL_KEYS: Record<string, string> = {
   database: "settings.database",
   "system-update": "settings.systemUpdate",
   feedback: "settings.feedback",
+  sponsor: "settings.sponsor",
 };
 
 const SETTINGS_ITEM_DESCRIPTION_KEYS: Record<string, string> = {
@@ -125,6 +126,7 @@ const SETTINGS_ITEM_DESCRIPTION_KEYS: Record<string, string> = {
   database: "settings.item.database.desc",
   "system-update": "settings.item.system-update.desc",
   feedback: "settings.item.feedback.desc",
+  sponsor: "settings.item.sponsor.desc",
 };
 
 function localize(t: TranslateFn, key: string | undefined, fallback: string): string {
