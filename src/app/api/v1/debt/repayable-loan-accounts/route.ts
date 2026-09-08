@@ -318,15 +318,17 @@ function computeCurrentInstallment(
     ? null
     : Math.max(0, plan.totalRuns - Math.max(0, periodNumber - 1));
   if (remainingRuns == null || remainingRuns <= 0) return null;
+  const loanStartDateKey = formatDateUtc(repaymentStartDateForPlan(plan));
   const rawLoanRateAdjustments = resolveLoanRateAdjustments({
     tableAdjustments: rateAdjustmentsByAccountId.get(accountId) ?? [],
     memoAdjustments: memo?.loanRateAdjustments,
+    loanStartDate: loanStartDateKey,
   });
   const loanRateAdjustments = resolveLoanRateAdjustments({
     tableAdjustments: rateAdjustmentsByAccountId.get(accountId) ?? [],
     memoAdjustments: memo?.loanRateAdjustments,
-    mortgageLprDiscount: memo?.mortgageLprDiscount ?? inferMortgageLprDiscountFromRateAdjustments(rawLoanRateAdjustments),
-    loanStartDate: formatDateUtc(repaymentStartDateForPlan(plan)),
+    mortgageLprDiscount: memo?.mortgageLprDiscount ?? inferMortgageLprDiscountFromRateAdjustments(rawLoanRateAdjustments, { skipOnOrBefore: loanStartDateKey }),
+    loanStartDate: loanStartDateKey,
   });
   const period = calcLoanScheduledAmountForPeriodStart({
     repaymentMethod: memo?.repaymentMethod,

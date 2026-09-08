@@ -360,6 +360,11 @@ export function calcLoanScheduledAmountForPeriodStart(params: {
     adjustments,
     date: params.periodStartDate,
   });
+  // 生效利率与基础利率相同（如放款日初始利率行）不构成重定价：
+  // 保持原月供，禁止用 annuity(期初余额, 剩余期数) 自算跳变。
+  if (annualRate == null || (params.baseAnnualRate != null && Math.abs(annualRate - params.baseAnnualRate) < 1e-9)) {
+    return params.scheduledAmount;
+  }
   return (
     calcLoanScheduledAmount({
       repaymentMethod: params.repaymentMethod,

@@ -45,7 +45,9 @@ export function resolveLoanRateAdjustments(params: {
 }) {
   const tableAdjustments = normalizeLoanRateAdjustments(params.tableAdjustments);
   const adjustments = tableAdjustments.length > 0 ? tableAdjustments : normalizeLoanRateAdjustments(params.memoAdjustments);
-  const mortgageLprDiscount = params.mortgageLprDiscount ?? inferMortgageLprDiscountFromRateAdjustments(adjustments);
+  const mortgageLprDiscount = params.mortgageLprDiscount ?? inferMortgageLprDiscountFromRateAdjustments(adjustments, {
+    skipOnOrBefore: params.loanStartDate,
+  });
   return normalizeMortgageLprAdjustmentHistory({
     adjustments,
     discount: mortgageLprDiscount,

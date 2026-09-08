@@ -106,9 +106,17 @@ export function calcMortgageAnnualRateFromLprDiscount(params: {
   return roundRate(params.lprRate + calcMortgageLprSpreadFromDiscount(params.discount));
 }
 
-export function inferMortgageLprDiscountFromRateAdjustments(adjustments: LoanRateAdjustment[]) {
+export function inferMortgageLprDiscountFromRateAdjustments(
+  adjustments: LoanRateAdjustment[],
+  options?: { skipOnOrBefore?: string | null },
+) {
+  // 放款日行（及其之前的行）是"执行利率×折扣"，不是"LPR+加点"，
+  // 不能用来反推折扣，否则 LPR 时代放款行会推错折扣。
+  const skipOnOrBeforeRaw = options?.skipOnOrBefore?.slice(0, 10) ?? "";
+  const skipOnOrBefore = /^\d{4}-\d{2}-\d{2}$/.test(skipOnOrBeforeRaw) ? skipOnOrBeforeRaw : null;
   const normalized = normalizeLoanRateAdjustments(adjustments);
   for (const adjustment of normalized) {
+    if (skipOnOrBefore && adjustment.effectiveDate <= skipOnOrBefore) continue;
     const effectiveDate = dateOnlyToUtcDate(adjustment.effectiveDate);
     if (!effectiveDate || !Number.isFinite(adjustment.annualRate) || adjustment.annualRate <= 0) continue;
 
@@ -155,6 +163,12 @@ export function buildMortgageLprRateAdjustments(params: {
     ? (getMortgageBankExecutionRate(params.fromDate)?.rate ?? MORTGAGE_BASE_BENCHMARK_RATE)
     : MORTGAGE_BASE_BENCHMARK_RATE) * params.discount);
   const rows: LoanRateAdjustment[] = [];
+
+  // 利率调整历史从放款日开始：第一条是放款日当天的执行利率
+  // （基准/LPR × 折扣），之后才是各次重定价的变动。
+  if (from && params.fromDate) {
+    rows.push({ effectiveDate: params.fromDate.slice(0, 10), annualRate: previousRate });
+  }
 
   if (basis === "lpr_quote") {
     for (const quote of FIVE_YEAR_LPR_HISTORY) {

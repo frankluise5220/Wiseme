@@ -1057,15 +1057,31 @@ export function buildDebtRowsViewData({
     const mortgageLprDiscount = isMortgageLoanAccount
       ? loanMemo?.mortgageLprDiscount ??
         debtBorrowLprDiscountByAccountId.get(account.id) ??
-        inferMortgageLprDiscountFromRateAdjustments(rawLoanRateAdjustments) ??
+        inferMortgageLprDiscountFromRateAdjustments(rawLoanRateAdjustments, { skipOnOrBefore: loanStartDate }) ??
         null
       : null;
-    const loanRateAdjustments = resolveLoanRateAdjustments({
+    let loanRateAdjustments = resolveLoanRateAdjustments({
       tableAdjustments: loanPlan ? loanRateAdjustmentsByAccountId.get(account.id) : [],
       memoAdjustments: loanMemo?.loanRateAdjustments,
       mortgageLprDiscount,
       loanStartDate,
     });
+    // 利率调整历史从放款日开始：老数据表里第一条是第一次变动，
+    // 展示时补上放款日当天的执行利率（与基础利率同值，不参与重算口径）。
+    const loanBaseAnnualRate = loanMemo?.annualRate ?? null;
+    if (
+      isMortgageLoanAccount &&
+      loanStartDate &&
+      loanBaseAnnualRate != null &&
+      Number.isFinite(loanBaseAnnualRate) &&
+      loanRateAdjustments.length > 0 &&
+      !loanRateAdjustments.some((item) => item.effectiveDate <= loanStartDate)
+    ) {
+      loanRateAdjustments = [
+        { effectiveDate: loanStartDate, annualRate: loanBaseAnnualRate },
+        ...loanRateAdjustments,
+      ];
+    }
     const remainingRuns = loanPlan?.totalRuns == null
       ? null
       : Math.max(0, loanPlan.totalRuns - Math.max(0, loanPlan.executedRuns ?? 0));

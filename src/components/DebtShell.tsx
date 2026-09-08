@@ -709,6 +709,8 @@ export function DebtShell({
           originalEffectiveDate: item.effectiveDate,
           originalAnnualRate: item.annualRate,
           isEditing: false,
+          // 首行 = 放款日当天的执行利率，与消费贷一致：日期锁定、不可删除。
+          isInitial: !!row.loanStartDate && item.effectiveDate === row.loanStartDate,
         }))
       : [];
     // Loaded/generated rows render read-only in the table; each row switches
@@ -721,6 +723,7 @@ export function DebtShell({
           originalEffectiveDate: item.effectiveDate,
           originalAnnualRate: item.annualRate,
           isEditing: false,
+          isInitial: !!row.loanStartDate && item.effectiveDate === row.loanStartDate,
         }))
       : generatedDrafts.length > 0
         ? generatedDrafts
@@ -731,6 +734,7 @@ export function DebtShell({
           originalEffectiveDate: row.loanStartDate || todayKey,
           originalAnnualRate: row.baseAnnualRate ?? row.annualRate ?? 0,
           isEditing: false,
+          isInitial: !!row.loanStartDate,
         }];
     setRateDrafts(drafts);
     setRateCardOpen(true);
@@ -1533,11 +1537,17 @@ export function DebtShell({
                             </tr>
                           ) : rateDrafts.map((item) => {
                             const draftRate = rateDraftAnnualRateNumber(item.annualRate);
-                            const draftDiscount = draftRate != null ? inferRowLprDiscount(item.effectiveDate, draftRate) : null;
+                            // 首行（放款日）利率 = 执行利率×折扣，不能由 LPR+加点反推，
+                            // 折扣列直接用贷款的 LPR 折扣；无折扣时退回按行反推。
+                            const draftDiscount = draftRate != null
+                              ? (item.isInitial && selectedRow?.mortgageLprDiscount != null
+                                  ? selectedRow.mortgageLprDiscount
+                                  : inferRowLprDiscount(item.effectiveDate, draftRate))
+                              : null;
                             return (
-                              <tr key={item.id} className={item.isEditing ? "bg-amber-50/50" : "bg-white"}>
+                              <tr key={item.id} className={item.isEditing ? "bg-amber-50/50" : item.isInitial ? "bg-blue-50/50" : "bg-white"}>
                                 <td className="px-3 py-2 align-middle">
-                                  {item.isEditing ? (
+                                  {item.isEditing && !item.isInitial ? (
                                     <DateStepper
                                       value={item.effectiveDate}
                                       onChange={(value) => updateRateDraft(item.id, { effectiveDate: value })}
@@ -1601,8 +1611,8 @@ export function DebtShell({
                                       type="button"
                                       onClick={() => deleteRateDraft(item.id)}
                                       className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-rose-600 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
-                                      disabled={rateSaving}
-                                      title={t("common.delete")}
+                                      disabled={rateSaving || item.isInitial}
+                                      title={item.isInitial ? t("debtShell.rateAdjust.initialDeleteDisabled") : t("common.delete")}
                                       aria-label={t("common.delete")}
                                     >
                                       <Trash2 className="h-3.5 w-3.5" />
