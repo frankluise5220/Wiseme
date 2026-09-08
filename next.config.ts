@@ -23,10 +23,21 @@ const allowedDevOrigins = [
     .filter(Boolean),
 ];
 
+// Dev-only memory mitigations (see next docs guides/memory-usage.md):
+// - webpackMemoryOptimizations reduces webpack max memory usage at a slight
+//   compile-time cost; the project pins --webpack so this targets dev only.
+// - preloadEntriesOnStart=false stops the dev server from preloading every
+//   route's JS modules at startup (measured ~3.9GB right after boot with the
+//   default; routes load lazily per request instead).
+const isDev = process.env.NODE_ENV !== "production";
+
 const nextConfig: NextConfig = {
   output: "standalone",
   experimental: {
     proxyClientMaxBodySize: "128mb",
+    ...(isDev
+      ? { webpackMemoryOptimizations: true, preloadEntriesOnStart: false }
+      : {}),
   },
   allowedDevOrigins,
   async headers() {
