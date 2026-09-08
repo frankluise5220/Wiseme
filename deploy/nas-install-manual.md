@@ -150,7 +150,15 @@ POSTGRES_PASSWORD="REPLACE_WITH_YOUR_OWN_LONG_RANDOM_PASSWORD"
 
 密码建议使用 24 位以上的字母和数字。图形界面安装使用静态 `.env` 文件，Docker 不会自动生成这个密码。
 
-6. 在 NAS 的 Docker 图形界面里创建项目：
+6. 如果你的 `docker-compose.yml` 里 `MMH_UPDATE_TOKEN` 是 `${MMH_UPDATE_TOKEN:-...}` 形式（新版部署文件），在同一份 `.env` 里设置网页更新令牌；如果该行写的是 `${POSTGRES_PASSWORD:-...}`（旧版派生），跳过这一步：
+
+```env
+MMH_UPDATE_TOKEN="REPLACE_WITH_YOUR_OWN_LONG_RANDOM_TOKEN"
+```
+
+令牌是应用与更新器容器之间的共享口令，网页里的“系统更新”（刷新远端版本、一键更新）依赖它。用 24 位以上随机字符串，生成示例：`openssl rand -hex 24`。不设置（且 compose 不再自动派生）时，更新页会提示“未配置宿主机更新执行器”，或报“获取远端版本失败：spawnSync /bin/sh ETIMEDOUT”（GitHub 直连超时），且“更新”按钮不可用。
+
+7. 在 NAS 的 Docker 图形界面里创建项目：
    - 项目名称填写 `mmh`。
    - 项目目录选择刚才放部署文件的目录。
    - Compose 文件选择 `docker-compose.yml`。
@@ -213,6 +221,14 @@ chmod +x postgres-entrypoint.sh
 
 POSTGRES_PASSWORD="$(openssl rand -hex 24 2>/dev/null || date +%s%N | sha256sum | cut -c1-48)"
 sed -i "s/CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD/$POSTGRES_PASSWORD/g" .env
+
+# 网页更新令牌：新部署文件用独立的 MMH_UPDATE_TOKEN；旧部署文件由
+# POSTGRES_PASSWORD 自动派生，无需此行（保留也无害，升级到新部署文件后即生效）。
+MMH_UPDATE_TOKEN="$(openssl rand -hex 24 2>/dev/null || date +%s%N | sha256sum | cut -c1-48)"
+if grep -q 'MMH_UPDATE_TOKEN=\${MMH_UPDATE_TOKEN' docker-compose.yml; then
+  sed -i "s|^MMH_UPDATE_TOKEN=.*|MMH_UPDATE_TOKEN=\"$MMH_UPDATE_TOKEN\"|" .env
+  echo "网页更新令牌: $MMH_UPDATE_TOKEN"
+fi
 
 sudo docker compose -p mmh up -d
 
@@ -324,6 +340,24 @@ Docker 页面打不开：
 数据库密码错误：
 
 如果是全新安装，最简单的处理方式是清空重装。如果已有重要数据，不要删除数据库卷。先备份，再排查 `.env` 里的 `POSTGRES_PASSWORD` 是否和数据库初始化时一致。
+
+更新页面提示“未配置宿主机更新执行器”或“获取远端版本失败：spawnSync /bin/sh ETIMEDOUT”：
+
+网页检查/更新依赖应用与更新器（`mmh-updater`）之间的共享令牌。旧部署文件由 `POSTGRES_PASSWORD` 自动派生令牌；新部署文件（`MMH_UPDATE_TOKEN` 行为 `${MMH_UPDATE_TOKEN:-...}` 形式）需要在部署目录的 `.env` 里显式设置：
+
+```bash
+cd ~/mmh
+echo 'MMH_UPDATE_TOKEN="'$(openssl rand -hex 24)'"' >> .env
+sudo docker compose -p mmh up -d app updater
+```
+
+同时确认 `mmh-updater` 容器在运行。设置后回到 系统设置 -> 系统更新 重新刷新远端版本；版本检查会改走镜像源测速（国内网络更稳），“更新”按钮也会可用。如果只想手动更新一次，也可以直接执行：
+
+```bash
+cd ~/mmh
+sudo docker compose -p mmh pull app updater
+sudo docker compose -p mmh up -d app updater
+```
 
 更新页面提示“更新失败 / Failed to fetch”，但系统实际已更新：
 
