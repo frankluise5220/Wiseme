@@ -1,3 +1,5 @@
+# MMH NAS Docker 部署文件（用户使用，配合 env.example 生成 .env）。
+# 安装与更新唯一入口：docs/nas-install-manual.md
 services:
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:15-alpine}
