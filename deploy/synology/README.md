@@ -1,6 +1,6 @@
 # MMH Synology DSM SPK
 
-本文记录 MMH 面向群晖 DSM 的 `.spk` 分发方式。普通用户安装和更新请优先看 `docs/nas-install-manual.md`。
+本文记录 MMH 面向群晖 DSM 的 `.spk` 分发方式。普通用户安装和更新请优先看 `deploy/nas-install-manual.md`。
 
 群晖版使用 SQLite 原生运行方式：包内包含 Next standalone、Linux Node runtime、Prisma runtime、SQLite 初始化脚本和 DSM 套件启动脚本，不依赖 Docker/PostgreSQL。当前 `.spk` 的 `os_min_ver` 兼容下限保持为 DSM `7.0-40000`，同时优先面向 DSM 7.2 及更新版本做实际安装测试。正式 Release 资产按架构发布：
 
