@@ -672,22 +672,24 @@ export function EntityCreateForm(props: EntityCreateFormProps) {
   }, [mode, defaultName, defaultType, extraFields, defaultParentId, typeKey, config.fullFields, getDefaultTypeCompact, entityType, allowedInstitutionTypes, allowedAccountKinds, includeInitialBalanceFields, defaultValueForField, fallbackSelectValueForField]);
 
   useEffect(() => {
-    if (mode === "compact" && open) {
+    if (mode !== "compact") return;
+    if (open) {
       // When a nested entity was just created, keep the current form state
       // (including the newly selected entity) instead of re-initializing it.
+      // The flag must survive across renders: creating a nested entity fires
+      // notifySettingsDataChanged, and the parent's async refresh lands later
+      // as a nestedFieldData prop change. Clearing the flag on every render
+      // would let that late refresh wipe the user's input.
       if (!nestedCreatedRef.current) initForm();
       nestedCreatedRef.current = false;
       // Sync nestedFieldData with compact prop changes
       if (compactNestedFieldData) setNestedFieldData(compactNestedFieldData);
+    } else {
+      // Reset on close so a lingering flag never suppresses initialization
+      // of the next open.
+      nestedCreatedRef.current = false;
     }
   }, [mode, open, initForm, compactNestedFieldData]);
-
-  // Clear the nested-created flag after every render so it never lingers into
-  // a later sync pass (e.g. when a nested entity is created without a parent
-  // onNestedCreated callback and the prop does not change).
-  useEffect(() => {
-    nestedCreatedRef.current = false;
-  });
 
   useEffect(() => {
     if (mode === "full") {
