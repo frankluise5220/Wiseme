@@ -39,6 +39,7 @@ model Account {
   repaymentDay                                               Int?
   repaymentOffsetDays                                        Int?
   creditBillMode                                             CreditBillMode              @default(separate)
+  billingDayTxPeriod                                         CreditBillingDayTxPeriod    @default(current)
   numberMasked                                               String?
   routeKey                                                   String?                     @unique
   note                                                       String?
@@ -1660,6 +1661,11 @@ enum LoanType {
 enum CreditBillMode {
   separate
   consolidated
+}
+
+enum CreditBillingDayTxPeriod {
+  current
+  next
 }
 
 enum CostBasisMethod {

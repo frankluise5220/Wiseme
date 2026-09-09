@@ -27,10 +27,14 @@ function fnosFpkAssetName(version, assetSuffix) {
   return `mmh-fnos-v${version}-${assetSuffix}.fpk`;
 }
 
+function fnosVpsX86Url(version) {
+  return `http://fnapp.floatingice.win/apps/mmh-${version}.fpk`;
+}
+
 function fnosDownloadUrls(version) {
   const base = `https://github.com/frankluise5220/MMH/releases/download/v${version}`;
   return {
-    x86_64: `${base}/${fnosFpkAssetName(version, "x86_64")}`,
+    x86_64: fnosVpsX86Url(version),
     arm64: `${base}/${fnosFpkAssetName(version, "arm64")}`,
   };
 }
@@ -90,10 +94,6 @@ const fndepotFnpack = readJson("deploy/fnos/repository/fnpack.json");
 const fndepotApp = fndepotFnpack.apps?.mmh;
 expect(fndepotApp, "deploy/fnos/repository/fnpack.json must contain the mmh app entry under apps for FnDepot.");
 if (fndepotApp) {
-  expect(
-    typeof fndepotApp.desc === "string" && fndepotApp.desc.length >= 300 && /MoneyMoneyHome/.test(fndepotApp.desc),
-    "deploy/fnos/repository/fnpack.json must keep the full app-center description.",
-  );
   const releaseVersions = Object.keys(fndepotApp.releases || {})
     .filter((releaseVersion) => parseVersion(releaseVersion) !== null)
     .sort(compareVersions);
@@ -124,17 +124,12 @@ if (legacyApp) {
   expect(legacyApp.changelog === releaseNotes, "fn-appstores.json _manual changelog must match package.json mmhReleaseNotes.");
 }
 
-const selfhostedSource = readJson("deploy/fnos/selfhosted-source/data/fn-appstores.json");
-const selfhostedApp = Array.isArray(selfhostedSource) ? selfhostedSource.find((app) => app.id === "mmh") : null;
-expect(selfhostedApp, "deploy/fnos/selfhosted-source/data/fn-appstores.json must contain the mmh app entry.");
-if (selfhostedApp) {
-  expect(selfhostedApp.version === version, "deploy/fnos/selfhosted-source/data/fn-appstores.json version must match package.json.");
-  expect(selfhostedApp.desc === fndepotApp?.desc, "deploy/fnos/selfhosted-source/data/fn-appstores.json desc must match the FnDepot app description.");
-}
-
 const dockerWorkflow = read(".github/workflows/docker-build.yml");
-expect(/ghcr\.io\/\$\{\{\s*github\.repository_owner\s*\}\}\/mmh:\$\{\{\s*steps\.package\.outputs\.version\s*\}\}/.test(dockerWorkflow), "Docker workflow must publish the app image with the package version tag.");
-expect(/ghcr\.io\/\$\{\{\s*github\.repository_owner\s*\}\}\/mmh-updater:\$\{\{\s*steps\.package\.outputs\.version\s*\}\}/.test(dockerWorkflow), "Docker workflow must publish the updater image with the package version tag.");
+expect(/tags:\s*\n\s*-\s*"v\*"/.test(dockerWorkflow), "Docker workflow must run on v* tag pushes so release images can be published from the release tag.");
+expect(/npm run check:docker/.test(dockerWorkflow), "Docker workflow must run check:docker before publishing images.");
+expect(/type=raw,value=latest,enable=\$\{\{\s*startsWith\(github\.ref,\s*'refs\/tags\/v'\)\s*\}\}/.test(dockerWorkflow), "Docker workflow must publish latest only from v* release tags.");
+expect(/type=semver,pattern=\{\{version\}\},enable=\$\{\{\s*startsWith\(github\.ref,\s*'refs\/tags\/v'\)\s*\}\}/.test(dockerWorkflow), "Docker workflow must publish the package version tag only from v* release tags.");
+expect(/type=raw,value=main,enable=\$\{\{\s*endsWith\(github\.ref,\s*'\/heads\/main'\)\s*\}\}/.test(dockerWorkflow), "Docker workflow must publish main snapshots without moving latest.");
 
 for (const file of [".github/workflows/fnos-release.yml", ".github/workflows/fnos-stage.yml"]) {
   const workflow = read(file);

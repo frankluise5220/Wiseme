@@ -1442,6 +1442,13 @@ const MIGRATIONS = [
     },
   },
   {
+    version: "20260909_add_billing_day_tx_period",
+    description: "Add Account.billingDayTxPeriod for credit-card billing-day transaction assignment",
+    apply(db) {
+      addColumnIfMissing(db, "Account", "billingDayTxPeriod", "TEXT NOT NULL DEFAULT 'current'");
+    },
+  },
+  {
     version: "20260812_account_note",
     description: "Add Account.note freeform remark",
     apply(db) {

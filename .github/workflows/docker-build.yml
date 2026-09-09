@@ -3,6 +3,8 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [main]
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -36,14 +38,30 @@ jobs:
       - name: Verify Docker entrypoint
         run: npm run check:docker
 
+      # Tag ownership rules:
+      # - Release refs (v* tags, dispatched by the release process) own the
+      #   `latest` tag and the plain version tag (0.1.x).
+      # - Main-branch pushes are development snapshots: they must never move
+      #   `latest` (production web updaters track it) and must never write a
+      #   package.json version tag (main's version does not bump per release,
+      #   so it would clobber historical release images).
+      - name: Compute app image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/mmh
+          tags: |
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=main,enable=${{ endsWith(github.ref, '/heads/main') }}
+            type=sha,prefix=sha-
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/mmh:latest
-            ghcr.io/${{ github.repository_owner }}/mmh:${{ steps.package.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             APP_COMMIT=${{ github.sha }}
             APP_COMMIT_MESSAGE=${{ github.event.head_commit.message }}
@@ -52,15 +70,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Compute updater image tags
+        id: meta-updater
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/mmh-updater
+          tags: |
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=main,enable=${{ endsWith(github.ref, '/heads/main') }}
+            type=sha,prefix=sha-
+
       - name: Build and push updater
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile.updater
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/mmh-updater:latest
-            ghcr.io/${{ github.repository_owner }}/mmh-updater:${{ steps.package.outputs.version }}
+          tags: ${{ steps.meta-updater.outputs.tags }}
           build-args: |
             APP_COMMIT=${{ github.sha }}
             APP_COMMIT_MESSAGE=${{ github.event.head_commit.message }}
