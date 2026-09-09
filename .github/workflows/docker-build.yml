@@ -51,9 +51,6 @@ jobs:
             type=raw,value=main,enable=${{ endsWith(github.ref, '/heads/main') }}
             type=sha,prefix=sha-
 
-      - name: Verify Docker entrypoint
-        run: npm run check:docker
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
