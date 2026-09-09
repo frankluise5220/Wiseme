@@ -454,6 +454,8 @@ export function DebtTransactionModal({
   // 结清自动填剩余本金：用户在结清态下手改本金后置 true，自动填入停手；
   // 重新选择策略时复位。
   const settlePrincipalManualRef = useRef(false);
+  // 还款日自动带出：用户手改日期后置 true，期次预定还款日不再覆盖。
+  const scheduledDateManualRef = useRef(false);
   const [debtAccountNestedOpen, setDebtAccountNestedOpen] = useState(false);
   const [mode, setMode] = useState<DebtMode>("borrow_in");
   const [loanFundingMode, setLoanFundingMode] = useState<LoanFundingMode>("cash_disbursement");
@@ -573,6 +575,8 @@ export function DebtTransactionModal({
     setPrepayTotal("");
     setPrepayTotalManual(false);
     setPrepayInterestManual(false);
+    settlePrincipalManualRef.current = false;
+    scheduledDateManualRef.current = false;
     setPrepayStrategy(DEFAULT_LOAN_PREPAY_STRATEGY);
     setAnnualRate("");
     setAnnualRateManuallyEdited(false);
@@ -1017,6 +1021,10 @@ export function DebtTransactionModal({
       scheduledInterest != null &&
       scheduledPrincipal + scheduledInterest > 0
     ) {
+      // 日期自动填到该期预定还款日（用户手动改过日期后不再覆盖）。
+      if (row?.currentDueDate && scheduledDateManualRef.current !== true) {
+        setDate(row.currentDueDate);
+      }
       setPrincipal(String(Math.round(scheduledPrincipal * 100) / 100));
       if (repaymentMethod !== FREE_REPAYMENT_METHOD && showInterest) {
         setInterest(Number.isFinite(scheduledInterest)
@@ -1531,6 +1539,16 @@ export function DebtTransactionModal({
   useEffect(() => {
     setPrepayInterestManual(false);
   }, [debtAccountId, date]);
+  // 结清：本金自动填入截至还款日的剩余本金（利息自动、手续费手填；本金手改后不再覆盖）。
+  useEffect(() => {
+    if (!open || mode !== "prepay_out" || editingEntryId) return;
+    if (prepayStrategy !== "settle" || settlePrincipalManualRef.current) return;
+    const balance = selectedRepayableLoanRow?.balance;
+    if (balance == null || !Number.isFinite(balance) || Math.abs(balance) <= 0.005) return;
+    const outstanding = Math.round(Math.abs(balance) * 100) / 100;
+    setPrincipal((current) => (Math.abs(parseAbsMoneyText(current) - outstanding) > 0.005 ? String(outstanding) : current));
+    setPrepayTotalManual(false);
+  }, [open, mode, editingEntryId, prepayStrategy, selectedRepayableLoanRow]);
   const showLoanPurpose = isLoanBorrow && activeLoanTab === "consumer";
   const showLoanRateAdjustmentFields = isLoanBorrow && (isConsumerLoanBorrow || isHomeLoanBorrow);
   const showLoanFixedAssetFields = isLoanBorrow && (activeLoanTab === "consumer" || activeLoanTab === "home");
@@ -1967,7 +1985,7 @@ export function DebtTransactionModal({
   const renderDateField = () => (
     <div className="space-y-1">
       <div className="form-label">{isLoanRepaymentMode ? t("debtTx.date.repayment") : mode === "borrow_in" ? (isLoanBorrow ? t("debtTx.date.occurred") : t("detail.column.postedAt")) : t("detail.column.date")}</div>
-      <DateStepper name="date" value={date} onChange={setDate} />
+      <DateStepper name="date" value={date} onChange={(value) => { scheduledDateManualRef.current = isLoanRepaymentMode; setDate(value); }} />
     </div>
   );
 
@@ -2407,24 +2425,33 @@ export function DebtTransactionModal({
                     )}
                     {!!debtAccountId && isLoanRepaymentMode && !showPrepayment ? (
                       selectedRepaymentCurrentPeriodPaid ? (
-                        <div className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2">
-                          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
-                          <div className="text-xs leading-5 text-emerald-800">
-                            <span className="font-medium">{t("debtTx.currentPeriodPaidLabel")}</span>
-                            {selectedRepaymentUnpaidPeriod != null ? (
-                              <span className="block text-[11px] text-emerald-600">
-                                {t("debtTx.currentPeriodPaidHint", { period: selectedRepaymentUnpaidPeriod })}
-                              </span>
-                            ) : null}
+                        <div className="flex items-start justify-between gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2">
+                          <div className="flex items-start gap-2">
+                            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                            <div className="text-xs leading-5 text-emerald-800">
+                              <span className="font-medium">{t("debtTx.currentPeriodPaidLabel")}</span>
+                              {selectedRepaymentUnpaidPeriod != null ? (
+                                <span className="block text-[11px] text-emerald-600">
+                                  {t("debtTx.currentPeriodPaidHint", { period: selectedRepaymentUnpaidPeriod })}
+                                </span>
+                              ) : null}
+                            </div>
                           </div>
+                          <button
+                            type="button"
+                            onClick={() => handleModeSelect("prepay_out")}
+                            className="shrink-0 self-center rounded-full border border-emerald-300 bg-white px-3 py-1 text-xs font-medium text-emerald-700 transition hover:bg-emerald-50"
+                          >
+                            {t("debtTx.prepaySwitch")}
+                          </button>
                         </div>
                       ) : selectedRepayableLoanRow?.currentPrincipal != null ? (
                         <div className="flex items-start gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2">
                           <Info className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
                           <div className="text-xs leading-5 text-blue-800">
-                            <span className="font-medium">{t("debtTx.currentUnpaidPeriodLabel")}</span>
+                            <span className="font-medium">{t("debtTx.currentUnpaidPeriodLabel", { due: selectedRepayableLoanRow?.currentDueDate ?? "" })}</span>
                             <span className="block text-[11px] text-blue-600">
-                              {t("debtTx.currentUnpaidPeriodHint", { period: selectedRepaymentUnpaidPeriod ?? 0 })}
+                              {t("debtTx.currentUnpaidPeriodHint", { period: selectedRepaymentUnpaidPeriod ?? 0, due: selectedRepayableLoanRow?.currentDueDate ?? "", amount: formatMoneyPreview((selectedRepayableLoanRow?.currentPrincipal ?? 0) + (selectedRepayableLoanRow?.currentInterest ?? 0), language) })}
                             </span>
                           </div>
                         </div>
@@ -2459,7 +2486,7 @@ export function DebtTransactionModal({
 
                     {showPrepayment ? (
                       <>
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div className={`grid grid-cols-1 gap-3 ${showPrepayInterest ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
                           <div className="space-y-1">
                             <div className="form-label">{t("debtTx.prepayPrincipal")}</div>
                             <CalcInput value={principal} onChange={handlePrincipalChange} placeholder={t("debtTx.placeholder.exampleAmount")} label={t("debtTx.prepayPrincipal")} precision={2} />
@@ -2474,11 +2501,13 @@ export function DebtTransactionModal({
                             <div className="form-label">{t("debtTx.feePenalty")}</div>
                             <CalcInput value={penalty} onChange={handlePenaltyChange} placeholder={t("stockFee.optional")} label={t("txForm.fee")} precision={2} />
                           </div>
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                           <div className="space-y-1">
                             <div className="form-label">{t("debtTx.handleFollowUpPlan")}</div>
                             <select
                               value={prepayStrategy}
-                              onChange={(event) => setPrepayStrategy(event.target.value as PrepayStrategy)}
+                              onChange={(event) => handlePrepayStrategyChange(event.target.value as PrepayStrategy)}
                               className="form-input"
                             >
                               {(Object.keys(PREPAY_STRATEGY_LABELS) as PrepayStrategy[]).map((item) => (
