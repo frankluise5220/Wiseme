@@ -225,10 +225,12 @@ sed -i "s/CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD/$POSTGRES_PASSWORD/g" .env
 # 网页更新令牌：新部署文件用独立的 MMH_UPDATE_TOKEN；旧部署文件由
 # POSTGRES_PASSWORD 自动派生，无需此行（保留也无害，升级到新部署文件后即生效）。
 MMH_UPDATE_TOKEN="$(openssl rand -hex 24 2>/dev/null || date +%s%N | sha256sum | cut -c1-48)"
-if grep -q 'MMH_UPDATE_TOKEN=\${MMH_UPDATE_TOKEN' docker-compose.yml; then
+if grep -qE '^MMH_UPDATE_TOKEN=..*' .env; then
   sed -i "s|^MMH_UPDATE_TOKEN=.*|MMH_UPDATE_TOKEN=\"$MMH_UPDATE_TOKEN\"|" .env
-  echo "网页更新令牌: $MMH_UPDATE_TOKEN"
+else
+  echo "MMH_UPDATE_TOKEN=\"$MMH_UPDATE_TOKEN\"" >> .env
 fi
+echo "网页更新令牌: $MMH_UPDATE_TOKEN"
 
 sudo docker compose -p mmh up -d
 
@@ -343,13 +345,15 @@ Docker 页面打不开：
 
 更新页面提示“未配置宿主机更新执行器”或“获取远端版本失败：spawnSync /bin/sh ETIMEDOUT”：
 
-网页检查/更新依赖应用与更新器（`mmh-updater`）之间的共享令牌。旧部署文件由 `POSTGRES_PASSWORD` 自动派生令牌；新部署文件（`MMH_UPDATE_TOKEN` 行为 `${MMH_UPDATE_TOKEN:-...}` 形式）需要在部署目录的 `.env` 里显式设置：
+网页检查/更新依赖应用与更新器（`mmh-updater`）之间的共享令牌。旧部署文件由 `POSTGRES_PASSWORD` 自动派生令牌；新部署文件（`MMH_UPDATE_TOKEN` 行为 `${MMH_UPDATE_TOKEN:-...}` 形式）需要在部署目录的 `.env` 里显式设置。注意：复制 `env.example` 生成的 `.env` 里会有一行空占位 `MMH_UPDATE_TOKEN=""`，命令的守卫按"非空"判断（`grep -E '^MMH_UPDATE_TOKEN=..*'`），空占位会被正确替换：
 
 ```bash
 cd ~/mmh
-echo 'MMH_UPDATE_TOKEN="'$(openssl rand -hex 24)'"' >> .env
+grep -qE '^MMH_UPDATE_TOKEN=..*' .env || echo 'MMH_UPDATE_TOKEN="'$(openssl rand -hex 24)'"' >> .env
 sudo docker compose -p mmh up -d app updater
 ```
+
+该命令幂等：令牌已配置（非空）时跳过写入，重复执行无副作用。若 `.env` 里是空占位行 `MMH_UPDATE_TOKEN=""`，追加的新行会在 Compose 读取时覆盖空值（同名键后者生效），无需手动删除旧行。
 
 同时确认 `mmh-updater` 容器在运行。设置后回到 系统设置 -> 系统更新 重新刷新远端版本；版本检查会改走镜像源测速（国内网络更稳），“更新”按钮也会可用。如果只想手动更新一次，也可以直接执行：
 
