@@ -143,10 +143,11 @@ export async function computeLoanPrepayInterestPreview(params: {
     if (snapshot.dateKey <= boundaryKey) principalAtBoundary = Math.abs(snapshot.balance);
     else break;
   }
-  const principalReductions = reductionCandidates.map((item) => ({
-    date: item.dateKey,
-    amount: item.amount,
-  }));
+  // 窗口内（边界之后、还款日之前）的还本记录才会降低计息基数；
+  // 边界之前的还本已反映在起点本金快照里，不能重复扣减。
+  const principalReductions = reductionCandidates
+    .filter((item) => item.dateKey > boundaryKey && item.dateKey <= endDateInclusive)
+    .map((item) => ({ date: item.dateKey, amount: item.amount }));
 
   if (endDateInclusive <= boundaryKey || principalAtBoundary <= 0.005) {
     return { interest: 0, fromDate: boundaryKey, days: 0, annualRate: null };

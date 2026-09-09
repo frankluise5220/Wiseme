@@ -60,17 +60,17 @@ export async function GET(request: Request) {
     const balanceByAccountId = await computeLoanPrincipalBalancesAsOf(accounts, hidFilter, asOfDate, {
       excludeEntryId: excludeEntryId || null,
     });
-    const data = accounts
+    const data: Array<{
+      accountId: string;
+      balance: number;
+      prepayInterest?: number;
+      prepayInterestFromDate?: string;
+      prepayInterestDays?: number;
+      prepayAnnualRate?: number | null;
+    }> = accounts
       .map((account) => ({ accountId: account.id, balance: balanceByAccountId.get(account.id) ?? 0 }))
       .filter((row) => row.balance < -ACTIVE_DEBT_EPSILON)
-      .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance)) as Array<{
-        accountId: string;
-        balance: number;
-        prepayInterest?: number;
-        prepayInterestFromDate?: string;
-        prepayInterestDays?: number;
-        prepayAnnualRate?: number | null;
-      }>;
+      .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
 
     if (householdId) {
       for (const row of data) {

@@ -451,6 +451,9 @@ export function DebtTransactionModal({
   // True when the open/edit event already carried repayment-plan defaults
   // (debt-side edit); the plan fetch prefill then stays off.
   const planDefaultsFromEventRef = useRef(false);
+  // 结清自动填剩余本金：用户在结清态下手改本金后置 true，自动填入停手；
+  // 重新选择策略时复位。
+  const settlePrincipalManualRef = useRef(false);
   const [debtAccountNestedOpen, setDebtAccountNestedOpen] = useState(false);
   const [mode, setMode] = useState<DebtMode>("borrow_in");
   const [loanFundingMode, setLoanFundingMode] = useState<LoanFundingMode>("cash_disbursement");
@@ -569,6 +572,7 @@ export function DebtTransactionModal({
     setPenalty("");
     setPrepayTotal("");
     setPrepayTotalManual(false);
+    setPrepayInterestManual(false);
     setPrepayStrategy(DEFAULT_LOAN_PREPAY_STRATEGY);
     setAnnualRate("");
     setAnnualRateManuallyEdited(false);
@@ -968,7 +972,15 @@ export function DebtTransactionModal({
 
   function handlePrincipalChange(value: string) {
     setPrincipal(value);
-    if (mode === "prepay_out") setPrepayTotalManual(false);
+    if (mode === "prepay_out") {
+      setPrepayTotalManual(false);
+      if (prepayStrategy === "settle") settlePrincipalManualRef.current = true;
+    }
+  }
+
+  function handlePrepayStrategyChange(value: PrepayStrategy) {
+    setPrepayStrategy(value);
+    settlePrincipalManualRef.current = false;
   }
 
   function handlePenaltyChange(value: string) {
@@ -1052,6 +1064,7 @@ export function DebtTransactionModal({
       } else {
         setInterest("");
         setPrepayTotalManual(false);
+        setPrepayInterestManual(false);
         setPrepayTotal("");
       }
       return;
@@ -2493,7 +2506,9 @@ export function DebtTransactionModal({
                                   days: selectedRepayableLoanRow.prepayInterestDays ?? 0,
                                   rate: formatRateInput(selectedRepayableLoanRow.prepayAnnualRate),
                                 })
-                              : t("debtTx.prepayInterestHintNoRate")}
+                              : selectedRepayableLoanRow?.prepayAnnualRate != null && selectedRepayableLoanRow.prepayAnnualRate <= 0
+                                ? t("debtTx.prepayInterestHintZeroRate")
+                                : t("debtTx.prepayInterestHintNoRate")}
                           </p>
                         ) : null}
                       </>
