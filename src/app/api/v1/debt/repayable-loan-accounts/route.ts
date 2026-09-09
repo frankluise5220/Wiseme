@@ -32,6 +32,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
 import { formatDateUtc, parseDateInputToUtc, toNumber } from "@/lib/date-utils";
 import { resolveLoanRepaymentCoverage, resolveLoanRepaymentPeriodForDate } from "@/lib/loan-repayment-period";
+import { resolveLoanTypeValue } from "@/lib/loan-type";
 import { ACTIVE_DEBT_EPSILON } from "@/lib/server/debt-view-data";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 import { computeLoanPrincipalBalancesAsOf } from "@/lib/server/account-balance";
@@ -94,6 +95,8 @@ export async function GET(request: Request) {
         kind: true,
         investProductType: true,
         billingDay: true,
+        loanType: true,
+        isConsumerLoan: true,
       },
     });
     const balanceByAccountId = await computeLoanPrincipalBalancesAsOf(accounts, hidFilter, asOfDate, {
@@ -222,20 +225,28 @@ export async function GET(request: Request) {
       .filter((row) => row.balance < -ACTIVE_DEBT_EPSILON)
       .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
 
-    if (householdId) {
-      for (const row of data) {
+    // 消费贷才需要提前还款应计利息预览（房贷利息随分期计划）。
+    // 逐账户串行查询是打开还款窗口的主要耗时：先按账户类型筛出消费贷，
+    // 再对消费贷并发预览（预览内部每账户 3 个查询），其余账户跳过。
+    const accountById = new Map(accounts.map((account) => [account.id, account]));
+    const consumerLoanRows = data.filter((row) => {
+      const account = accountById.get(row.accountId);
+      return account ? resolveLoanTypeValue(account.loanType, account.isConsumerLoan) === "consumer" : false;
+    });
+    if (householdId && consumerLoanRows.length > 0) {
+      await Promise.all(consumerLoanRows.map(async (row) => {
         const preview = await computeLoanPrepayInterestPreview({
           householdId,
           accountId: row.accountId,
           asOfDate,
           excludeEntryId: excludeEntryId || null,
         });
-        if (!preview) continue;
+        if (!preview) return;
         row.prepayInterest = preview.interest;
         row.prepayInterestFromDate = preview.fromDate;
         row.prepayInterestDays = preview.days;
         row.prepayAnnualRate = preview.annualRate;
-      }
+      }));
     }
 
     return NextResponse.json({ ok: true, data });
