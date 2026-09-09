@@ -31,7 +31,7 @@ import { getInvestmentCategoryName } from "@/lib/investment-category";
 import { getCashFlowDate } from "@/lib/cash-flow-date";
 import { buildWealthCashFlowNote } from "@/lib/wealth-cash-note";
 import { linkExpenseToFixedAsset, syncLinkedFixedAssetTransactionFromCashEntry } from "@/lib/property/transactions";
-import { resolveSameCurrencyTransfer } from "@/lib/currency";
+import { normalizeCurrency, resolveSameCurrencyTransfer } from "@/lib/currency";
 import { resolveAdvanceTransfer } from "@/lib/advance-transfer";
 import { findRecentManualTransactionDuplicate } from "@/lib/server/transaction-dedupe";
 import { getServerT } from "@/lib/server/i18n";
@@ -516,6 +516,7 @@ export async function createTransaction(formData: FormData) {
       const categoryId = String(formData.get("categoryId") ?? "").trim();
       const fixedAssetAccountId = String(formData.get("fixedAssetAccountId") ?? "").trim();
       const fixedAssetAssetId = String(formData.get("fixedAssetAssetId") ?? "").trim();
+      const recordCurrency = String(formData.get("currency") ?? "").trim().toUpperCase() || null;
 
       await prisma.$transaction(async (tx) => {
         const [acc, cat] = await Promise.all([
@@ -534,7 +535,7 @@ export async function createTransaction(formData: FormData) {
 
         const statementMonth =
           (acc.kind === AccountKind.bank_credit || acc.kind === AccountKind.loan) && acc.billingDay
-            ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay)
+            ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay, acc.billingDayTxPeriod)
             : null;
         const duplicate = createInstallment
           ? null
@@ -557,6 +558,7 @@ export async function createTransaction(formData: FormData) {
             amount: amountRaw,
             type: TransactionType.expense,
             date,
+            currency: recordCurrency ?? normalizeCurrency(acc.currency),
             postedAt,
             note: note || null,
             statementMonth,
@@ -670,7 +672,7 @@ export async function createTransaction(formData: FormData) {
 
         const statementMonth =
           acc && (acc.kind === AccountKind.bank_credit || acc.kind === AccountKind.loan) && acc.billingDay
-            ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay)
+            ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay, acc.billingDayTxPeriod)
             : null;
         if (acc) {
           const duplicate = await findRecentManualTransactionDuplicate(tx, {
@@ -2457,7 +2459,7 @@ export async function updateTransactionFromDialog(formData: FormData) {
 
       const statementMonth =
         (acc.kind === AccountKind.bank_credit || acc.kind === AccountKind.loan) && acc.billingDay
-          ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay)
+          ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay, acc.billingDayTxPeriod)
           : null;
 
       const expenseOrIncomeData: Record<string, unknown> = {
@@ -2477,6 +2479,13 @@ export async function updateTransactionFromDialog(formData: FormData) {
             type: type === "income" ? TransactionType.income : TransactionType.expense,
             note: note || null,
       };
+      // The expense form always sends a currency field: a non-empty value sets
+      // the transaction currency; an empty value resets it to the account currency.
+      const formCurrencyRaw = formData.get("currency");
+      if (type === "expense" && formCurrencyRaw != null) {
+        const formCurrency = String(formCurrencyRaw).trim().toUpperCase();
+        expenseOrIncomeData.currency = formCurrency || normalizeCurrency(acc.currency);
+      }
       if (isFundTransaction && !keepFundDetail) {
         expenseOrIncomeData.fundSubtype = null;
         expenseOrIncomeData.fundUnits = null;

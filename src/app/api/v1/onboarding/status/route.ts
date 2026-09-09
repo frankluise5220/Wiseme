@@ -150,7 +150,7 @@ export async function GET() {
         creditAccountCount: accounts.filter((account) => account.kind === "bank_credit").length,
         investmentAccountCount: investmentAccountIds.length,
         insuranceAccountCount: accounts.filter((account) => account.kind === "insurance").length,
-        settlementAccountCount: accounts.filter((account) => account.kind === "loan").length,
+        settlementAccountCount: accounts.filter((account) => account.kind === "loan" || account.kind === "settlement").length,
         initializationEntryCount,
         transactionCount,
         fundHoldingCount,

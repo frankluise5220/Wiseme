@@ -64,6 +64,18 @@ export type CreditCardBillingDayRule = {
   billingDay: number;
 };
 
+/**
+ * Whether transactions dated exactly on the billing day belong to the current
+ * statement ("current", the cycle ends on the billing day) or the next one
+ * ("next", the cycle ends the day before the billing day). Per-credit-card
+ * setting (Account.billingDayTxPeriod), institution-synced.
+ */
+export type BillingDayTxPeriod = "current" | "next";
+
+export function normalizeBillingDayTxPeriod(value: unknown): BillingDayTxPeriod {
+  return String(value ?? "").trim() === "next" ? "next" : "current";
+}
+
 export type CreditBillCycleDefinition = {
   start: Date;
   end: Date;
@@ -266,11 +278,23 @@ function compareMonth(a: string, b: string) {
   return a.localeCompare(b);
 }
 
-function dueForCycleEnd(periodEnd: Date, billingDay: number, repaymentDay: number | null | undefined) {
+/**
+ * Cycle end date for a statement month. With txPeriod="next" the cycle closes
+ * one day before the billing day, so billing-day transactions fall into the
+ * next cycle. An effective day of 0 (billing day 1 + "next") means "day 0 of
+ * the month", i.e. the last day of the previous month.
+ */
+function cycleEndForMonth(year: number, monthIndex: number, billingDay: number, txPeriod: BillingDayTxPeriod) {
+  const effectiveDay = txPeriod === "next" ? billingDay - 1 : billingDay;
+  if (effectiveDay <= 0) return new Date(Date.UTC(year, monthIndex, 0));
+  return new Date(Date.UTC(year, monthIndex, clampDay(year, monthIndex, effectiveDay)));
+}
+
+function dueForCycle(year: number, monthIndex: number, billingDay: number, repaymentDay: number | null | undefined) {
   if (!repaymentDay || repaymentDay < 1) return null;
   const dueMonthOffset = repaymentDay <= billingDay ? 1 : 0;
-  const dueMonth = periodEnd.getUTCMonth() + dueMonthOffset;
-  const dueYear = periodEnd.getUTCFullYear() + Math.floor(dueMonth / 12);
+  const dueMonth = monthIndex + dueMonthOffset;
+  const dueYear = year + Math.floor(dueMonth / 12);
   const dueMonthNorm = ((dueMonth % 12) + 12) % 12;
   return new Date(Date.UTC(dueYear, dueMonthNorm, clampDay(dueYear, dueMonthNorm, repaymentDay)));
 }
@@ -311,15 +335,17 @@ export function cycleForStatementMonth(
   billingDay: number,
   repaymentDay: number | null | undefined,
   now: Date,
+  billingDayTxPeriod?: BillingDayTxPeriod | null,
 ): CreditBillCycleDefinition | null {
   const parsed = parseStatementMonth(statementMonth);
   if (!parsed) return null;
-  const end = new Date(Date.UTC(parsed.year, parsed.monthIndex, clampDay(parsed.year, parsed.monthIndex, billingDay)));
-  const previousEnd = new Date(Date.UTC(parsed.year, parsed.monthIndex - 1, clampDay(parsed.year, parsed.monthIndex - 1, billingDay)));
+  const txPeriod = normalizeBillingDayTxPeriod(billingDayTxPeriod);
+  const end = cycleEndForMonth(parsed.year, parsed.monthIndex, billingDay, txPeriod);
+  const previousEnd = cycleEndForMonth(parsed.year, parsed.monthIndex - 1, billingDay, txPeriod);
   const start = addDaysUtc(previousEnd, 1);
   const today = startOfDayUtc(now);
   const isCurrentCycle = today.getTime() >= start.getTime() && today.getTime() < addDaysUtc(end, 1).getTime();
-  const due = dueForCycleEnd(end, billingDay, repaymentDay);
+  const due = dueForCycle(parsed.year, parsed.monthIndex, billingDay, repaymentDay);
 
   return { start, end, due, today, isCurrentCycle, billingDay };
 }
@@ -330,9 +356,11 @@ export function buildCreditBillCycleDefinitionsFromBillingDayRules(params: {
   repaymentDay?: number | null;
   now: Date;
   fallbackBillingDay?: number | null;
+  billingDayTxPeriod?: BillingDayTxPeriod | null;
 }) {
   const sortedMonths = Array.from(new Set(params.months)).sort(compareMonth);
   const rules = normalizeBillingDayRules(params.billingDayRules, params.fallbackBillingDay);
+  const txPeriod = normalizeBillingDayTxPeriod(params.billingDayTxPeriod);
   const definitions = new Map<string, CreditBillCycleDefinition>();
   if (sortedMonths.length === 0 || rules.length === 0) return definitions;
 
@@ -351,12 +379,12 @@ export function buildCreditBillCycleDefinitionsFromBillingDayRules(params: {
     const monthIndex = monthIndexAbs % 12;
     const statementMonth = monthKey(year, monthIndex);
     let activeRule = rules[activeRuleIndex]!;
-    let end = new Date(Date.UTC(year, monthIndex, clampDay(year, monthIndex, activeRule.billingDay)));
+    let end = cycleEndForMonth(year, monthIndex, activeRule.billingDay, txPeriod);
 
     while (activeRuleIndex + 1 < rules.length) {
       const nextRule = rules[activeRuleIndex + 1]!;
       if (nextRule.effectiveDate.getTime() > end.getTime()) break;
-      const nextEnd = new Date(Date.UTC(year, monthIndex, clampDay(year, monthIndex, nextRule.billingDay)));
+      const nextEnd = cycleEndForMonth(year, monthIndex, nextRule.billingDay, txPeriod);
       if (nextEnd.getTime() < nextRule.effectiveDate.getTime()) break;
       activeRuleIndex += 1;
       activeRule = nextRule;
@@ -364,7 +392,7 @@ export function buildCreditBillCycleDefinitionsFromBillingDayRules(params: {
     }
 
     const start = previousEnd ? addDaysUtc(previousEnd, 1) : addDaysUtc(
-      new Date(Date.UTC(year, monthIndex - 1, clampDay(year, monthIndex - 1, activeRule.billingDay))),
+      cycleEndForMonth(year, monthIndex - 1, activeRule.billingDay, txPeriod),
       1,
     );
     previousEnd = end;
@@ -373,7 +401,7 @@ export function buildCreditBillCycleDefinitionsFromBillingDayRules(params: {
     definitions.set(statementMonth, {
       start,
       end,
-      due: dueForCycleEnd(end, activeRule.billingDay, params.repaymentDay),
+      due: dueForCycle(year, monthIndex, activeRule.billingDay, params.repaymentDay),
       today,
       isCurrentCycle,
       billingDay: activeRule.billingDay,
@@ -389,6 +417,7 @@ export function cycleForStatementMonthWithBillingDayRules(params: {
   repaymentDay?: number | null;
   now: Date;
   fallbackBillingDay?: number | null;
+  billingDayTxPeriod?: BillingDayTxPeriod | null;
 }) {
   return buildCreditBillCycleDefinitionsFromBillingDayRules({
     months: [params.statementMonth],
@@ -396,6 +425,7 @@ export function cycleForStatementMonthWithBillingDayRules(params: {
     repaymentDay: params.repaymentDay,
     now: params.now,
     fallbackBillingDay: params.fallbackBillingDay,
+    billingDayTxPeriod: params.billingDayTxPeriod,
   }).get(params.statementMonth) ?? null;
 }
 
@@ -404,6 +434,7 @@ export function statementMonthForDateWithBillingDayRules(params: {
   billingDayRules: readonly CreditCardBillingDayRule[];
   now: Date;
   fallbackBillingDay?: number | null;
+  billingDayTxPeriod?: BillingDayTxPeriod | null;
 }) {
   const date = startOfDayUtc(params.date);
   const months = [
@@ -415,6 +446,7 @@ export function statementMonthForDateWithBillingDayRules(params: {
     billingDayRules: params.billingDayRules,
     now: params.now,
     fallbackBillingDay: params.fallbackBillingDay,
+    billingDayTxPeriod: params.billingDayTxPeriod,
   });
   const timestamp = date.getTime();
   return Array.from(definitions.entries()).find(([, cycle]) => (
@@ -429,6 +461,7 @@ export function fillMissingCreditBillSummaries(params: {
   repaymentDay?: number | null;
   now: Date;
   cycleByMonth?: ReadonlyMap<string, CreditBillCycleDefinition>;
+  billingDayTxPeriod?: BillingDayTxPeriod | null;
 }) {
   const { months, summaryByMonth, billingDay, repaymentDay, now, cycleByMonth } = params;
 
@@ -437,7 +470,7 @@ export function fillMissingCreditBillSummaries(params: {
       const existing = summaryByMonth.get(month);
       if (existing) return existing;
 
-      const base = cycleByMonth?.get(month) ?? cycleForStatementMonth(month, billingDay, repaymentDay ?? null, now);
+      const base = cycleByMonth?.get(month) ?? cycleForStatementMonth(month, billingDay, repaymentDay ?? null, now, params.billingDayTxPeriod);
       if (!base) return null;
 
       return {
@@ -538,6 +571,7 @@ export function buildCreditCardCyclePersistRows(params: {
   overrideByMonth: Map<string, number>;
   now: Date;
   cycleByMonth?: ReadonlyMap<string, CreditBillCycleDefinition>;
+  billingDayTxPeriod?: BillingDayTxPeriod | null;
 }) {
   const {
     billingDay,
@@ -554,7 +588,7 @@ export function buildCreditCardCyclePersistRows(params: {
   const rows = months
     .map((row) => {
       const summary = summaryByMonth.get(row.month);
-      const cycle = summary ?? cycleByMonth?.get(row.month) ?? cycleForStatementMonth(row.month, billingDay, repaymentDay ?? null, now);
+      const cycle = summary ?? cycleByMonth?.get(row.month) ?? cycleForStatementMonth(row.month, billingDay, repaymentDay ?? null, now, params.billingDayTxPeriod);
       if (!cycle) return null;
 
       const effectiveBill = effectiveBillByMonth.get(row.month) ?? row.bill;

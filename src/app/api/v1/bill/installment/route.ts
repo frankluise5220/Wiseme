@@ -106,6 +106,7 @@ export async function POST(req: Request) {
         creditBillMode: true,
         billingDay: true,
         repaymentDay: true,
+        billingDayTxPeriod: true,
       },
     });
     if (!account) return NextResponse.json({ ok: false, code: "CREDIT_CARD_ACCOUNT_NOT_FOUND", error: "信用卡账户不存在" }, { status: 404 });
@@ -153,7 +154,7 @@ export async function POST(req: Request) {
     const originalAmount = Math.max(referenceUnpaidAmount, amount);
     const adjustmentDate = installmentDate;
 
-    const firstPaymentStatementMonth = toStatementMonth(firstPaymentDate, billingDay);
+    const firstPaymentStatementMonth = toStatementMonth(firstPaymentDate, billingDay, account.billingDayTxPeriod);
     const created = await prisma.$transaction(async (tx) => {
       const category = await ensureBankInstallmentExpenseCategory(tx, householdId);
       return createCreditCardInstallmentPlan(tx, {

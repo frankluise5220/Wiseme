@@ -4,8 +4,6 @@ import { formatDateUtc, startOfDayUtc, toNumber, toStatementMonth } from "@/lib/
 import { logger } from "@/lib/logger";
 import {
   calcLoanRunPartsWithRateAdjustments,
-  calcLoanScheduledAmountExact,
-  calcLoanScheduledAmountForPeriodStart,
   roundLoanMoney,
 } from "@/lib/loan-repayment";
 import {
@@ -17,6 +15,7 @@ import {
 } from "@/lib/scheduled-task";
 import { calcNextScheduledRunDate } from "@/lib/scheduled-task-date";
 import { recalcAndSaveAccountBalance } from "@/lib/server/account-balance";
+import { releaseMortgagedAssetsForSettledLoanAccounts } from "@/lib/server/collateral-mortgage";
 import { listLoanRateAdjustmentsByAccountIds, resolveLoanRateAdjustments } from "@/lib/server/loan-rate-adjustments";
 import { revalidateAfterInvestChange, revalidateAfterTxChange } from "@/lib/server/revalidate";
 import { resolveCategorySnapshot, resolveCreditCardRepaymentCategory } from "@/lib/default-categories";
@@ -89,9 +88,9 @@ function makeNextRunDate(plan: RegularInvestPlan, fromDate: Date) {
 
 async function loadTaskAccounts(plan: RegularInvestPlan) {
   const [targetAcc, cashAcc] = await Promise.all([
-    prisma.account.findUnique({ where: { id: plan.accountId }, select: { id: true, name: true, kind: true, billingDay: true } }),
+    prisma.account.findUnique({ where: { id: plan.accountId }, select: { id: true, name: true, kind: true, billingDay: true, billingDayTxPeriod: true } }),
     plan.cashAccountId
-      ? prisma.account.findUnique({ where: { id: plan.cashAccountId }, select: { id: true, name: true, kind: true, billingDay: true } })
+      ? prisma.account.findUnique({ where: { id: plan.cashAccountId }, select: { id: true, name: true, kind: true, billingDay: true, billingDayTxPeriod: true } })
       : Promise.resolve(null),
   ]);
   return { targetAcc, cashAcc };
@@ -102,9 +101,9 @@ function requiresCashAccount(task: ScheduledTaskPayload) {
   return task.type === "transfer" || task.type === "loan_repayment" || task.type === "insurance_premium";
 }
 
-function statementMonthForSingleAccount(date: Date, account: { kind: string; billingDay: number | null }) {
-  return (account.kind === AccountKind.bank_credit || account.kind === AccountKind.loan) && account.billingDay
-    ? toStatementMonth(date, account.billingDay)
+function statementMonthForSingleAccount(date: Date, account: { kind: string; billingDay: number | null; billingDayTxPeriod?: string | null }) {
+  return (account.kind === AccountKind.bank_credit || account.kind === AccountKind.loan || account.kind === AccountKind.settlement) && account.billingDay
+    ? toStatementMonth(date, account.billingDay, account.billingDayTxPeriod)
     : null;
 }
 
@@ -120,7 +119,7 @@ export async function executeNonFundScheduledTaskPlan(params: {
   const { householdId, plan } = params;
   const task = params.task ?? decodeScheduledTaskMemo(plan.memo);
   if (!isNonFundScheduledTask(task.type)) {
-    throw new Error("executeNonFundScheduledTaskPlan only accepts non-fund scheduled tasks");
+    throw new Error("该执行器仅支持非基金类计划任务");
   }
   const loanRateAdjustments = task.type === "loan_repayment"
     ? resolveLoanRateAdjustments({
@@ -129,12 +128,14 @@ export async function executeNonFundScheduledTaskPlan(params: {
           accountIds: [plan.accountId],
         })).get(plan.accountId),
         memoAdjustments: task.loanRateAdjustments,
+        mortgageLprDiscount: task.mortgageLprDiscount,
+        loanStartDate: task.firstRepaymentDate ?? formatDateUtc(plan.startDate),
       })
     : [];
 
   const { targetAcc, cashAcc } = await loadTaskAccounts(plan);
   if (!targetAcc) throw new Error("目标账户不存在");
-  if (requiresCashAccount(task) && !cashAcc) throw new Error("Scheduled task is missing a cash account");
+  if (requiresCashAccount(task) && !cashAcc) throw new Error("计划任务缺少资金账户");
 
   const amountNum = params.overrideAmount && params.overrideAmount > 0
     ? params.overrideAmount
@@ -275,29 +276,12 @@ export async function executeNonFundScheduledTaskPlan(params: {
       nextPrepaymentIndex += 1;
     }
   };
-  let rollingScheduledAmount = task.type === "loan_repayment"
-    ? calcLoanScheduledAmountForPeriodStart({
-        repaymentMethod: task.repaymentMethod,
-        baseAnnualRate: task.annualRate,
-        adjustments: loanRateAdjustments,
-        intervalMonths: task.repaymentIntervalMonths,
-        scheduledAmount: amountNum,
-        remainingPrincipal: rollingRemainingPrincipal,
-        remainingRuns: plan.totalRuns ? Math.max(1, plan.totalRuns - plan.executedRuns) : 1,
-        periodStartDate: formatDateUtc(rollingPreviousRunDate),
-      })
-    : amountNum;
-  let rollingScheduledAmountExact = task.type === "loan_repayment"
-    ? (
-        calcLoanScheduledAmountExact({
-          repaymentMethod: task.repaymentMethod,
-          annualRate: task.annualRate,
-          principal: rollingExactRemainingPrincipal,
-          totalRuns: plan.totalRuns ? Math.max(1, plan.totalRuns - plan.executedRuns) : 1,
-          intervalMonths: task.repaymentIntervalMonths,
-        }) ?? rollingScheduledAmount
-      )
-    : amountNum;
+  // 起始月供直接沿用计划金额：正常期由 preserveScheduledAmount 保持不变，
+  // 只有期内出现利率调整（年度重定价）才会重算一次。此前每期用
+  // annuity(剩余本金, 剩余期数) 自算月供，期数/余额账本一旦与真实摊还路径
+  // 偏离（提前还款缩期、重算复位等），月供就会跳变（2026-07 房贷 4086.83 事故）。
+  let rollingScheduledAmount = amountNum;
+  let rollingScheduledAmountExact = amountNum;
   const repaymentCategory = task.type === "transfer" && isCreditCardRepaymentTransfer({
     type: TransactionType.transfer,
     accountKind: cashAcc?.kind,
@@ -320,7 +304,7 @@ export async function executeNonFundScheduledTaskPlan(params: {
     for (const [runIndex, runDate] of datesToProcess.entries()) {
       if (task.type === "loan_repayment") {
         const loanPlanRole = getLoanScheduledPlanRole(task);
-        if (loanPlanRole !== "bill" && !cashAcc) throw new Error("Scheduled task is missing a cash account");
+        if (loanPlanRole !== "bill" && !cashAcc) throw new Error("计划任务缺少资金账户");
         applyPrepaymentsBefore(rollingPreviousRunDate);
         const remainingRunsForThisRun = plan.totalRuns
           ? Math.max(1, plan.totalRuns - plan.executedRuns - runIndex)
@@ -339,6 +323,7 @@ export async function executeNonFundScheduledTaskPlan(params: {
           intervalMonths: task.repaymentIntervalMonths,
           scheduledAmount: rollingScheduledAmount,
           scheduledAmountExact: rollingScheduledAmountExact,
+          preserveScheduledAmount: true,
           remainingPrincipal: rollingExactRemainingPrincipal,
           remainingRuns: remainingRunsForThisRun,
           previousRunDate: formatDateUtc(rollingPreviousRunDate),
@@ -363,7 +348,7 @@ export async function executeNonFundScheduledTaskPlan(params: {
         if (parts.principal > 0 || parts.interest > 0) {
           if (loanPlanRole !== "bill") {
             const debitCashAcc = cashAcc;
-            if (!debitCashAcc) throw new Error("Scheduled task is missing a cash account");
+            if (!debitCashAcc) throw new Error("计划任务缺少资金账户");
             // Auto-debit (mortgage-style): generate the repayment as a cash
             // transfer from the payment account to the loan account.
             await tx.txRecord.create({
@@ -383,6 +368,8 @@ export async function executeNonFundScheduledTaskPlan(params: {
                 source: "scheduled_task",
                 entryOrigin: ENTRY_ORIGIN_SCHEDULED_TASK,
                 regularInvestPlanId: plan.id,
+                installmentNo: plan.executedRuns + runIndex + 1,
+                installmentTotal: plan.totalRuns,
                 note: getTaskNote(task.type),
               },
             });
@@ -405,6 +392,8 @@ export async function executeNonFundScheduledTaskPlan(params: {
                 source: "loan_bill",
                 entryOrigin: ENTRY_ORIGIN_SCHEDULED_TASK,
                 regularInvestPlanId: plan.id,
+                installmentNo: plan.executedRuns + runIndex + 1,
+                installmentTotal: plan.totalRuns,
                 note: `消费贷账单：本期应还 ${roundLoanMoney(parts.principal + parts.interest).toFixed(2)}`,
               },
             });
@@ -479,12 +468,21 @@ export async function executeNonFundScheduledTaskPlan(params: {
     await tx.regularInvestPlan.update({
       where: { id: plan.id },
       data: {
+        // 重定价期内重算出的新月供要写回计划，否则下次调用又会从旧金额起步
+        ...(task.type === "loan_repayment" && rollingScheduledAmount !== amountNum
+          ? { amount: roundLoanMoney(rollingScheduledAmount) }
+          : {}),
         lastRunDate: finalLastRunDate,
         nextRunDate,
         executedRuns: finalExecutedRuns,
         status: nextStatus,
       },
     });
+
+    // 贷款扣款落库后，若贷款就此结清（最后一期扣完），同步解除抵押资产状态
+    if (task.type === "loan_repayment") {
+      await releaseMortgagedAssetsForSettledLoanAccounts(tx, { householdId, debtAccountIds: [targetAcc.id] });
+    }
   }, NON_FUND_SCHEDULED_TASK_TRANSACTION_OPTIONS);
 
   for (const accountId of affectedAccountIds) {

@@ -32,6 +32,7 @@ export function buildCreditCardInstallmentSchedule(params: {
   rate: number;
   billingDay: number;
   firstDate: Date;
+  billingDayTxPeriod?: string | null;
 }): CreditCardInstallmentScheduleRow[] {
   const principal = roundMoney(params.principal);
   const totalRuns = Math.floor(params.totalRuns);
@@ -74,7 +75,7 @@ export function buildCreditCardInstallmentSchedule(params: {
     allocatedPrincipal = roundMoney(allocatedPrincipal + principalPart);
     rows.push({
       installmentNo: index + 1,
-      statementMonth: toStatementMonth(date, params.billingDay),
+      statementMonth: toStatementMonth(date, params.billingDay, params.billingDayTxPeriod),
       date,
       principal: principalPart,
       interest,

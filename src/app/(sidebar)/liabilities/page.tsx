@@ -17,7 +17,7 @@ import { getServerT } from "@/lib/server/i18n";
 
 export const dynamic = "force-dynamic";
 
-const DEBT_KINDS: AccountKind[] = [AccountKind.bank_credit, AccountKind.loan];
+const DEBT_KINDS: AccountKind[] = [AccountKind.bank_credit, AccountKind.settlement, AccountKind.loan];
 
 function yuan(value: number) {
   return `¥${formatMoney(value)}`;
@@ -37,6 +37,7 @@ function directionOf(kind: AccountKind, balance: number): "payable" | "receivabl
 
 function kindLabel(kind: AccountKind, t: (key: string) => string) {
   if (kind === AccountKind.bank_credit) return t("account.kind.bank_credit");
+  if (kind === AccountKind.settlement) return t("account.kind.settlement");
   if (kind === AccountKind.loan) return t("account.kind.loan");
   return t("liabilities.debtAccount");
 }
@@ -117,6 +118,7 @@ export default async function LiabilitiesPage({
       investProductType: account.investProductType,
       Institution: account.Institution,
       AccountGroup: account.AccountGroup,
+      Counterparty: account.Counterparty,
     }, creditCardLabelTemplate, { fields: accountLabelFields });
     return {
       id: account.id,
@@ -179,7 +181,7 @@ export default async function LiabilitiesPage({
 
   const loanDisplayBalanceByAccountId = await computeAccountDisplayBalances(
     accounts
-      .filter((account) => account.kind === AccountKind.loan)
+      .filter((account) => account.kind === AccountKind.loan || account.kind === AccountKind.settlement)
       .map((account) => ({
         id: account.id,
         kind: account.kind,
@@ -249,7 +251,7 @@ export default async function LiabilitiesPage({
       institutionType: account.institutionType || null,
     }));
   const debtAccountOptions = allAccounts
-    .filter((account) => account.kind === AccountKind.loan && account.isActive)
+    .filter((account) => (account.kind === AccountKind.loan || account.kind === AccountKind.settlement) && account.isActive)
     .map((account) => {
       const display = buildAccountDisplayOption({
         id: account.id,
@@ -259,6 +261,7 @@ export default async function LiabilitiesPage({
         groupId: account.groupId,
         Institution: account.Institution,
         AccountGroup: account.AccountGroup,
+        Counterparty: account.Counterparty,
       }, creditCardLabelTemplate, { fields: accountLabelFields });
       return {
         id: account.id,
@@ -272,7 +275,7 @@ export default async function LiabilitiesPage({
       };
     });
   const counterpartyGuideRows = counterparties.map((counterparty) => {
-    const relatedAccounts = allAccounts.filter((account) => account.kind === AccountKind.loan && account.counterpartyId === counterparty.id);
+    const relatedAccounts = allAccounts.filter((account) => (account.kind === AccountKind.loan || account.kind === AccountKind.settlement) && account.counterpartyId === counterparty.id);
     const totals = relatedAccounts.reduce((acc, account) => {
       const balance = loanDisplayBalanceByAccountId.get(account.id) ?? toNumber(account.balance);
       if (balance >= 0) acc.receivable += Math.abs(balance);
@@ -328,6 +331,7 @@ export default async function LiabilitiesPage({
       groupId: account.groupId,
       Institution: account.Institution,
       AccountGroup: account.AccountGroup,
+      Counterparty: account.Counterparty,
     }, creditCardLabelTemplate, { fields: accountLabelFields });
     const institutionName = display.institutionName || t("liabilities.noCounterparty");
     const debtPersonKey = institutionName

@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
           }
 
           const date = item.date ? new Date(item.date) : new Date();
-          const isCredit = acc.kind === AccountKind.bank_credit || acc.kind === AccountKind.loan;
+          const isCredit = acc.kind === AccountKind.bank_credit || acc.kind === AccountKind.loan || acc.kind === AccountKind.settlement;
           const targetBalance = isCredit ? -Math.abs(balance) : balance;
 
           // Check whether an initialization record already exists

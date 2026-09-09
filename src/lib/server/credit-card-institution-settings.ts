@@ -1,4 +1,4 @@
-import { AccountKind, type CreditBillMode, type Prisma } from "@prisma/client";
+import { AccountKind, type CreditBillMode, type CreditBillingDayTxPeriod, type Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/db/prisma";
 
@@ -12,12 +12,17 @@ export type CreditCardInstitutionDefaults = {
   repaymentDay: number | null;
   creditLimit: string | null;
   creditBillMode: CreditBillMode;
+  billingDayTxPeriod: CreditBillingDayTxPeriod;
 };
 
 export function normalizeCreditBillMode(value: unknown): CreditBillMode {
   return String(value ?? "").trim() === CREDIT_BILL_MODE_CONSOLIDATED
     ? CREDIT_BILL_MODE_CONSOLIDATED
     : CREDIT_BILL_MODE_SEPARATE;
+}
+
+export function normalizeCreditBillingDayTxPeriod(value: unknown): CreditBillingDayTxPeriod {
+  return String(value ?? "").trim() === "next" ? "next" : "current";
 }
 
 export async function getCreditCardInstitutionDefaults(
@@ -40,6 +45,7 @@ export async function getCreditCardInstitutionDefaults(
       repaymentDay: true,
       creditLimit: true,
       creditBillMode: true,
+      billingDayTxPeriod: true,
       updatedAt: true,
     },
     orderBy: { updatedAt: "desc" },
@@ -55,6 +61,7 @@ export async function getCreditCardInstitutionDefaults(
     repaymentDay: template.repaymentDay,
     creditLimit: template.creditLimit?.toString() ?? null,
     creditBillMode: template.creditBillMode,
+    billingDayTxPeriod: template.billingDayTxPeriod,
   };
 }
 
@@ -66,6 +73,7 @@ export async function syncCreditCardInstitutionSettings(
     billingDay: number | null;
     repaymentDay: number | null;
     creditBillMode: CreditBillMode;
+    billingDayTxPeriod?: CreditBillingDayTxPeriod;
   },
 ) {
   if (!input.institutionId) return;
@@ -79,6 +87,7 @@ export async function syncCreditCardInstitutionSettings(
       billingDay: input.billingDay,
       repaymentDay: input.repaymentDay,
       creditBillMode: input.creditBillMode,
+      ...(input.billingDayTxPeriod ? { billingDayTxPeriod: input.billingDayTxPeriod } : {}),
     },
   });
 }

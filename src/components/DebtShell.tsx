@@ -1,10 +1,10 @@
 "use client";
 
-import { ChevronDown, ChevronRight, HandCoins, Percent, RefreshCw } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, HandCoins, Pencil, Percent, RefreshCw, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { AccountTypeQuickEdit, type AccountQuickEditValue } from "./AccountTypeQuickEdit";
+import { AccountTypeQuickEdit, type AccountQuickEditValue, type LoanQuickEditValue } from "./AccountTypeQuickEdit";
 import { AdvancedDataTable, type AdvancedDataTableColumn, type AdvancedDataTableSortState } from "./AdvancedDataTable";
 import { DateStepper } from "./DateStepper";
 import { DebitBalanceReconcileButton } from "./DebitBalanceReconcileButton";
@@ -27,10 +27,14 @@ import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import {
   buildMortgageLprRateAdjustments,
   calcMortgageLprSpreadFromDiscount,
+  getLatestFiveYearLpr,
   MORTGAGE_BASE_BENCHMARK_RATE,
   MORTGAGE_LPR_CONVERSION_BASE_RATE,
 } from "@/lib/loan-lpr";
+import { calcLoanScheduledAmount, roundLoanMoney } from "@/lib/loan-repayment";
+import { todayDateLocalYmd } from "@/lib/date-utils";
 import { formatLoanRecalculateSuccessMessage } from "@/lib/loan-repayment-recalculate-result";
+import { resolveLoanTypeValue, type LoanTypeValue } from "@/lib/loan-type";
 
 type DebtRow = {
   key: string;
@@ -44,6 +48,7 @@ type DebtRow = {
   itemType: string;
   repaymentMethod: string;
   repaymentCycle: string;
+  baseAnnualRate: number | null;
   annualRate: number | null;
   mortgageLprDiscount: number | null;
   loanStartDate: string;
@@ -66,6 +71,8 @@ type DebtRow = {
   depth?: number;
   isGroup?: boolean;
   isLoan?: boolean;
+  isConsumerLoan?: boolean | null;
+  loanType?: LoanTypeValue | null;
 };
 
 type DebtEntry = {
@@ -73,6 +80,8 @@ type DebtEntry = {
   date: string;
   typeLabel: string;
   relatedAccountLabel: string;
+  relatedAccountTitle?: string;
+  collateralLabel?: string | null;
   note: string;
   amount: number;
   principal: number;
@@ -90,7 +99,11 @@ type DebtEntry = {
     editEntryId: string;
     mode: "borrow_in" | "repay_out" | "prepay_out" | "lend_out" | "collect_in";
     defaultDebtAccountId: string;
+    defaultDebtAccountName?: string | null;
     defaultCashAccountId: string;
+    defaultAutoDebitCashAccountId?: string;
+    defaultFixedAssetAccountId?: string;
+    defaultFixedAssetAssetId?: string;
     defaultDate: string;
     defaultPrincipal: number;
     defaultInterest: number;
@@ -104,10 +117,12 @@ type DebtEntry = {
     defaultMortgageLprDiscount?: number | null;
     defaultRepaymentIntervalMonths?: number | null;
     defaultLoanTotalRuns?: number | null;
+    defaultFirstBillDate?: string | null;
     defaultFirstRepaymentDate?: string | null;
     defaultAutoDebit?: boolean | null;
     defaultAutoDebitFirstDate?: string | null;
     defaultLoanRateAdjustments?: Array<{ effectiveDate: string; annualRate: number }>;
+    defaultTagIds?: string[] | null;
     dialogType?: "debt" | "loan";
   };
   edit?: {
@@ -140,11 +155,39 @@ type RateAdjustmentDraft = {
   id: string;
   effectiveDate: string;
   annualRate: string;
+  originalEffectiveDate?: string | null;
+  originalAnnualRate?: number | null;
+  isEditing?: boolean;
+  isInitial?: boolean;
+};
+
+type LoanRebuildPreview = {
+  startRunDate: string;
+  lastRemainingDate: string | null;
+  updateCount: number;
+  extrasCount: number;
+  preservedAmount: number | null;
+  lastRemainingPayment?: number | null;
+  effectiveAnnualRate: number | null;
+  balanceStart: number;
+  remainingRuns: number | null;
+  totalRuns: number | null;
+  recalcAtStart: boolean;
+  prepaymentInStartPeriod: boolean;
+  repaymentMethod: string | null;
+  intervalMonths: number | null;
+  previewPayment: number;
+  previewPrincipal: number;
+  previewInterest: number;
 };
 
 type AccountOption = { id: string; label: string; title?: string | null; hoverTitle?: string | null };
 
 const EMPTY_ACCOUNT_EDIT_DATA: AccountQuickEditValue[] = [];
+
+function accountLoanType(account: Pick<AccountQuickEditValue, "loanType" | "isConsumerLoan"> | null | undefined): LoanTypeValue {
+  return resolveLoanTypeValue(account?.loanType, account?.isConsumerLoan);
+}
 
 function amountClass(value: number, isRedUp: boolean) {
   return pnlClassFromRedUp(value, isRedUp, "strongMuted");
@@ -155,10 +198,42 @@ function formatRate(value: number | null, language: string) {
   return value.toLocaleString(language, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 }
 
+// 由执行利率反推折扣：LPR 时代 = (利率 − LPR + 4.8) / 4.9；早期基准利率时代 = 利率 / 4.9
+function inferRowLprDiscount(effectiveDate: string, annualRate: number): number | null {
+  const rate = Number(annualRate);
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  const lpr = getLatestFiveYearLpr(effectiveDate);
+  const discount = lpr
+    ? (rate - lpr.fiveYearRate + MORTGAGE_LPR_CONVERSION_BASE_RATE) / MORTGAGE_BASE_BENCHMARK_RATE
+    : rate / MORTGAGE_BASE_BENCHMARK_RATE;
+  return Number.isFinite(discount) && discount > 0 && discount <= 2
+    ? Math.round(discount * 10000) / 10000
+    : null;
+}
+
+function formatDiscountValue(discount: number) {
+  return discount.toFixed(4).replace(/\.?0+$/, "");
+}
+
 const SETTLED_DEBT_EPSILON = 0.005;
 
 function isSettledDebtRow(row: DebtRow) {
   return Math.abs(row.net) < SETTLED_DEBT_EPSILON && row.payable + row.receivable < SETTLED_DEBT_EPSILON;
+}
+
+function shouldShowUnpaidScheduleRow(row: RepaymentScheduleRow, todayKey: string) {
+  if (row.status === "paid") return false;
+  if (row.date < todayKey) return false;
+  return true;
+}
+
+// 条数口径：只统计真实还款期数；利率调整行、提前还款事件行不计数。
+function isScheduleRepaymentPeriodRow(row: RepaymentScheduleRow) {
+  return row.rowType === "payment" && row.eventType === "repayment";
+}
+
+function repaymentScheduleRowKey(row: RepaymentScheduleRow) {
+  return `${row.status ?? ""}:${row.eventType ?? ""}:${row.rowType}:${row.period}:${row.date}:${row.annualRate ?? ""}`;
 }
 
 function makeDraftId() {
@@ -169,6 +244,82 @@ function makeDraftId() {
 
 function formatRateDraftValue(value: number) {
   return value.toFixed(3).replace(/\.?0+$/, "");
+}
+
+function rateDraftAnnualRateNumber(value: string) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const rate = Number(text);
+  return Number.isFinite(rate) ? rate : null;
+}
+
+function makeRateDraft(
+  effectiveDate: string,
+  annualRate: number,
+  options: Pick<RateAdjustmentDraft, "isEditing" | "isInitial"> = {},
+): RateAdjustmentDraft {
+  return {
+    id: makeDraftId(),
+    effectiveDate,
+    annualRate: formatRateDraftValue(annualRate),
+    originalEffectiveDate: effectiveDate,
+    originalAnnualRate: annualRate,
+    ...options,
+  };
+}
+
+// 房贷/消费贷共用的利率调整草稿构建：
+// - 空表 + 房贷折扣：先按折扣生成 LPR 历史（含放款日行）；
+// - 空表：起始利率行 = 放款日（或今天）+ 初始利率；
+// - 已有行：按日期升序原样映射，首行恒视为起始利率行（isInitial：日期锁定、不可删）。
+function buildLoanRateDrafts(row: DebtRow, options: { todayKey: string; generateFromLprDiscount: boolean }) {
+  if (
+    options.generateFromLprDiscount &&
+    row.loanRateAdjustments.length === 0 &&
+    row.mortgageLprDiscount != null && row.mortgageLprDiscount > 0
+  ) {
+    const generated = buildMortgageLprRateAdjustments({
+      discount: row.mortgageLprDiscount,
+      throughDate: options.todayKey,
+      fromDate: row.loanStartDate || undefined,
+    }).map((item) => makeRateDraft(item.effectiveDate, item.annualRate, {
+      // 首行 = 放款日当天的执行利率，与消费贷起始行一致：日期锁定、不可删除。
+      isInitial: !!row.loanStartDate && item.effectiveDate === row.loanStartDate,
+    }));
+    if (generated.length > 0) return generated;
+  }
+
+  const loanDate = row.loanStartDate || row.loanRateAdjustments[0]?.effectiveDate || options.todayKey;
+  if (row.loanRateAdjustments.length === 0) {
+    return [makeRateDraft(loanDate, row.baseAnnualRate ?? row.annualRate ?? 0, { isInitial: true })];
+  }
+  const drafts = row.loanRateAdjustments.map((item) => makeRateDraft(item.effectiveDate, item.annualRate));
+  if (drafts.length > 0) drafts[0] = { ...drafts[0], isInitial: true };
+  return drafts;
+}
+
+function getSimpleLoanRateChangedStartDate(originalDrafts: RateAdjustmentDraft[], currentDrafts: RateAdjustmentDraft[]) {
+  const normalize = (items: RateAdjustmentDraft[]) => items
+    .map((item) => ({
+      effectiveDate: item.effectiveDate.trim(),
+      annualRate: rateDraftAnnualRateNumber(item.annualRate),
+    }))
+    .filter((item): item is { effectiveDate: string; annualRate: number } => (
+      /^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) && item.annualRate != null
+    ));
+  const originalByDate = new Map(normalize(originalDrafts).map((item) => [item.effectiveDate, item.annualRate] as const));
+  const currentByDate = new Map(normalize(currentDrafts).map((item) => [item.effectiveDate, item.annualRate] as const));
+  const changedDates: string[] = [];
+
+  for (const [date, originalRate] of originalByDate) {
+    const currentRate = currentByDate.get(date);
+    if (currentRate == null || Math.abs(currentRate - originalRate) >= 0.0005) changedDates.push(date);
+  }
+  for (const date of currentByDate.keys()) {
+    if (!originalByDate.has(date)) changedDates.push(date);
+  }
+
+  return changedDates.sort((a, b) => a.localeCompare(b))[0] ?? null;
 }
 
 function hasActiveDebtFilters(filters: Partial<Record<string, string[]>>) {
@@ -288,6 +439,8 @@ export function DebtShell({
   accountOptions,
   categoryOptions,
   accountEditData = EMPTY_ACCOUNT_EDIT_DATA,
+  selectedLoanType = null,
+  loanEditAction,
 }: {
   rows: DebtRow[];
   selectedKey: string;
@@ -300,25 +453,32 @@ export function DebtShell({
   accountOptions: AccountOption[];
   categoryOptions: BasicDetailBatchCategoryOption[];
   accountEditData?: AccountQuickEditValue[];
+  selectedLoanType?: LoanTypeValue | null;
+  loanEditAction: (formData: FormData) => Promise<
+    | { ok: true; warning?: string; recalculateAfterSave?: { accountId: string; startDate: string } | null }
+    | { ok: false; error: string }
+  >;
 }) {
   const router = useRouter();
   const { t, language } = useI18n();
+  const todayKey = todayDateLocalYmd();
   const [detailTab, setDetailTab] = useState<"entries" | "schedule">("entries");
   const [showPaidScheduleRows, setShowPaidScheduleRows] = useState(false);
   const [rateCardOpen, setRateCardOpen] = useState(false);
   const [rateSaving, setRateSaving] = useState(false);
   const [rateDrafts, setRateDrafts] = useState<RateAdjustmentDraft[]>([]);
-  const [lprDiscount, setLprDiscount] = useState("");
-  const [recalcOpen, setRecalcOpen] = useState(false);
-  const [recalcStartDate, setRecalcStartDate] = useState("");
-  const [recalcSaving, setRecalcSaving] = useState(false);
+  const [rebuildDialog, setRebuildDialog] = useState<{ effectiveDate: string; preview: LoanRebuildPreview } | null>(null);
+  const [rebuildRemainingRuns, setRebuildRemainingRuns] = useState("");
+  const [rebuildBusy, setRebuildBusy] = useState(false);
   const [showSettledRows, setShowSettledRows] = useState(() => {
     const selected = rows.find((row) => row.key === selectedKey);
     return selected ? isSettledDebtRow(selected) : false;
   });
   const [expandedDebtRowKeys, setExpandedDebtRowKeys] = useState<Set<string>>(() => new Set());
   const [editingDebtAccount, setEditingDebtAccount] = useState<AccountQuickEditValue | null>(null);
+  const [editingLoanDetails, setEditingLoanDetails] = useState<LoanQuickEditValue | null>(null);
   const [accountEditOpenSignal, setAccountEditOpenSignal] = useState(0);
+  const [pendingLoanEditAccountId, setPendingLoanEditAccountId] = useState<string | null>(null);
   const rowClickTimerRef = useRef<number | null>(null);
   const baseRows = useMemo(
     () => showSettledRows ? rows : rows.filter((row) => !isSettledDebtRow(row)),
@@ -330,21 +490,44 @@ export function DebtShell({
     () => new Map(safeAccountEditData.map((account) => [account.id, account])),
     [safeAccountEditData],
   );
+  // Loan-only views switch table wording to loan-specific columns and hide item names.
+  const displayedNonGroupRows = useMemo(() => baseRows.filter((row) => !row.isGroup), [baseRows]);
+  const isLoanTableView = useMemo(
+    () => !!selectedLoanType || (displayedNonGroupRows.length > 0 && displayedNonGroupRows.every((row) => row.isLoan === true)),
+    [displayedNonGroupRows, selectedLoanType],
+  );
+  const loanViewType = useMemo<LoanTypeValue | null>(() => {
+    if (selectedLoanType) return selectedLoanType;
+    if (!isLoanTableView || displayedNonGroupRows.length === 0) return null;
+    const firstLoanRow = displayedNonGroupRows[0];
+    if (firstLoanRow.loanType) return firstLoanRow.loanType;
+    const account = accountEditDataById.get(firstLoanRow.accountId);
+    return accountLoanType(account);
+  }, [accountEditDataById, displayedNonGroupRows, isLoanTableView, selectedLoanType]);
+  const loanViewTypeLabel = loanViewType
+    ? t(`loan.type.${loanViewType}`)
+    : "";
   const selectedRow =
     baseRows.find((row) => row.key === selectedKey) ??
     rows.find((row) => row.key === selectedKey) ??
     null;
-  const remainingTotalLabel = selectedRow?.objectType === "银行贷款"
+  const remainingTotalLabel = selectedLoanType || selectedRow?.objectType === "银行贷款"
     ? t("debtShell.remainingTotal.payable")
     : selectedRow?.objectType === "银行应收"
       ? t("debtShell.remainingTotal.receivable")
       : t("debtShell.remainingTotal.both");
   const settledCount = rows.filter((row) => !row.parentKey && isSettledDebtRow(row)).length;
+  const canReconcileSelectedRow = !!selectedRow && !selectedRow.isGroup && !!selectedRow.accountId;
   const isSelectedBankLoan = !!selectedRow && !selectedRow.isGroup && selectedRow.isLoan === true;
   const canRepaySelectedRow = !!selectedRow && !selectedRow.isGroup && selectedRow.net < -SETTLED_DEBT_EPSILON;
-  const canReconcileSelectedRow = !!selectedRow && !selectedRow.isGroup && !!selectedRow.accountId;
-  const canAdjustRateSelectedRow = isSelectedBankLoan && canRepaySelectedRow && !!selectedRow?.accountId;
-  const canRecalculateSelectedRow = isSelectedBankLoan && canRepaySelectedRow && !!selectedRow?.accountId && !!selectedRow?.remainingRuns;
+  const selectedRowLoanType = selectedRow?.loanType ?? null;
+  const isSelectedConsumerLoan = selectedRowLoanType === "consumer" || selectedRow?.isConsumerLoan === true;
+  const isSelectedMortgageLoan = isSelectedBankLoan && !isSelectedConsumerLoan && (
+    selectedRowLoanType == null || selectedRowLoanType === "home"
+  );
+  const canAdjustRateSelectedRow = isSelectedBankLoan && canRepaySelectedRow && !!selectedRow?.accountId && (
+    isSelectedMortgageLoan || isSelectedConsumerLoan
+  );
   const filterDebtRows = useCallback((
     tableRows: DebtRow[],
     filters: Partial<Record<string, string[]>>,
@@ -364,9 +547,33 @@ export function DebtShell({
     });
   }, []);
   const visibleRepaymentScheduleRows = useMemo(
-    () => showPaidScheduleRows ? repaymentScheduleRows : repaymentScheduleRows.filter((row) => row.status !== "paid"),
-    [repaymentScheduleRows, showPaidScheduleRows],
+    () => showPaidScheduleRows
+      ? repaymentScheduleRows
+      : repaymentScheduleRows.filter((row) => shouldShowUnpaidScheduleRow(row, todayKey)),
+    [repaymentScheduleRows, showPaidScheduleRows, todayKey],
   );
+  const schedulePeriodCounts = useMemo(() => {
+    let visible = 0;
+    for (const row of visibleRepaymentScheduleRows) {
+      if (isScheduleRepaymentPeriodRow(row)) visible += 1;
+    }
+    let total = 0;
+    for (const row of repaymentScheduleRows) {
+      if (isScheduleRepaymentPeriodRow(row)) total += 1;
+    }
+    return { visible, total };
+  }, [repaymentScheduleRows, visibleRepaymentScheduleRows]);
+  // 勾选“显示已还”后，把视口定位到当前月份的还款记录上。
+  const repaymentScrollAnchorKey = useMemo(() => {
+    if (!showPaidScheduleRows) return null;
+    const periodRows = visibleRepaymentScheduleRows.filter(isScheduleRepaymentPeriodRow);
+    if (periodRows.length === 0) return null;
+    const monthPrefix = todayKey.slice(0, 7);
+    const anchorRow = periodRows.find((row) => row.date.startsWith(monthPrefix))
+      ?? periodRows.find((row) => row.date >= todayKey)
+      ?? periodRows[periodRows.length - 1];
+    return repaymentScheduleRowKey(anchorRow);
+  }, [showPaidScheduleRows, todayKey, visibleRepaymentScheduleRows]);
   const debtRowSummary = useMemo(() => {
     const summaryRows = baseRows.filter((row) => !row.parentKey);
     const net = summaryRows.reduce((sum, row) => sum + row.net, 0);
@@ -411,6 +618,36 @@ export function DebtShell({
     }
   }, [detailTab, isSelectedBankLoan]);
 
+  const loanSetupEditForAccount = useCallback((accountId: string): LoanQuickEditValue | null => {
+    const entry = entries
+      .filter((item) => (
+        item.debtEdit?.dialogType === "loan" &&
+        item.debtEdit.mode === "borrow_in" &&
+        item.debtEdit.defaultDebtAccountId === accountId
+      ))
+      .sort((left, right) => left.date.localeCompare(right.date))[0];
+    if (!entry?.debtEdit) return null;
+    const account = accountEditDataById.get(accountId);
+    return {
+      ...entry.debtEdit,
+      mode: "borrow_in",
+      dialogType: "loan",
+      loanType: accountLoanType(account),
+    };
+  }, [accountEditDataById, entries]);
+
+  useEffect(() => {
+    if (!pendingLoanEditAccountId) return;
+    const detail = loanSetupEditForAccount(pendingLoanEditAccountId);
+    if (!detail) return;
+    const account = accountEditDataById.get(pendingLoanEditAccountId);
+    if (!account) return;
+    setEditingDebtAccount(account);
+    setEditingLoanDetails(detail);
+    setAccountEditOpenSignal((value) => value + 1);
+    setPendingLoanEditAccountId(null);
+  }, [accountEditDataById, loanSetupEditForAccount, pendingLoanEditAccountId]);
+
   function openDebtRow(row: DebtRow) {
     if (rowClickTimerRef.current) {
       window.clearTimeout(rowClickTimerRef.current);
@@ -424,7 +661,7 @@ export function DebtShell({
     }, 360);
   }
 
-  function openDebtAccountProperties(row: DebtRow) {
+  const openDebtAccountProperties = useCallback((row: DebtRow) => {
     if (rowClickTimerRef.current) {
       window.clearTimeout(rowClickTimerRef.current);
       rowClickTimerRef.current = null;
@@ -433,50 +670,99 @@ export function DebtShell({
       toggleDebtRowExpanded(row.key);
       return;
     }
+    if (row.isLoan && row.accountId) {
+      const account = accountEditDataById.get(row.accountId);
+      if (!account) return;
+      const detail = loanSetupEditForAccount(row.accountId);
+      if (detail) {
+        setEditingDebtAccount(account);
+        setEditingLoanDetails(detail);
+        setAccountEditOpenSignal((value) => value + 1);
+        return;
+      }
+      setPendingLoanEditAccountId(row.accountId);
+      const params = new URLSearchParams(window.location.search);
+      params.set("view", "debt");
+      params.set("debtPerson", row.key);
+      router.push(`/?${params.toString()}`, { scroll: false });
+      return;
+    }
     const account = row.accountId ? accountEditDataById.get(row.accountId) : null;
     if (!account) return;
     setEditingDebtAccount(account);
+    setEditingLoanDetails(null);
     setAccountEditOpenSignal((value) => value + 1);
-  }
+  }, [accountEditDataById, loanSetupEditForAccount, router, toggleDebtRowExpanded]);
 
   function openRateAdjustment(row: DebtRow) {
     if (!row.accountId) return;
-    const generatedDrafts = row.loanRateAdjustments.length === 0 && row.mortgageLprDiscount != null && row.mortgageLprDiscount > 0
-      ? buildMortgageLprRateAdjustments({
-          discount: row.mortgageLprDiscount,
-          throughDate: new Date().toISOString().slice(0, 10),
-          fromDate: row.loanStartDate || undefined,
-          includeUnchanged: true,
-          basis: "lpr_quote",
-        }).map((item) => ({
-          id: makeDraftId(),
-          effectiveDate: item.effectiveDate,
-          annualRate: formatRateDraftValue(item.annualRate),
-        }))
-      : [];
-    const drafts = row.loanRateAdjustments.length > 0
-      ? row.loanRateAdjustments.map((item) => ({
-          id: makeDraftId(),
-          effectiveDate: item.effectiveDate,
-          annualRate: String(item.annualRate),
-        }))
-      : generatedDrafts.length > 0
-        ? generatedDrafts
-      : [{
-          id: makeDraftId(),
-          effectiveDate: new Date().toISOString().slice(0, 10),
-          annualRate: row.annualRate == null ? "" : String(row.annualRate),
-        }];
-    setRateDrafts(drafts);
-    setLprDiscount(row.mortgageLprDiscount == null ? "" : String(row.mortgageLprDiscount));
+    const rowLoanType = row.loanType ?? null;
+    const isConsumerLoanRow = rowLoanType === "consumer" || row.isConsumerLoan === true;
+    const isHomeLoanRow = row.isConsumerLoan !== true && (rowLoanType == null || rowLoanType === "home");
+    if (!isHomeLoanRow && !isConsumerLoanRow) return;
+    setRateDrafts(buildLoanRateDrafts(row, { todayKey, generateFromLprDiscount: isHomeLoanRow }));
     setRateCardOpen(true);
   }
 
   function addRateDraft() {
     setRateDrafts((items) => [
       ...items,
-      { id: makeDraftId(), effectiveDate: new Date().toISOString().slice(0, 10), annualRate: "" },
+      {
+        id: makeDraftId(),
+        effectiveDate: todayKey,
+        annualRate: "",
+        originalEffectiveDate: null,
+        originalAnnualRate: null,
+        isEditing: true,
+      },
     ]);
+  }
+
+  // 查询最新 5 年期 LPR：比表格里最新一行更新才新增一行，执行利率按折扣推算
+  // （LPR + 加点，加点 = 4.9×折扣 − 4.8；折扣优先取借款备注里的值，否则由最后一行反推）。
+  async function queryLatestLpr() {
+    if (rateSaving) return;
+    setRateSaving(true);
+    try {
+      const response = await fetch("/api/v1/loan-lpr/latest", { cache: "no-store" });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.ok || !data.data?.date || !Number.isFinite(Number(data.data.rate))) {
+        window.alert(data?.error || t("debtShell.rateAdjust.lprQueryFailed"));
+        return;
+      }
+      const quoteDate: string = data.data.date;
+      const lprRate: number = Number(data.data.rate);
+      const latestRowDate = rateDrafts.reduce((max, item) => (
+        item.effectiveDate.trim() > max ? item.effectiveDate.trim() : max
+      ), "");
+      if (quoteDate <= latestRowDate) {
+        window.alert(t("debtShell.rateAdjust.lprUpToDate", { date: quoteDate }));
+        return;
+      }
+      const lastFilled = [...rateDrafts].reverse().find((item) => (
+        /^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate.trim()) && rateDraftAnnualRateNumber(item.annualRate) != null
+      ));
+      const lastRowRate = lastFilled ? rateDraftAnnualRateNumber(lastFilled.annualRate) : null;
+      const discount = selectedRow?.mortgageLprDiscount != null && selectedRow.mortgageLprDiscount > 0
+        ? selectedRow.mortgageLprDiscount
+        : (lastFilled && lastRowRate != null ? inferRowLprDiscount(lastFilled.effectiveDate, lastRowRate) : null);
+      const annualRate = discount != null && discount > 0
+        ? lprRate + calcMortgageLprSpreadFromDiscount(discount)
+        : lprRate;
+      setRateDrafts((prev) => [
+        ...prev,
+        {
+          id: makeDraftId(),
+          effectiveDate: quoteDate,
+          annualRate: formatRateDraftValue(Math.round(annualRate * 1000) / 1000),
+          originalEffectiveDate: null,
+          originalAnnualRate: null,
+          isEditing: false,
+        },
+      ]);
+    } finally {
+      setRateSaving(false);
+    }
   }
 
   function updateRateDraft(id: string, patch: Partial<RateAdjustmentDraft>) {
@@ -487,43 +773,315 @@ export function DebtShell({
     setRateDrafts((items) => items.filter((item) => item.id !== id));
   }
 
-  function generateLprRateDrafts() {
-    const rawDiscount = lprDiscount.trim();
-    const discount = rawDiscount ? Number(rawDiscount) : 1;
-    if (!Number.isFinite(discount) || discount <= 0) {
-      window.alert(t("debtShell.alert.lprDiscountInvalid"));
+  function saveRateDraftRow(id: string) {
+    const target = rateDrafts.find((item) => item.id === id);
+    if (!target) return;
+    const effectiveDate = target.effectiveDate.trim();
+    const annualRate = rateDraftAnnualRateNumber(target.annualRate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate) || annualRate == null || annualRate < 0) {
+      window.alert(t("debtShell.alert.rateDraftInvalid"));
       return;
     }
-    if (!rawDiscount) setLprDiscount("1");
-    const adjustments = buildMortgageLprRateAdjustments({
-      discount,
-      throughDate: new Date().toISOString().slice(0, 10),
-      fromDate: selectedRow?.loanStartDate || undefined,
-      includeUnchanged: true,
-      basis: "lpr_quote",
+    const duplicate = rateDrafts.some((item) => (
+      item.id !== id &&
+      (item.effectiveDate.trim() || item.annualRate.trim()) &&
+      item.effectiveDate.trim() === effectiveDate
+    ));
+    if (duplicate) {
+      window.alert(t("debtShell.alert.rateDraftDuplicateDate", { date: effectiveDate }));
+      return;
+    }
+    updateRateDraft(id, {
+      effectiveDate,
+      annualRate: formatRateDraftValue(annualRate),
+      isEditing: false,
     });
-    if (adjustments.length === 0) {
-      window.alert(t("debtShell.alert.lprNoAdjustments"));
+  }
+
+  // 房贷/消费贷共用的利率调整草稿表：房贷多一列折扣，其余交互完全一致。
+  function renderRateDraftsTable(options: { showDiscountColumn: boolean }) {
+    const columnCount = options.showDiscountColumn ? 4 : 3;
+    return (
+      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <div className="max-h-[260px] overflow-y-auto">
+          <table className="min-w-full table-fixed text-sm">
+            <thead className="sticky top-0 bg-slate-50 text-xs font-medium text-slate-500 shadow-[0_1px_0_0_#e2e8f0]">
+              <tr>
+                <th className={`${options.showDiscountColumn ? "w-[28%]" : "w-[38%]"} px-3 py-2 text-left`}>{t("debtShell.rateAdjust.effectiveDate")}</th>
+                <th className={`${options.showDiscountColumn ? "w-[22%]" : "w-[32%]"} px-3 py-2 text-right`}>{t("debtShell.rateAdjust.annualRateLabel")}</th>
+                {options.showDiscountColumn ? (
+                  <th className="w-[16%] px-3 py-2 text-right">{t("debtShell.rateAdjust.discountLabel")}</th>
+                ) : null}
+                <th className={`${options.showDiscountColumn ? "w-[28%]" : "w-[30%]"} px-3 py-2 text-right`}>{t("detail.column.actions")}</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rateDrafts.length === 0 ? (
+                <tr>
+                  <td colSpan={columnCount} className="px-3 py-8 text-center text-sm text-slate-500">
+                    {t("debtShell.rateAdjust.empty")}
+                  </td>
+                </tr>
+              ) : rateDrafts.map((item) => {
+                const draftRate = rateDraftAnnualRateNumber(item.annualRate);
+                // 首行（放款日）利率 = 执行利率×折扣，不能由 LPR+加点反推，
+                // 折扣列直接用贷款的 LPR 折扣；无折扣时退回按行反推。
+                const draftDiscount = !options.showDiscountColumn || draftRate == null
+                  ? null
+                  : (item.isInitial && selectedRow?.mortgageLprDiscount != null
+                      ? selectedRow.mortgageLprDiscount
+                      : inferRowLprDiscount(item.effectiveDate, draftRate));
+                return (
+                  <tr key={item.id} className={item.isEditing ? "bg-amber-50/50" : item.isInitial ? "bg-blue-50/50" : "bg-white"}>
+                    <td className="px-3 py-2 align-middle">
+                      {item.isEditing && !item.isInitial ? (
+                        <DateStepper
+                          value={item.effectiveDate}
+                          onChange={(value) => updateRateDraft(item.id, { effectiveDate: value })}
+                        />
+                      ) : (
+                        <span className="tabular-nums text-slate-700">{item.effectiveDate}</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right align-middle">
+                      {item.isEditing ? (
+                        <input
+                          value={item.annualRate}
+                          onChange={(event) => updateRateDraft(item.id, { annualRate: event.target.value })}
+                          inputMode="decimal"
+                          placeholder={t("debtShell.rateAdjust.annualRatePlaceholder")}
+                          className="form-input text-right"
+                        />
+                      ) : (
+                        <span className="tabular-nums text-slate-700">{formatRate(draftRate, language)}</span>
+                      )}
+                    </td>
+                    {options.showDiscountColumn ? (
+                      <td className="px-3 py-2 text-right align-middle text-xs tabular-nums text-slate-600" title={t("debtShell.rateAdjust.discountTitle")}>
+                        {draftDiscount != null ? formatDiscountValue(draftDiscount) : "-"}
+                      </td>
+                    ) : null}
+                    <td className="px-3 py-2 text-right align-middle">
+                      <div className="inline-flex items-center gap-1.5">
+                        {item.isEditing ? (
+                          <button
+                            type="button"
+                            onClick={() => saveRateDraftRow(item.id)}
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-emerald-600 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={rateSaving}
+                            title={t("common.save")}
+                            aria-label={t("common.save")}
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => updateRateDraft(item.id, { isEditing: true })}
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 transition-colors hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={rateSaving}
+                            title={t("common.edit")}
+                            aria-label={t("common.edit")}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => { void openRebuildDialogForDate(item.effectiveDate); }}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={rebuildBusy || rateSaving}
+                          title={t("debtShell.rebuild.buttonTitle")}
+                          aria-label={t("debtShell.recalc")}
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteRateDraft(item.id)}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-rose-600 transition-colors hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={rateSaving || item.isInitial}
+                          title={item.isInitial ? t("debtShell.rateAdjust.initialDeleteDisabled") : t("common.delete")}
+                          aria-label={t("common.delete")}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  async function recalculateRepaymentPlanFromDate(accountId: string, startDate: string) {
+    const response = await fetch("/api/v1/loan-repayment/recalculate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountId, startDate }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.ok) {
+      window.alert(data?.error || t("debtShell.error.recalculateFailed"));
       return;
     }
-    setRateDrafts(adjustments.map((item) => ({
-      id: makeDraftId(),
-      effectiveDate: item.effectiveDate,
-      annualRate: formatRateDraftValue(item.annualRate),
-    })));
+    window.alert(formatLoanRecalculateSuccessMessage(data.data));
+    dispatchFinanceDataChanged({ reason: "loan-repayment-recalculate", accountIds: [accountId] });
   }
+
+  async function openRebuildDialogForDate(effectiveDate: string) {
+    const accountId = selectedRow?.accountId;
+    if (!accountId || rebuildBusy || rateSaving) return;
+    setRebuildBusy(true);
+    try {
+      const response = await fetch("/api/v1/loan-repayment/rebuild", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accountId,
+          fromDate: effectiveDate,
+          dryRun: true,
+          ...(rebuildRemainingRuns.trim() ? { remainingRuns: Number.parseInt(rebuildRemainingRuns.trim(), 10) } : {}),
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.ok) {
+        window.alert(data?.error || t("debtShell.error.rebuildFailed"));
+        return;
+      }
+      const preview = data.data as LoanRebuildPreview;
+      setRebuildDialog({ effectiveDate, preview });
+    } finally {
+      setRebuildBusy(false);
+    }
+  }
+
+  const rebuildPreviewRefreshRef = useRef<number | null>(null);
+  function changeRebuildFromDate(nextDate: string) {
+    if (!rebuildDialog) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(nextDate.trim())) return;
+    setRebuildDialog((dialog) => dialog ? { ...dialog, effectiveDate: nextDate } : dialog);
+    if (rebuildPreviewRefreshRef.current) window.clearTimeout(rebuildPreviewRefreshRef.current);
+    const accountId = selectedRow?.accountId;
+    if (!accountId) return;
+    rebuildPreviewRefreshRef.current = window.setTimeout(() => {
+      void (async () => {
+        if (rebuildBusy) return;
+        setRebuildBusy(true);
+        try {
+          const response = await fetch("/api/v1/loan-repayment/rebuild", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              accountId,
+              fromDate: nextDate,
+              dryRun: true,
+              ...(rebuildRemainingRuns.trim() ? { remainingRuns: Number.parseInt(rebuildRemainingRuns.trim(), 10) } : {}),
+            }),
+          });
+          const data = await response.json().catch(() => null);
+          if (!response.ok || !data?.ok) return;
+          const preview = data.data as LoanRebuildPreview;
+          setRebuildDialog((prev) => prev && prev.effectiveDate === nextDate ? { effectiveDate: nextDate, preview } : prev);
+        } finally {
+          setRebuildBusy(false);
+        }
+      })();
+    }, 300);
+  }
+
+  async function confirmRebuild() {
+    const dialog = rebuildDialog;
+    const accountId = selectedRow?.accountId;
+    if (!dialog || !accountId || rebuildBusy) return;
+    const remainingRunsText = rebuildRemainingRuns.trim();
+    let remainingRuns: number | null = null;
+    if (remainingRunsText) {
+      const parsed = Number.parseInt(remainingRunsText, 10);
+      if (!Number.isFinite(parsed) || String(parsed) !== remainingRunsText || parsed < 1 || parsed > 600) {
+        window.alert(t("debtShell.rebuild.invalidRemainingRuns"));
+        return;
+      }
+      remainingRuns = parsed;
+    }
+    setRebuildBusy(true);
+    try {
+      const response = await fetch("/api/v1/loan-repayment/rebuild", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accountId,
+          fromDate: dialog.effectiveDate,
+          dryRun: false,
+          ...(remainingRuns != null ? { remainingRuns } : {}),
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.ok) {
+        window.alert(data?.error || t("debtShell.error.rebuildFailed"));
+        return;
+      }
+      window.alert(t("debtShell.rebuild.successMessage", {
+        date: data.data.startRunDate,
+        count: data.data.updateCount,
+        payment: formatMoney(data.data.previewPayment ?? 0),
+      }));
+      setRebuildDialog(null);
+      dispatchFinanceDataChanged({ reason: "loan-repayment-rebuild", accountIds: [accountId] });
+    } finally {
+      setRebuildBusy(false);
+    }
+  }
+
+  const rebuildPreviewParts = useMemo(() => {
+    const dialog = rebuildDialog;
+    if (!dialog) return null;
+    const preview = dialog.preview;
+    const runsText = rebuildRemainingRuns.trim();
+    const runs = runsText ? Number.parseInt(runsText, 10) : Number.NaN;
+    if (
+      preview.recalcAtStart &&
+      !preview.prepaymentInStartPeriod &&
+      Number.isFinite(runs) &&
+      runs >= 1 &&
+      preview.effectiveAnnualRate != null
+    ) {
+      const payment = calcLoanScheduledAmount({
+        repaymentMethod: preview.repaymentMethod,
+        annualRate: preview.effectiveAnnualRate,
+        principal: preview.balanceStart,
+        totalRuns: runs,
+        intervalMonths: preview.intervalMonths ?? 1,
+      });
+      if (payment != null && payment > 0) {
+        const intervalMonths = preview.intervalMonths ?? 1;
+        const interest = roundLoanMoney((preview.balanceStart * (preview.effectiveAnnualRate / 100) / 12) * intervalMonths);
+        return { payment, principal: Math.max(0, roundLoanMoney(payment - interest)), interest };
+      }
+    }
+    return {
+      payment: preview.previewPayment,
+      principal: preview.previewPrincipal,
+      interest: preview.previewInterest,
+    };
+  }, [rebuildDialog, rebuildRemainingRuns]);
 
   async function saveRateAdjustments() {
     if (!selectedRow?.accountId || rateSaving) return;
-    const adjustments = rateDrafts
-      .filter((item) => item.effectiveDate.trim() || item.annualRate.trim())
+    const filledRateDrafts = rateDrafts
+      .filter((item) => item.effectiveDate.trim() || item.annualRate.trim());
+    const adjustments = filledRateDrafts
       .map((item) => ({
         effectiveDate: item.effectiveDate.trim(),
-        annualRate: Number(item.annualRate),
+        annualRate: item.annualRate.trim() ? Number(item.annualRate) : Number.NaN,
       }));
     const duplicateDates = new Set<string>();
     for (const item of adjustments) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) || !Number.isFinite(item.annualRate) || item.annualRate <= 0) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) || !Number.isFinite(item.annualRate) || item.annualRate < 0) {
         window.alert(t("debtShell.alert.rateDraftInvalid"));
         return;
       }
@@ -533,6 +1091,9 @@ export function DebtShell({
       }
       duplicateDates.add(item.effectiveDate);
     }
+    const changedStartDate = !isSelectedMortgageLoan
+      ? getSimpleLoanRateChangedStartDate(buildLoanRateDrafts(selectedRow, { todayKey, generateFromLprDiscount: false }), filledRateDrafts)
+      : null;
 
     setRateSaving(true);
     try {
@@ -542,7 +1103,9 @@ export function DebtShell({
         body: JSON.stringify({
           accountId: selectedRow.accountId,
           adjustments,
-          mortgageLprDiscount: lprDiscount.trim() ? Number(lprDiscount.trim()) : null,
+          mortgageLprDiscount: isSelectedMortgageLoan && selectedRow?.mortgageLprDiscount != null
+            ? selectedRow.mortgageLprDiscount
+            : null,
           loanStartDate: selectedRow.loanStartDate || null,
         }),
       });
@@ -553,69 +1116,39 @@ export function DebtShell({
       }
       setRateCardOpen(false);
       dispatchFinanceDataChanged({ reason: "loan-rate-adjustment", accountIds: [selectedRow.accountId] });
+      if (changedStartDate) {
+        const accepted = await showConfirmDialog({
+          title: t("debtShell.rateAdjust.recalculateTitle"),
+          message: t("debtShell.rateAdjust.recalculateMessage", { date: changedStartDate }),
+          confirmLabel: t("debtShell.recalc.confirm"),
+          cancelLabel: t("debtShell.recalc.skip"),
+        });
+        if (accepted) {
+          await recalculateRepaymentPlanFromDate(selectedRow.accountId, changedStartDate);
+        }
+      }
     } finally {
       setRateSaving(false);
     }
   }
 
-  async function recalculateRepaymentPlan() {
-    if (!selectedRow?.accountId || recalcSaving) return;
-    if (
-      recalcStartDate &&
-      selectedRow.nextRepaymentDate &&
-      recalcStartDate < selectedRow.nextRepaymentDate
-    ) {
-      const confirmed = await showConfirmDialog({
-        title: t("debtShell.recalc.confirmTitle"),
-        message: t("debtShell.recalc.confirmMessage"),
-      });
-      if (!confirmed) return;
-    }
-    setRecalcSaving(true);
-    try {
-      const response = await fetch("/api/v1/loan-repayment/recalculate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          accountId: selectedRow.accountId,
-          startDate: recalcStartDate,
-        }),
-      });
-      const data = await response.json().catch(() => null);
-      if (!response.ok || !data?.ok) {
-        window.alert(data?.error || t("debtShell.error.recalculateFailed"));
-        return;
-      }
-      window.alert(formatLoanRecalculateSuccessMessage(data.data));
-      setRecalcOpen(false);
-      dispatchFinanceDataChanged({ reason: "loan-repayment-recalculate", accountIds: [selectedRow.accountId] });
-    } finally {
-      setRecalcSaving(false);
-    }
-  }
-
-  function openRecalculateDialog(row: DebtRow) {
-    setRecalcStartDate(row.nextRepaymentDate || new Date().toISOString().slice(0, 10));
-    setRecalcOpen(true);
-  }
-
   const rowColumns = useMemo<AdvancedDataTableColumn<DebtRow>[]>(() => [
     {
       key: "objectType",
-      label: t("debtShell.colObjectType"),
-      width: 112,
-      minWidth: 84,
-      filterText: (row) => row.objectType,
-      sortValue: (row) => row.objectType,
+      label: isLoanTableView ? t("debtShell.colName") : t("debtShell.colObjectType"),
+      width: isLoanTableView ? 180 : 112,
+      minWidth: isLoanTableView ? 120 : 84,
+      filterText: (row) => (isLoanTableView ? row.name : row.objectType),
+      sortValue: (row) => (isLoanTableView ? row.name : row.objectType),
       render: (row) => (
-        <span className={amountClass(row.net, isRedUp)}>
-          {row.objectType}
+        <span className={`block truncate ${amountClass(row.net, isRedUp)}`} title={isLoanTableView ? row.name : row.objectType}>
+          {isLoanTableView ? row.name : row.objectType}
         </span>
       ),
     },
     {
       key: "objectName",
-      label: t("debtShell.colObject"),
+      label: isLoanTableView ? t("debtShell.colLoanInstitution") : t("debtShell.colObject"),
       width: 180,
       minWidth: 120,
       filterText: (row) => row.objectName,
@@ -652,19 +1185,21 @@ export function DebtShell({
         );
       },
     },
-    {
-      key: "itemName",
-      label: t("debtShell.colItem"),
-      width: 190,
-      minWidth: 120,
-      filterText: (row) => row.itemName,
-      sortValue: (row) => row.itemName,
-      render: (row) => (
-        <span className={`block truncate ${row.isGroup ? "font-medium text-slate-800" : "text-slate-700"}`} title={row.name}>
-          {row.itemName || "-"}
-        </span>
-      ),
-    },
+    ...(isLoanTableView
+      ? []
+      : [{
+          key: "itemName",
+          label: t("debtShell.colItem"),
+          width: 190,
+          minWidth: 120,
+          filterText: (row) => row.itemName,
+          sortValue: (row) => row.itemName,
+          render: (row) => (
+            <span className={`block truncate ${row.isGroup ? "font-medium text-slate-800" : "text-slate-700"}`} title={row.name}>
+              {row.itemName || "-"}
+            </span>
+          ),
+        }]),
     {
       key: "itemType",
       label: t("debtShell.colItemType"),
@@ -753,12 +1288,46 @@ export function DebtShell({
       sortValue: (row) => Math.abs(row.remainingTotal),
       render: (row) => <span className={`font-semibold tabular-nums ${amountClass(row.net, isRedUp)}`}>{formatMoney(Math.abs(row.remainingTotal))}</span>,
     },
-  ], [t, language, isRedUp, remainingTotalLabel, childrenByParentKey, expandedDebtRowKeys, toggleDebtRowExpanded]);
+    {
+      key: "actions",
+      label: t("detail.column.actions"),
+      width: 64,
+      minWidth: 56,
+      align: "center",
+      render: (row) => (
+        <div className="flex items-center justify-center gap-1">
+          {row.accountId ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                openDebtAccountProperties(row);
+              }}
+              title={t("debtShell.editRow")}
+              aria-label={t("debtShell.editRow")}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-slate-600 transition-colors hover:bg-slate-50 hover:text-blue-600"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+        </div>
+      ),
+    },
+  ], [t, language, isRedUp, remainingTotalLabel, childrenByParentKey, expandedDebtRowKeys, toggleDebtRowExpanded, isLoanTableView, loanViewTypeLabel, openDebtAccountProperties]);
 
   const entryColumns = useMemo<AdvancedDataTableColumn<DebtEntry>[]>(() => [
     { key: "date", label: t("detail.column.date"), width: 100, minWidth: 80, filterText: (entry) => entry.date, render: (entry) => <span className="tabular-nums text-slate-700">{entry.date}</span> },
     { key: "type", label: t("debtShell.colType"), width: 90, minWidth: 70, filterText: (entry) => entry.typeLabel, render: (entry) => <span className="text-slate-700">{entry.typeLabel}</span> },
-    { key: "relatedAccount", label: t("debtShell.colCashAccount"), width: 160, minWidth: 100, filterText: (entry) => entry.relatedAccountLabel, render: (entry) => <span className="block truncate text-slate-600" title={entry.relatedAccountLabel}>{entry.relatedAccountLabel || "-"}</span> },
+    { key: "relatedAccount", label: t("debtShell.colCashAccount"), width: 160, minWidth: 100, filterText: (entry) => entry.relatedAccountLabel, render: (entry) => <span className="block truncate text-slate-600" title={entry.relatedAccountTitle || entry.relatedAccountLabel}>{entry.relatedAccountLabel || "-"}</span> },
+    {
+      key: "collateral",
+      label: t("debtShell.colCollateral"),
+      width: 140,
+      minWidth: 100,
+      hideable: true,
+      filterText: (entry) => entry.collateralLabel ?? "",
+      render: (entry) => <span className="block truncate text-slate-600" title={entry.collateralLabel ?? ""}>{entry.collateralLabel || "-"}</span>,
+    },
     {
       key: "outflow",
       label: t("detail.column.outflow"),
@@ -851,6 +1420,8 @@ export function DebtShell({
           accountLabel={editingDebtAccount.name}
           openSignal={accountEditOpenSignal}
           showTrigger={false}
+          loanDetails={editingLoanDetails}
+          loanEditAction={loanEditAction}
         />
       ) : null}
       <ResizableVerticalSplit
@@ -874,7 +1445,7 @@ export function DebtShell({
             toolbarTitle={(
               <span className="inline-flex items-center gap-2 text-sm font-semibold text-slate-800">
                 <HandCoins className="h-4 w-4 text-amber-500" />
-                {t("debtShell.title")}
+                {isLoanTableView && loanViewTypeLabel ? loanViewTypeLabel : t("debtShell.title")}
               </span>
             )}
             toolbarRightContent={(
@@ -953,16 +1524,6 @@ export function DebtShell({
                     <Percent className="h-3.5 w-3.5" />
                     {t("debtShell.rateAdjustment")}
                   </button>
-                  <button
-                    type="button"
-                    disabled={!canRecalculateSelectedRow}
-                    onClick={() => selectedRow && openRecalculateDialog(selectedRow)}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-400"
-                    title={canRecalculateSelectedRow ? t("debtShell.recalc.title") : t("debtShell.recalc.disabledTitle")}
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    {t("debtShell.recalc")}
-                  </button>
                 </>
               ) : null}
             </div>
@@ -981,6 +1542,7 @@ export function DebtShell({
                 contextAccountId={selectedRow.accountId}
                 columns={entryColumns}
                 entries={entries}
+                loanType={accountLoanType(accountEditDataById.get(selectedRow.accountId))}
               />
             </BasicDetailSelectionProvider>
           ) : (
@@ -988,7 +1550,8 @@ export function DebtShell({
               storageKey="mmh_debt_repayment_schedule_table_v1"
               columns={repaymentScheduleColumns}
               rows={visibleRepaymentScheduleRows}
-              rowKey={(row) => `${row.status ?? ""}:${row.eventType ?? ""}:${row.rowType}:${row.period}:${row.date}:${row.annualRate ?? ""}`}
+              rowKey={repaymentScheduleRowKey}
+              scrollToRowKey={repaymentScrollAnchorKey}
               minTableWidth={920}
               emptyText={t("debtShell.emptySchedule")}
               fillHeight
@@ -996,8 +1559,8 @@ export function DebtShell({
               toolbarLeftContent={(
                 <span>
                   {showPaidScheduleRows
-                    ? t("debtShell.scheduleVisibleCount", { visible: visibleRepaymentScheduleRows.length, total: repaymentScheduleRows.length })
-                    : t("debtShell.scheduleUnpaidCount", { count: visibleRepaymentScheduleRows.length })}
+                    ? t("debtShell.scheduleVisibleCount", { visible: schedulePeriodCounts.visible, total: schedulePeriodCounts.total })
+                    : t("debtShell.scheduleUnpaidCount", { count: schedulePeriodCounts.visible })}
                 </span>
               )}
               toolbarRightContent={(
@@ -1041,193 +1604,155 @@ export function DebtShell({
 
               <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
                 <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
-                  {t("debtShell.rateAdjust.hint")}
+                  {t(isSelectedMortgageLoan ? "debtShell.rateAdjust.hint" : "debtShell.rateAdjust.simpleHint")}
                 </div>
 
-                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  <div className="mb-2">
-                    <div>
-                      <div className="text-xs font-semibold text-slate-700">{t("debtShell.lpr.title")}</div>
-                      <div className="mt-0.5 text-[11px] leading-5 text-slate-500">
-                        {t("debtShell.lpr.hint", {
-                          baseBenchmark: MORTGAGE_BASE_BENCHMARK_RATE.toFixed(2),
-                          conversionBase: MORTGAGE_LPR_CONVERSION_BASE_RATE.toFixed(2),
-                        })}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_92px] gap-2">
-                    <div className="space-y-1">
-                      <div className="form-label">{t("debtShell.lpr.discountLabel")}</div>
-                      <input
-                        value={lprDiscount}
-                        onChange={(event) => setLprDiscount(event.target.value)}
-                        inputMode="decimal"
-                        placeholder={t("debtShell.lpr.discountPlaceholder")}
-                        className="form-input"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <div className="form-label">{t("debtShell.lpr.spreadLabel")}</div>
-                      <input
-                        value={(() => {
-                          const discount = Number(lprDiscount.trim());
-                          return Number.isFinite(discount) && discount > 0
-                            ? `${calcMortgageLprSpreadFromDiscount(discount).toFixed(3).replace(/\.?0+$/, "")}%`
-                            : "";
-                        })()}
-                        readOnly
-                        placeholder={t("debtShell.lpr.autoCalculated")}
-                        className="form-input bg-white/70 text-slate-500"
-                      />
-                    </div>
-                    <div className="flex items-end">
-                      <button
-                        type="button"
-                        onClick={generateLprRateDrafts}
-                        className="inline-flex h-9 w-full items-center justify-center rounded-full border border-blue-600 bg-blue-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-200 disabled:text-slate-500"
-                        disabled={rateSaving}
-                      >
-                        {t("debtShell.lpr.generate")}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_72px] gap-2 px-1 text-xs font-medium text-slate-500">
-                    <div>{t("debtShell.rateAdjust.effectiveDate")}</div>
-                    <div>{t("debtShell.rateAdjust.annualRateLabel")}</div>
-                    <div className="text-right" aria-label="Action buttons" />
-                  </div>
-                  <div className="max-h-[230px] space-y-2 overflow-y-auto pr-1">
-                    {rateDrafts.length === 0 ? (
-                      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-5 text-center text-sm text-slate-500">
-                        {t("debtShell.rateAdjust.empty")}
-                      </div>
-                    ) : rateDrafts.map((item) => (
-                      <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_72px] gap-2">
-                        <DateStepper
-                          value={item.effectiveDate}
-                          onChange={(value) => updateRateDraft(item.id, { effectiveDate: value })}
-                        />
-                        <input
-                          value={item.annualRate}
-                          onChange={(event) => updateRateDraft(item.id, { annualRate: event.target.value })}
-                          inputMode="decimal"
-                          placeholder={t("debtShell.rateAdjust.annualRatePlaceholder")}
-                          className="form-input"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => deleteRateDraft(item.id)}
-                          className="secondary-button h-9 px-2 text-rose-600 hover:bg-rose-50"
-                          disabled={rateSaving}
-                        >
-                          {t("common.delete")}
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                {renderRateDraftsTable({ showDiscountColumn: isSelectedMortgageLoan })}
 
                 <div className="flex items-center justify-between border-t border-slate-100 pt-3">
+                  <div className="flex items-center gap-2">
+                    {isSelectedMortgageLoan ? (
+                      <button
+                        type="button"
+                        onClick={() => { void queryLatestLpr(); }}
+                        className="secondary-button h-9 px-3"
+                        disabled={rateSaving}
+                        title={t("debtShell.rateAdjust.queryLprTitle")}
+                      >
+                        {t("debtShell.rateAdjust.queryLpr")}
+                      </button>
+                    ) : null}
+                    {isSelectedMortgageLoan ? null : (
+                      <button
+                        type="button"
+                        onClick={addRateDraft}
+                        className="secondary-button h-9 px-3"
+                        disabled={rateSaving}
+                      >
+                        {t("debtShell.rateAdjust.addRow")}
+                      </button>
+                    )}
+                  </div>
                   <button
                     type="button"
-                    onClick={addRateDraft}
-                    className="secondary-button h-9 px-3"
+                    onClick={() => { void saveRateAdjustments(); }}
+                    className="primary-button h-9 px-3"
                     disabled={rateSaving}
                   >
-                    {t("debtShell.rateAdjust.addRow")}
+                    {rateSaving ? t("debtShell.saving") : t("debtShell.saveRateAdjustments")}
                   </button>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setRateCardOpen(false)}
-                      className="secondary-button h-9 px-3"
-                      disabled={rateSaving}
-                    >
-                      {t("common.cancel")}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void saveRateAdjustments(); }}
-                      className="primary-button h-9 px-3"
-                      disabled={rateSaving}
-                    >
-                      {rateSaving ? t("debtShell.saving") : t("debtShell.saveRateAdjustments")}
-                    </button>
-                  </div>
                 </div>
               </div>
             </div>
           </div>
         ) : null}
 
-        {recalcOpen ? (
-          <div className="app-modal-backdrop z-50">
-            <div className="app-modal-panel max-w-lg">
+        {rebuildDialog ? (
+          <div className="app-modal-backdrop z-[60]">
+            <div className="app-modal-panel max-w-md">
               <div className="modal-header shrink-0">
                 <div>
-                  <div className="text-sm font-semibold text-slate-800">{t("debtShell.recalc.confirmTitle")}</div>
-                  <div className="mt-0.5 text-xs text-slate-500">{selectedRow?.name ?? t("debtShell.currentLoan")}</div>
+                  <div className="text-sm font-semibold text-slate-800">{t("debtShell.rebuild.title")}</div>
+                  <div className="mt-0.5 text-xs text-slate-500">
+                    {t("debtShell.rebuild.subtitle", { date: rebuildDialog.effectiveDate })} · {selectedRow?.name ?? t("debtShell.currentLoan")}
+                  </div>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setRecalcOpen(false)}
+                  onClick={() => setRebuildDialog(null)}
                   className="secondary-button h-8 px-2"
-                  disabled={recalcSaving}
+                  disabled={rebuildBusy}
                 >
                   {t("table.close")}
                 </button>
               </div>
 
-              <div className="space-y-3 p-4 text-sm text-slate-700">
-                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-                  {t("debtShell.recalc.hint")}
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+                <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                  {t("debtShell.rebuild.intro", { count: rebuildDialog.preview.updateCount })}
                 </div>
 
-                <div className="space-y-1 rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="form-label">{t("debtShell.recalc.startDateLabel")}</div>
-                  <DateStepper value={recalcStartDate} onChange={setRecalcStartDate} />
-                  <div className="text-[11px] text-slate-500">
-                    {t("debtShell.recalc.startDateHint")}
+                <div className="space-y-1">
+                  <div className="form-label">{t("debtShell.rebuild.startPeriod")}</div>
+                  <DateStepper
+                    value={rebuildDialog.effectiveDate}
+                    onChange={(value) => changeRebuildFromDate(value)}
+                  />
+                  <div className="text-[11px] leading-5 text-slate-500">{t("debtShell.rebuild.startPeriodHint")}</div>
+                </div>
+
+                <div className="space-y-1 text-xs text-slate-600">
+                  <div className="flex items-center justify-between">
+                    <span>{t("debtShell.rebuild.startPeriod")}</span>
+                    <span className="tabular-nums text-slate-800">{rebuildDialog.preview.startRunDate}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>{t("debtShell.rebuild.balanceStart")}</span>
+                    <span className="tabular-nums text-slate-800">{formatMoney(rebuildDialog.preview.balanceStart)}</span>
+                  </div>
+                  {rebuildDialog.preview.effectiveAnnualRate != null ? (
+                    <div className="flex items-center justify-between">
+                      <span>{t("debtShell.rebuild.effectiveRate")}</span>
+                      <span className="tabular-nums text-slate-800">{formatRate(rebuildDialog.preview.effectiveAnnualRate, language)}%</span>
+                    </div>
+                  ) : null}
+                  {rebuildDialog.preview.preservedAmount != null && !rebuildDialog.preview.recalcAtStart ? (
+                    <div className="flex items-center justify-between">
+                      <span>{t("debtShell.rebuild.preservedAmount")}</span>
+                      <span className="tabular-nums text-slate-800">
+                        {formatMoney(rebuildDialog.preview.lastRemainingPayment ?? rebuildDialog.preview.preservedAmount)}
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="space-y-1">
+                  <div className="form-label">{t("debtShell.rebuild.remainingRunsLabel")}</div>
+                  <input
+                    value={rebuildRemainingRuns}
+                    onChange={(event) => setRebuildRemainingRuns(event.target.value)}
+                    inputMode="numeric"
+                    className="form-input"
+                  />
+                  <div className="text-[11px] leading-5 text-slate-500">{t("debtShell.rebuild.remainingRunsHint")}</div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-slate-600">{t("debtShell.rebuild.newPaymentLabel")}</span>
+                    <span className="text-sm font-semibold tabular-nums text-slate-900">{formatMoney(rebuildPreviewParts?.payment ?? rebuildDialog.preview.previewPayment)}</span>
+                  </div>
+                  <div className="mt-1 text-right text-[11px] tabular-nums text-slate-500">
+                    {t("debtShell.rebuild.newPaymentDetail", {
+                      principal: formatMoney(rebuildPreviewParts?.principal ?? rebuildDialog.preview.previewPrincipal),
+                      interest: formatMoney(rebuildPreviewParts?.interest ?? rebuildDialog.preview.previewInterest),
+                    })}
+                  </div>
+                  <div className="mt-1 text-[11px] leading-5 text-slate-500">
+                    {rebuildDialog.preview.recalcAtStart
+                      ? t("debtShell.rebuild.recalcNote")
+                      : t("debtShell.rebuild.preserveNote")}
                   </div>
                 </div>
+              </div>
 
-                <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs leading-5 text-slate-600">
-                  {t("debtShell.recalc.methodHint")}
-                </div>
-
-                <div className="grid grid-cols-2 gap-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  <div>
-                    <div className="text-slate-400">{t("debtShell.recalc.currentRemainingPrincipal")}</div>
-                    <div className="mt-0.5 font-semibold tabular-nums text-slate-800">{formatMoney(Math.abs(selectedRow?.net ?? 0))}</div>
-                  </div>
-                  <div>
-                    <div className="text-slate-400">{t("debtShell.recalc.currentRemainingRuns")}</div>
-                    <div className="mt-0.5 font-semibold tabular-nums text-slate-800">{selectedRow?.remainingRuns ?? "-"}</div>
-                  </div>
-                </div>
-
-                <div className="flex justify-end gap-2 pt-1">
-                  <button
-                    type="button"
-                    className="secondary-button h-9 px-3"
-                    onClick={() => setRecalcOpen(false)}
-                    disabled={recalcSaving}
-                  >
-                    {t("common.cancel")}
-                  </button>
-                  <button
-                    type="button"
-                    className="primary-button h-9 px-3"
-                    onClick={() => { void recalculateRepaymentPlan(); }}
-                    disabled={recalcSaving}
-                  >
-                    {recalcSaving ? t("debtShell.recalc.saving") : t("debtShell.recalc.confirmAndRebuild")}
-                  </button>
-                </div>
+              <div className="modal-footer flex shrink-0 items-center justify-end gap-2 border-t border-slate-100 p-4">
+                <button
+                  type="button"
+                  onClick={() => setRebuildDialog(null)}
+                  className="secondary-button h-9 px-3"
+                  disabled={rebuildBusy}
+                >
+                  {t("debtShell.rebuild.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void confirmRebuild(); }}
+                  className="primary-button h-9 px-3"
+                  disabled={rebuildBusy}
+                >
+                  {rebuildBusy ? t("debtShell.rebuild.busy") : t("debtShell.rebuild.confirm")}
+                </button>
               </div>
             </div>
           </div>
@@ -1242,12 +1767,14 @@ function DebtEntriesTable({
   contextAccountId,
   columns,
   entries,
+  loanType,
 }: {
   accountOptions: AccountOption[];
   categoryOptions: BasicDetailBatchCategoryOption[];
   contextAccountId?: string | null;
   columns: AdvancedDataTableColumn<DebtEntry>[];
   entries: DebtEntry[];
+  loanType: LoanTypeValue;
 }) {
   const { t } = useI18n();
   const { selectedIds, setSelection } = useBasicDetailSelection();
@@ -1261,11 +1788,19 @@ function DebtEntriesTable({
     })),
     [accountOptions],
   );
-  const getCustomEditEvent = (entry: DebtEntry) => entry.balanceReconcileEdit
-    ? { name: "mmh:balance-reconcile:edit", detail: entry.balanceReconcileEdit }
-    : entry.debtEdit
-      ? { name: entry.debtEdit.dialogType === "loan" ? "mmh:loan:create" : "mmh:debt:create", detail: entry.debtEdit }
-      : undefined;
+  const getCustomEditEvent = (entry: DebtEntry) => {
+    if (entry.balanceReconcileEdit) {
+      return { name: "mmh:balance-reconcile:edit", detail: { ...entry.balanceReconcileEdit } };
+    }
+    if (!entry.debtEdit) return undefined;
+    const detail = entry.debtEdit.dialogType === "loan"
+      ? { ...entry.debtEdit, loanType }
+      : { ...entry.debtEdit };
+    return {
+      name: entry.debtEdit.dialogType === "loan" ? "mmh:loan:create" : "mmh:debt:create",
+      detail,
+    };
+  };
 
   return (
     <AdvancedDataTable

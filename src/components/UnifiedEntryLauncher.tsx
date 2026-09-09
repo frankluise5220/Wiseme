@@ -1,18 +1,24 @@
 "use client";
 
-import { ChevronDown, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/lib/i18n";
+import type { LoanTypeValue } from "@/lib/loan-type";
 
 type EntryKind =
   | "transaction"
   | "advance"
   | "transfer"
+  | "income"
+  | "expense"
   | "fx"
+  | "fx-sell"
   | "investment"
   | "stock"
+  | "stock-sell"
   | "stock-transfer"
+  | "stock-dividend"
   | "property"
   | "metal"
   | "wealth"
@@ -24,14 +30,15 @@ type EntryKind =
   | "loan"
   | "regular-task";
 
-export type LoanType = "consumer" | "mortgage";
+export type LoanType = LoanTypeValue;
+type LoanMode = "repay_out" | "prepay_out";
 
 type EntryAction = {
   key: EntryKind;
   label: string;
   disabled?: boolean;
   loanType?: LoanType;
-  mode?: "repay_out";
+  mode?: LoanMode;
   children?: EntryAction[];
 };
 
@@ -93,7 +100,7 @@ function getCurrentFundContext(context?: Props["context"]) {
   }
 }
 
-function dispatchEntryAction(kind: EntryKind, context?: Props["context"], loanType?: LoanType, loanMode?: "repay_out") {
+function dispatchEntryAction(kind: EntryKind, context?: Props["context"], loanType?: LoanType, loanMode?: LoanMode) {
   if (typeof window === "undefined") return;
   const requestId = makeRequestId(kind);
   switch (kind) {
@@ -116,6 +123,30 @@ function dispatchEntryAction(kind: EntryKind, context?: Props["context"], loanTy
             requestId,
             source: "launcher",
             item: { type: "advance" },
+            defaultAccountId: context?.defaultAccountId ?? "",
+          },
+        }),
+      );
+      return;
+    case "income":
+      window.dispatchEvent(
+        new CustomEvent("mmh:create-transaction:open", {
+          detail: {
+            requestId,
+            source: "launcher",
+            item: { type: "income" },
+            defaultAccountId: context?.defaultAccountId ?? "",
+          },
+        }),
+      );
+      return;
+    case "expense":
+      window.dispatchEvent(
+        new CustomEvent("mmh:create-transaction:open", {
+          detail: {
+            requestId,
+            source: "launcher",
+            item: { type: "expense" },
             defaultAccountId: context?.defaultAccountId ?? "",
           },
         }),
@@ -149,6 +180,21 @@ function dispatchEntryAction(kind: EntryKind, context?: Props["context"], loanTy
         }),
       );
       return;
+    case "fx-sell":
+      // 卖出外汇：外币账户 -> 人民币账户。方向由 TransactionFormModal 的 fxDirection 处理。
+      window.dispatchEvent(
+        new CustomEvent("mmh:create-transaction:open", {
+          detail: {
+            requestId,
+            source: "launcher",
+            item: { type: "fx" },
+            fxDirection: "sell",
+            defaultFromAccountId: "",
+            defaultToAccountId: "",
+          },
+        }),
+      );
+      return;
     case "investment":
       const currentFund = getCurrentFundContext(context);
       window.dispatchEvent(
@@ -165,10 +211,13 @@ function dispatchEntryAction(kind: EntryKind, context?: Props["context"], loanTy
       );
       return;
     case "stock":
+    case "stock-sell":
+    case "stock-dividend":
       window.dispatchEvent(
         new CustomEvent("mmh:stock:create", {
           detail: {
             requestId,
+            defaultAction: kind === "stock-sell" ? "sell" : kind === "stock-dividend" ? "dividend" : "buy",
             defaultStockAccountId: context?.defaultStockAccountId ?? context?.defaultInvestmentAccountId ?? "",
             defaultCashAccountId: context?.defaultStockCashAccountId ?? context?.defaultCashAccountId ?? "",
           },
@@ -293,7 +342,9 @@ function dispatchEntryAction(kind: EntryKind, context?: Props["context"], loanTy
         new CustomEvent("mmh:loan:create", {
           detail: {
             requestId,
-            ...(loanMode ? { mode: loanMode } : { loanType: loanType ?? "consumer" }),
+            ...(loanMode
+              ? { mode: loanMode, ...(loanType ? { loanType } : {}) }
+              : { loanType: loanType ?? "consumer" }),
             defaultDebtAccountId: context?.defaultDebtAccountId ?? "",
             defaultDebtInstitutionId: context?.defaultDebtInstitutionId ?? "",
             defaultCashAccountId: context?.defaultCashAccountId ?? context?.defaultAccountId ?? "",
@@ -323,6 +374,8 @@ function dispatchEntryAction(kind: EntryKind, context?: Props["context"], loanTy
 export function UnifiedEntryLauncher({ defaultAction, actions, className, hideDefaultActionInMenu = false, context }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
+  // 二级菜单默认收起，悬浮分组行时才展开；点击分组行仍直接执行默认动作。
+  const [openSubmenuAction, setOpenSubmenuAction] = useState<EntryAction | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const { t } = useI18n();
@@ -331,6 +384,11 @@ export function UnifiedEntryLauncher({ defaultAction, actions, className, hideDe
     () => actions.find((item) => item.key === defaultAction && !item.disabled) ?? actions.find((item) => !item.disabled),
     [actions, defaultAction],
   );
+
+  // 菜单整体关闭时收起所有二级菜单。
+  useEffect(() => {
+    if (!menuOpen) setOpenSubmenuAction(null);
+  }, [menuOpen]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -396,7 +454,7 @@ export function UnifiedEntryLauncher({ defaultAction, actions, className, hideDe
           data-entry-launcher-primary-action={defaultItem?.key ?? ""}
           onClick={() => {
             setMenuOpen(false);
-            if (defaultItem) dispatchEntryAction(defaultItem.key, context);
+            if (defaultItem) dispatchEntryAction(defaultItem.key, context, defaultItem.loanType, defaultItem.mode);
           }}
           disabled={!defaultItem}
           className="inline-flex items-center gap-1.5 bg-transparent px-3 text-sm font-medium hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
@@ -426,8 +484,14 @@ export function UnifiedEntryLauncher({ defaultAction, actions, className, hideDe
             >
               {actions.filter((item) => !hideDefaultActionInMenu || item.key !== defaultItem?.key).map((item) => {
                 if (item.children && item.children.length > 0) {
+                  const isSubmenuOpen = openSubmenuAction?.key === item.key;
                   return (
-                    <div key={item.key} className="py-1">
+                    <div
+                      key={item.key}
+                      className="py-1"
+                      onMouseEnter={() => setOpenSubmenuAction(item)}
+                      onMouseLeave={() => setOpenSubmenuAction((current) => (current?.key === item.key ? null : current))}
+                    >
                       <button
                         type="button"
                         disabled={item.disabled}
@@ -437,22 +501,28 @@ export function UnifiedEntryLauncher({ defaultAction, actions, className, hideDe
                         }}
                         className="flex w-full items-center px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-white"
                       >
-                        {item.label}
+                        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                        <ChevronRight
+                          className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform ${isSubmenuOpen ? "rotate-90" : ""}`}
+                          aria-hidden="true"
+                        />
                       </button>
-                      {item.children.map((child) => (
-                        <button
-                          key={`${item.key}:${child.key}:${child.loanType ?? child.mode ?? "default"}`}
-                          type="button"
-                          disabled={child.disabled}
-                          onClick={() => {
-                            setMenuOpen(false);
-                            if (!child.disabled) dispatchEntryAction(child.key, context, child.loanType, child.mode);
-                          }}
-                          className="flex w-full items-center px-3 py-2 pl-6 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-white"
-                        >
-                          {child.label}
-                        </button>
-                      ))}
+                      {isSubmenuOpen
+                        ? item.children.map((child) => (
+                            <button
+                              key={`${item.key}:${child.key}:${child.loanType ?? child.mode ?? "default"}`}
+                              type="button"
+                              disabled={child.disabled}
+                              onClick={() => {
+                                setMenuOpen(false);
+                                if (!child.disabled) dispatchEntryAction(child.key, context, child.loanType, child.mode);
+                              }}
+                              className="flex w-full items-center px-3 py-2 pl-6 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-white"
+                            >
+                              {child.label}
+                            </button>
+                          ))
+                        : null}
                     </div>
                   );
                 }

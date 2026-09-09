@@ -1,9 +1,10 @@
-import { AccountKind, CreditCardInstallmentSourceType, TransactionType, type Prisma } from "@prisma/client";
+import { AccountKind, CreditCardInstallmentSourceType, TransactionType, type CreditBillingDayTxPeriod, type Prisma } from "@prisma/client";
 import type { DetailEntry } from "@/components/DetailViewClient";
 import type { CreditBillSummaryRow } from "@/components/CreditBillSummaryTable";
 import { prisma } from "@/lib/db/prisma";
 import { addDaysUtc, formatDateLocal, toNumber } from "@/lib/date-utils";
 import {
+  CREDIT_CARD_BILLING_DAY_INITIAL_DATE,
   CREDIT_CARD_MANUAL_CYCLE_LOCK_SOURCE,
   CREDIT_CARD_STATEMENT_IMPORT_CYCLE_LOCK_SOURCE,
   applyNextCyclePaidToCreditBillSummaries,
@@ -18,6 +19,7 @@ import {
   isCreditBillSettled,
   mergeCreditCardCycleLockSources,
   mergeCreditBillSummariesWithCascade,
+  normalizeBillingDayTxPeriod,
   signedCreditBillAmountFromCardSide,
   classifyCreditBillFlowSide,
   summarizeCreditBillSignedFlows,
@@ -32,6 +34,13 @@ type SelectedBillAccount = {
   kind: AccountKind;
   billingDay: number | null;
   repaymentDay: number | null;
+  billingDayTxPeriod?: CreditBillingDayTxPeriod | null;
+};
+
+export type CreditBillingDayRuleRow = {
+  effectiveDate: string;
+  billingDay: number;
+  isInitial: boolean;
 };
 
 export type CreditBillPageData = {
@@ -61,6 +70,8 @@ export type CreditBillPageData = {
   billListPageSize: number;
   hasCreditBillSummaries: boolean;
   showAllCreditBillDetails: boolean;
+  billingDayRules: CreditBillingDayRuleRow[];
+  billingDayTxPeriod: CreditBillingDayTxPeriod;
 };
 
 type LoadCreditBillPageDataParams = {
@@ -169,6 +180,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
 
   const creditBillNow = new Date();
   const todayUtcStart = new Date(Date.UTC(creditBillNow.getUTCFullYear(), creditBillNow.getUTCMonth(), creditBillNow.getUTCDate()));
+  const billingDayTxPeriod = normalizeBillingDayTxPeriod(selectedAccount?.billingDayTxPeriod);
   const billingDayRules = isBillAccount && selectedAccount?.kind === AccountKind.bank_credit && billAccountIds.length > 0
     ? await prisma.creditCardBillingDay.findMany({
         where: { accountId: { in: billAccountIds } },
@@ -176,6 +188,14 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
         orderBy: { effectiveDate: "asc" },
       })
     : [];
+  const billingDayRuleRows: CreditBillingDayRuleRow[] = billingDayRules
+    .slice()
+    .sort((a, b) => a.effectiveDate.getTime() - b.effectiveDate.getTime())
+    .map((rule) => ({
+      effectiveDate: ymdUtc(rule.effectiveDate),
+      billingDay: rule.billingDay,
+      isInitial: rule.effectiveDate.getTime() === CREDIT_CARD_BILLING_DAY_INITIAL_DATE.getTime(),
+    }));
   const fallbackBillingDay = selectedAccount?.billingDay ?? null;
   const hasBillingDayRules = billingDayRules.length > 0 || !!fallbackBillingDay;
   // Bump this timestamp whenever the credit-bill flow calculation logic
@@ -213,6 +233,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
             householdId,
             accountIds: billAccountIds,
             billingDay: selectedAccount.billingDay ?? 1,
+            billingDayTxPeriod,
           }),
         )
       : { updatedEntries: 0, updatedPlans: 0 };
@@ -338,6 +359,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
             repaymentDay: selectedAccount.repaymentDay ?? null,
             now: creditBillNow,
             fallbackBillingDay,
+            billingDayTxPeriod,
           });
           const months = new Set<string>();
           for (const row of rows) {
@@ -552,6 +574,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
     repaymentDay: selectedAccount?.repaymentDay ?? null,
     now: creditBillNow,
     fallbackBillingDay,
+    billingDayTxPeriod,
   });
 
   const creditCycleDefinitions = (() => {
@@ -783,6 +806,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
     overrideByMonth,
     now: creditBillNow,
     cycleByMonth: cycleDefinitionByMonth,
+    billingDayTxPeriod,
   });
 
   if (creditCycleCacheStale && isBillAccount && selectedAccount) {
@@ -940,6 +964,7 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
             createdAt: toIsoOrNull(e.createdAt),
             dayOrder: e.dayOrder ?? 0,
             amount: toNumber(e.type === TransactionType.transfer && billAccountIdSet.has(e.toAccountId ?? "") ? Math.abs(toNumber(e.amount)) : e.amount),
+            currency: e.currency ?? "CNY",
             runningBalance: null,
             type: e.type,
             categoryId: e.categoryId,
@@ -1020,6 +1045,8 @@ export async function loadCreditBillPageData(params: LoadCreditBillPageDataParam
     billListPageSize,
     hasCreditBillSummaries: billSummariesWithCumulative.length > 0,
     showAllCreditBillDetails,
+    billingDayRules: billingDayRuleRows,
+    billingDayTxPeriod,
   };
 }
 
@@ -1047,6 +1074,7 @@ export async function refreshCreditCardCycleCachesForAccountIds(params: {
       billingDay: true,
       repaymentDay: true,
       creditBillMode: true,
+      billingDayTxPeriod: true,
     },
   });
 

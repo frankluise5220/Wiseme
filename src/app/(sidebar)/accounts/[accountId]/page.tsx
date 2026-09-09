@@ -48,6 +48,7 @@ export default async function MobileAccountDetailPage({ params }: { params: Prom
         investProductType: true,
         Institution: { select: { name: true, shortName: true } },
         AccountGroup: { select: { id: true, name: true } },
+        Counterparty: { select: { name: true, shortName: true } },
       },
     }),
     prisma.category.findMany({

@@ -28,6 +28,7 @@ import { getInvestmentAccountView, isDepositAccount } from "@/lib/account-kind-u
 import { FIXED_ASSET_TYPES, isFixedAssetAccountLike } from "@/lib/fixed-asset";
 import { supportsTradingCalendarForAccount, TRADING_CALENDARS } from "@/lib/fund/trading-calendar";
 import { useI18n } from "@/lib/i18n";
+import { showConfirmDialog } from "@/lib/client/confirm-dialog";
 import { CURRENCY_OPTIONS, normalizeCurrency } from "@/lib/currency";
 import {
   accountInstitutionTypeIsAllowed,
@@ -60,8 +61,10 @@ type Account = {
   institutionId: string | null; groupId: string | null;
   Institution: { id: string; name: string; shortName?: string | null } | null;
   AccountGroup: { id: string; name: string } | null;
+  Counterparty: { id: string; name: string; shortName?: string | null } | null;
   billingDay: number | null; repaymentDay: number | null;
   creditBillMode?: "separate" | "consolidated";
+  billingDayTxPeriod?: string | null;
   creditLimit: string | null; numberMasked: string | null;
   investProductType: string | null; costBasisMethod: string | null;
   fundUnitsDecimals?: number | null;
@@ -87,11 +90,11 @@ function allowedInstitutionTypesForEdit(kind: string | null | undefined, investP
   return allowedInstitutionTypesForAccount(kind, investProductType, { includeLegacyDebtInstitution: true });
 }
 
-const SETTINGS_ACCOUNT_KIND_OPTIONS = kindOrder.filter((kind) => kind !== "loan");
+const SETTINGS_ACCOUNT_KIND_OPTIONS = kindOrder.filter((kind) => kind !== "loan" && kind !== "settlement");
 
 function getAccountDetailHref(account: Account) {
   const query = new URLSearchParams();
-  if (account.kind === "loan") {
+  if (account.kind === "loan" || account.kind === "settlement") {
     // Match the sidebar's per-person debt entry instead of selecting a detail account.
     query.set("view", "debt");
     query.set("debtPerson", `account:${account.id}`);
@@ -190,7 +193,7 @@ export default function SettingsAccountsPage() {
     const normalizedKind = normalizedAccountKind(a);
     const editKind = normalizedKind;
     const editInvestProductType = editKind === "investment" ? (a.investProductType || "fund") : editKind === "fixed_asset" ? "property" : "";
-    const supportsInstitution = allowedInstitutionTypesForEdit(editKind, editInvestProductType).length > 0;
+    const supportsInstitution = editKind !== "settlement" && allowedInstitutionTypesForEdit(editKind, editInvestProductType).length > 0;
     setEditingId(a.id);
     setEditError("");
     setEditForm({
@@ -204,6 +207,7 @@ export default function SettingsAccountsPage() {
       repaymentDay: a.repaymentDay?.toString() || "",
       creditLimit: a.creditLimit || "",
       creditBillMode: a.creditBillMode === "consolidated" ? "consolidated" : "separate",
+      billingDayTxPeriod: a.billingDayTxPeriod === "next" ? "next" : "current",
       numberMasked: a.numberMasked || "",
       investProductType: editInvestProductType,
       fixedAssetType: editKind === "fixed_asset" ? (a.fixedAssetType || "property") : "",
@@ -240,6 +244,14 @@ export default function SettingsAccountsPage() {
       setEditError(t("settings.accounts.consumerLoanInstitutionRequired"));
       return;
     }
+    if (previousAccount?.kind === "bank_credit" && nextKind !== "bank_credit") {
+      const confirmed = await showConfirmDialog({
+        title: t("settings.accounts.loseCreditConfirmTitle"),
+        message: t("settings.accounts.loseCreditConfirmMessage"),
+        tone: "danger",
+      });
+      if (!confirmed) return;
+    }
     const payload = isFixedAssetKind
       ? { ...editForm, kind: "investment", investProductType: "property", institutionId: "", fixedAssetType: editForm.fixedAssetType || "property", isConsumerLoan: "false" }
       : editForm;
@@ -275,7 +287,8 @@ export default function SettingsAccountsPage() {
         String(previousAccount.institutionId ?? "") !== String(editForm.institutionId ?? "") ||
         String(previousAccount.billingDay ?? "") !== String(editForm.billingDay ?? "") ||
         String(previousAccount.repaymentDay ?? "") !== String(editForm.repaymentDay ?? "") ||
-        String(previousAccount.creditBillMode ?? "separate") !== String(editForm.creditBillMode ?? "separate")
+        String(previousAccount.creditBillMode ?? "separate") !== String(editForm.creditBillMode ?? "separate") ||
+        String(previousAccount.billingDayTxPeriod ?? "current") !== String(editForm.billingDayTxPeriod ?? "current")
       ),
     );
     if (creditRuleChanged) {
@@ -305,6 +318,35 @@ export default function SettingsAccountsPage() {
     }));
   }
 
+  async function changeEditKind(nextKind: string) {
+    const nextInvestProductType = nextKind === "investment" ? (editForm.investProductType || "fund") : nextKind === "fixed_asset" ? "property" : "";
+    const selectedInstitution = institutions.find((institution) => institution.id === editForm.institutionId);
+    const keepInstitution = Boolean(selectedInstitution && accountInstitutionTypeMatches(nextKind, nextInvestProductType, selectedInstitution.type));
+    const nextInstitutionId = keepInstitution ? (editForm.institutionId || "") : "";
+    setEditForm((f) => ({
+      ...f,
+      kind: nextKind,
+      institutionId: nextInstitutionId,
+      investProductType: nextInvestProductType,
+      fixedAssetType: nextKind === "fixed_asset" ? (f.fixedAssetType || "property") : "",
+    }));
+    // Converting into a credit card while keeping the institution: prefill the
+    // institution's billing defaults for still-empty day fields (mirrors changeEditInstitution).
+    if (nextKind !== "bank_credit" || !nextInstitutionId) return;
+    const result = await fetch(`/api/v1/accounts/credit-card-defaults?institutionId=${encodeURIComponent(nextInstitutionId)}`, { cache: "no-store" })
+      .then((response) => response.json())
+      .catch((error) => {
+        console.warn("[accounts] failed to load credit-card institution defaults", error);
+        return null;
+      });
+    if (!result?.ok || !result.data) return;
+    setEditForm((current) => current.kind !== "bank_credit" || current.institutionId !== nextInstitutionId ? current : ({
+      ...current,
+      billingDay: current.billingDay || (result.data.billingDay == null ? "" : String(result.data.billingDay)),
+      repaymentDay: current.repaymentDay || (result.data.repaymentDay == null ? "" : String(result.data.repaymentDay)),
+    }));
+  }
+
   async function toggleActive(id: string) {
     await fetch("/api/v1/accounts", {
       method: "PATCH",
@@ -325,6 +367,7 @@ export default function SettingsAccountsPage() {
         investProductType: account.investProductType,
         Institution: account.Institution,
         AccountGroup: account.AccountGroup,
+        Counterparty: account.Counterparty,
       },
       getCreditCardLabelTemplatePreference(), { fields: getAccountLabelFieldsPreference() }).label;
   };
@@ -534,6 +577,7 @@ export default function SettingsAccountsPage() {
                           {normalizedAccountKind(a) === "bank_credit" && a.creditLimit && <span className="text-[10px] text-slate-400">{tf("settings.accounts.creditLimit", { amount: a.creditLimit })}</span>}
                           {a.numberMasked && <span className="text-[10px] text-slate-400">{tf("settings.accounts.lastFour", { value: a.numberMasked })}</span>}
                           {normalizedAccountKind(a) === "bank_credit" && <span className="text-[10px] text-slate-400">{a.creditBillMode === "consolidated" ? t("settings.accounts.consolidatedBill") : t("settings.accounts.separateBill")}</span>}
+                          {normalizedAccountKind(a) === "bank_credit" && a.billingDay && <span className="text-[10px] text-slate-400">{t("settings.accounts.billingDayTxPeriod." + (a.billingDayTxPeriod === "next" ? "next" : "current"))}</span>}
                         </>
                       )}
                       {a.note && (
@@ -719,8 +763,8 @@ export default function SettingsAccountsPage() {
         const showCostBasisMethod = isInvestmentKind && supportsCostBasisMethod(editInvestProductType);
         const isBillLikeKind = editKind === "bank_credit";
         const supportsLastFour = editKind === "bank_credit" || editKind === "bank_debit";
-        const editKindOptions = normalizedKind === "loan" ? [...SETTINGS_ACCOUNT_KIND_OPTIONS, "loan"] : SETTINGS_ACCOUNT_KIND_OPTIONS;
-        const supportsInstitution = allowedInstitutionTypesForEdit(editKind, editInvestProductType).length > 0;
+        const editKindOptions = normalizedKind === "loan" || normalizedKind === "settlement" ? [...SETTINGS_ACCOUNT_KIND_OPTIONS, normalizedKind] : SETTINGS_ACCOUNT_KIND_OPTIONS;
+        const supportsInstitution = editKind !== "settlement" && allowedInstitutionTypesForEdit(editKind, editInvestProductType).length > 0;
         const filteredInstitutions = institutions.filter((institution) =>
           accountInstitutionTypeMatches(editKind, editInvestProductType, institution.type),
         );
@@ -746,13 +790,7 @@ export default function SettingsAccountsPage() {
                   <label className="block text-xs text-slate-500 mb-1">{t("settings.accounts.type")}</label>
                   <select
                     value={editKind}
-                    onChange={e => setEditForm(f => ({
-                      ...f,
-                      kind: e.target.value,
-                      institutionId: "",
-                      investProductType: e.target.value === "investment" ? (f.investProductType || "fund") : e.target.value === "fixed_asset" ? "property" : "",
-                      fixedAssetType: e.target.value === "fixed_asset" ? (f.fixedAssetType || "property") : "",
-                    }))}
+                    onChange={e => void changeEditKind(e.target.value)}
                     className="h-8 w-full rounded-md border border-slate-200 px-2 text-sm outline-none"
                   >
                     {editKindOptions.map((value) => (
@@ -906,6 +944,19 @@ export default function SettingsAccountsPage() {
                       >
                         <option value="separate">{t("settings.accounts.separateBill")}</option>
                         <option value="consolidated">{t("settings.accounts.consolidatedBill")}</option>
+                      </select>
+                    </div>
+                  )}
+                  {isBillLikeKind && (
+                    <div>
+                      <label className="block text-xs text-slate-500 mb-1">{t("settings.accounts.billingDayTxPeriodLabel")}</label>
+                      <select
+                        value={editForm.billingDayTxPeriod || "current"}
+                        onChange={e => setEditForm(f => ({ ...f, billingDayTxPeriod: e.target.value }))}
+                        className="h-8 w-full rounded-md border border-slate-200 px-2 text-sm outline-none"
+                      >
+                        <option value="current">{t("settings.accounts.billingDayTxPeriod.current")}</option>
+                        <option value="next">{t("settings.accounts.billingDayTxPeriod.next")}</option>
                       </select>
                     </div>
                   )}

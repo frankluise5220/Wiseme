@@ -10,13 +10,11 @@ export function formatLoanRecalculateSuccessMessage(data: unknown) {
   if (status === "historical_recalculated") {
     const startDate = String(result.startDate ?? "");
     const endDate = String(result.endDate ?? "");
-    const regeneratedCount = toNumberOrNull(result.regeneratedCount);
     const lockedCount = toNumberOrNull(result.lockedCount);
     return [
       "重算成功。",
-      startDate && endDate ? `已重建 ${startDate} 至 ${endDate} 的自动还款记录。` : "",
-      regeneratedCount != null ? `自动记录：${regeneratedCount} 条。` : "",
-      lockedCount && lockedCount > 0 ? `保留手工还款：${lockedCount} 条。` : "",
+      startDate && endDate ? `已更新 ${startDate} 至 ${endDate} 的还款计划。` : "",
+      lockedCount && lockedCount > 0 ? `已发生还款保持不变：${lockedCount} 条。` : "",
     ].filter(Boolean).join("\n");
   }
 

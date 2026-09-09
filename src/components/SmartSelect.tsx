@@ -162,6 +162,30 @@ function optionSearchText(option: SmartSelectOption) {
   return `${stripIndent(option.label)} ${option.subLabel ?? ""} ${option.title ?? ""}`.toLowerCase();
 }
 
+/**
+ * Whether a row's right-side subLabel only repeats text already shown in the
+ * main label (e.g. label "人民币 CNY" + subLabel "CNY", or an account label
+ * "张四·招行·信用卡" whose subLabel repeats the kind/owner text). Such subLabels
+ * are suppressed by the renderer.
+ */
+const SELECT_TEXT_NORMALIZE_RE = /[\s·・•|/\\()（）\-—_]+/g;
+
+function subLabelDuplicatesLabel(label: string, subLabel?: string | null): boolean {
+  if (!subLabel) return false;
+  const normalizedLabel = label.toLowerCase().replace(SELECT_TEXT_NORMALIZE_RE, "");
+  if (!normalizedLabel) return false;
+  const tokens = subLabel.split(/[·|/]/)
+    .map((token) => token.toLowerCase().replace(SELECT_TEXT_NORMALIZE_RE, ""))
+    .filter(Boolean);
+  if (tokens.length === 0) return false;
+  return tokens.every((token) => normalizedLabel.includes(token));
+}
+
+function rowSubLabel(option: Pick<SmartSelectOption, "label" | "subLabel">): string | null {
+  if (!option.subLabel) return null;
+  return subLabelDuplicatesLabel(option.label, option.subLabel) ? null : option.subLabel;
+}
+
 function hasHierarchy(options: SmartSelectOption[]) {
   return options.some((option) => option.isHeader || option.isGroup || option.parentId);
 }
@@ -1014,7 +1038,7 @@ export function SmartSelect(props: SmartSelectProps) {
         >
           {optionLabel}
         </span>
-        {!singleGridColumns && !insidePanel && option.subLabel ? (
+        {!singleGridColumns && !insidePanel && rowSubLabel(option) ? (
           <span className="max-w-[48%] shrink-0 truncate text-[10px] text-slate-400" title={option.subLabel}>{option.subLabel}</span>
         ) : null}
       </button>
@@ -1050,7 +1074,7 @@ export function SmartSelect(props: SmartSelectProps) {
         }
       >
         <span className="min-w-0 flex-1 truncate" title={option.title || optionLabel}>{optionLabel}</span>
-        {!insidePanel && option.subLabel ? (
+        {!insidePanel && rowSubLabel(option) ? (
           <span className="max-w-[48%] shrink-0 truncate text-[10px] text-slate-400" title={option.subLabel}>{option.subLabel}</span>
         ) : null}
       </button>
@@ -1262,7 +1286,7 @@ export function SmartSelect(props: SmartSelectProps) {
                       } ${selected ? "font-medium text-blue-700" : "text-slate-700"}`}
                 >
                   <span className="min-w-0 flex-1 truncate" title={option.title || optionLabel}>{optionLabel}</span>
-                  {option.subLabel ? (
+                  {rowSubLabel(option) ? (
                     <span className="max-w-[48%] shrink-0 truncate text-[10px] text-slate-400" title={option.subLabel}>{option.subLabel}</span>
                   ) : null}
                 </button>
@@ -1449,7 +1473,7 @@ export function SmartSelect(props: SmartSelectProps) {
         {mode === "single" ? (
           <span className={`${selectedLabel ? "text-slate-800" : "text-slate-400"} flex min-w-0 flex-1 items-center`} title={selectedTitle}>
             <span className="min-w-0 truncate">{selectedLabel || placeholder || t("txForm.selectPlaceholder")}</span>
-            {selectedOption?.subLabel ? (
+            {selectedOption?.subLabel && rowSubLabel(selectedOption) ? (
               <span className="ml-1 max-w-[42%] shrink-0 truncate text-[10px] text-slate-400">{selectedOption.subLabel}</span>
             ) : null}
           </span>

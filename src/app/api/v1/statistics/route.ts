@@ -12,7 +12,7 @@ import {
   SYSTEM_INSURANCE_RETURN_CATEGORY,
 } from "@/lib/default-categories";
 import { addStatisticCategoryBucket, buildStatisticCategoryItemsFromBuckets, createStatisticCategoryResolver, getBusinessResultStatisticItems, getIncomeExpenseStatisticAmount, getInvestmentStatisticItems } from "@/lib/transaction-statistics";
-import { isCreditCardRepaymentTransfer } from "@/lib/transaction-semantics";
+import { isCreditCardRepaymentTransfer, isDebtPrincipalTransfer } from "@/lib/transaction-semantics";
 
 export const dynamic = "force-dynamic";
 
@@ -185,19 +185,28 @@ export async function GET(req: NextRequest) {
           accountKind: accountKindById.get(e.accountId),
           toAccountKind: accountKindById.get(e.toAccountId ?? ""),
         })) continue;
+        // Borrow / lend / repay / collect / scheduled repayments: the principal
+        // itself is a balance-sheet move, not income/expense.  Skip the principal
+        // here; the interest portion is still reported via
+        // getBusinessResultStatisticItems below.
+        const isDebtPrincipal = isDebtPrincipalTransfer(e);
         if (isToSelf && !isFromSelf) {
-          row.income += Math.abs(amount);
-          addStatisticCategoryBucket(incomeByCat, resolveCategory({ type: "income", categoryId: e.categoryId, categoryName: e.categoryName }), Math.abs(amount));
-          for (const et of e.EntryTag) {
-            const existing = incomeByTag.get(et.tagId);
-            incomeByTag.set(et.tagId, { id: et.Tag.id, name: et.Tag.name, color: et.Tag.color ?? "#3B82F6", value: (existing?.value ?? 0) + Math.abs(amount) });
+          if (!isDebtPrincipal) {
+            row.income += Math.abs(amount);
+            addStatisticCategoryBucket(incomeByCat, resolveCategory({ type: "income", categoryId: e.categoryId, categoryName: e.categoryName }), Math.abs(amount));
+            for (const et of e.EntryTag) {
+              const existing = incomeByTag.get(et.tagId);
+              incomeByTag.set(et.tagId, { id: et.Tag.id, name: et.Tag.name, color: et.Tag.color ?? "#3B82F6", value: (existing?.value ?? 0) + Math.abs(amount) });
+            }
           }
         } else if (isFromSelf && !isToSelf) {
-          row.expense += Math.abs(amount);
-          addStatisticCategoryBucket(expenseByCat, resolveCategory({ type: "expense", categoryId: e.categoryId, categoryName: e.categoryName }), Math.abs(amount));
-          for (const et of e.EntryTag) {
-            const existing = expenseByTag.get(et.tagId);
-            expenseByTag.set(et.tagId, { id: et.Tag.id, name: et.Tag.name, color: et.Tag.color ?? "#3B82F6", value: (existing?.value ?? 0) + Math.abs(amount) });
+          if (!isDebtPrincipal) {
+            row.expense += Math.abs(amount);
+            addStatisticCategoryBucket(expenseByCat, resolveCategory({ type: "expense", categoryId: e.categoryId, categoryName: e.categoryName }), Math.abs(amount));
+            for (const et of e.EntryTag) {
+              const existing = expenseByTag.get(et.tagId);
+              expenseByTag.set(et.tagId, { id: et.Tag.id, name: et.Tag.name, color: et.Tag.color ?? "#3B82F6", value: (existing?.value ?? 0) + Math.abs(amount) });
+            }
           }
         }
         for (const item of getBusinessResultStatisticItems(e)) {

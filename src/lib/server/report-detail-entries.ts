@@ -37,6 +37,7 @@ export async function loadReportDetailEntries(
     amount: record.type === "investment" && (record.fundSubtype === "redeem" || record.fundSubtype === "switch_out")
       ? 0
       : toNumber(record.amount),
+    currency: record.currency ?? "CNY",
     runningBalance: null,
     type: record.type,
     categoryId: record.categoryId,

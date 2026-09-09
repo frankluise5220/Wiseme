@@ -106,6 +106,8 @@ function summaryRows(payload: HouseholdBackupPayload) {
     { field: "fundNavCaches", value: payload.counts.fundNavCaches },
     { field: "fundSnapshots", value: payload.counts.fundSnapshots },
     { field: "stockBrokerageCatalogs", value: payload.counts.stockBrokerageCatalogs },
+    { field: "approvedCurrencies", value: payload.counts.approvedCurrencies },
+    { field: "customCurrencyRequests", value: payload.counts.customCurrencyRequests },
     { field: "distillLogs", value: payload.counts.distillLogs },
     { field: "commandTestResults", value: payload.counts.commandTestResults },
     { field: "commandAliases", value: payload.counts.commandAliases },
@@ -1567,6 +1569,8 @@ export async function buildHouseholdBackupPayload(
     entryBusinessLinks,
     fundNavCaches,
     stockBrokerageCatalogs,
+    approvedCurrencies,
+    customCurrencyRequests,
     distillLogs,
     commandTestResults,
     commandAliases,
@@ -1688,6 +1692,12 @@ export async function buildHouseholdBackupPayload(
     isSystemBackup
       ? prisma.commandAlias.findMany({ orderBy: [{ category: "asc" }, { key: "asc" }] })
       : Promise.resolve([]),
+    isSystemBackup
+      ? prisma.approvedCurrency.findMany({ orderBy: [{ code: "asc" }] })
+      : Promise.resolve([]),
+    isSystemBackup
+      ? prisma.customCurrencyRequest.findMany({ orderBy: [{ createdAt: "asc" }] })
+      : Promise.resolve([]),
     prisma.systemSetting.findMany({ orderBy: [{ key: "asc" }] }),
     prisma.accessKey.findMany({ orderBy: [{ createdAt: "asc" }] }),
     prisma.aiChannel.findMany({ orderBy: [{ createdAt: "asc" }] }),
@@ -1784,6 +1794,8 @@ export async function buildHouseholdBackupPayload(
       fundNavCaches: fundNavCaches.length,
       fundSnapshots: fundSnapshots.length,
       stockBrokerageCatalogs: stockBrokerageCatalogs.length,
+      approvedCurrencies: approvedCurrencies.length,
+      customCurrencyRequests: customCurrencyRequests.length,
       distillLogs: distillLogs.length,
       commandTestResults: commandTestResults.length,
       commandAliases: commandAliases.length,
@@ -1842,6 +1854,8 @@ export async function buildHouseholdBackupPayload(
       fundNavCaches,
       fundSnapshots,
       stockBrokerageCatalogs,
+      approvedCurrencies,
+      customCurrencyRequests,
       distillLogs,
       commandTestResults,
       commandAliases,
@@ -1907,6 +1921,8 @@ export async function buildHouseholdBackupWorkbook(payload: HouseholdBackupPaylo
     ["FundNavCache", sheetRows(payload.data.fundNavCaches)],
     ["FundSnapshots", sheetRows(payload.data.fundSnapshots)],
     ["StockBrokerageCatalog", sheetRows(payload.data.stockBrokerageCatalogs)],
+    ["ApprovedCurrencies", sheetRows(payload.data.approvedCurrencies)],
+    ["CustomCurrencyRequests", sheetRows(payload.data.customCurrencyRequests)],
     ["DistillLogs", sheetRows(payload.data.distillLogs)],
     ["CommandTestResults", sheetRows(payload.data.commandTestResults)],
     ["CommandAliases", sheetRows(payload.data.commandAliases)],
@@ -2076,6 +2092,8 @@ export function parseBackupPayload(raw: unknown) {
       fundNavCaches: ensureArray(data.fundNavCaches ?? [], "data.fundNavCaches"),
       fundSnapshots: ensureArray(data.fundSnapshots ?? [], "data.fundSnapshots"),
       stockBrokerageCatalogs: ensureArray(data.stockBrokerageCatalogs ?? [], "data.stockBrokerageCatalogs"),
+      approvedCurrencies: ensureArray(data.approvedCurrencies ?? [], "data.approvedCurrencies"),
+      customCurrencyRequests: ensureArray(data.customCurrencyRequests ?? [], "data.customCurrencyRequests"),
       distillLogs: ensureArray(data.distillLogs ?? [], "data.distillLogs"),
       commandTestResults: ensureArray(data.commandTestResults ?? [], "data.commandTestResults"),
       commandAliases: ensureArray(data.commandAliases ?? [], "data.commandAliases"),
@@ -2387,6 +2405,18 @@ export async function restoreHouseholdBackup(
         {},
         { tableNames: ["stock_brokerage_catalog"] },
       );
+      await optionalPrismaDeleteMany(
+        tx,
+        "approvedCurrency",
+        {},
+        { tableNames: ["approved_currencies"] },
+      );
+      await optionalPrismaDeleteMany(
+        tx,
+        "customCurrencyRequest",
+        {},
+        { tableNames: ["custom_currency_requests"] },
+      );
       await tx.distillLog.deleteMany({});
       await tx.commandTestResult.deleteMany({});
     }
@@ -2503,6 +2533,28 @@ export async function restoreHouseholdBackup(
         restoreError("当前系统版本不支持证券公司目录数据，请先升级后再恢复。");
       }
       await createManyRecords(stockBrokerageCatalogDelegate, data.stockBrokerageCatalogs);
+    }
+
+    if (isSystemRestore && data.approvedCurrencies.length > 0) {
+      const approvedCurrencyDelegate = getOptionalPrismaDelegate<OptionalPrismaRestoreDelegate>(
+        tx,
+        "approvedCurrency",
+      );
+      if (!approvedCurrencyDelegate) {
+        restoreError("当前系统版本不支持自选币种数据，请先升级后再恢复。");
+      }
+      await createManyRecords(approvedCurrencyDelegate, data.approvedCurrencies);
+    }
+
+    if (isSystemRestore && data.customCurrencyRequests.length > 0) {
+      const customCurrencyRequestDelegate = getOptionalPrismaDelegate<OptionalPrismaRestoreDelegate>(
+        tx,
+        "customCurrencyRequest",
+      );
+      if (!customCurrencyRequestDelegate) {
+        restoreError("当前系统版本不支持自选币种申请记录，请先升级后再恢复。");
+      }
+      await createManyRecords(customCurrencyRequestDelegate, data.customCurrencyRequests);
     }
 
     if (isSystemRestore && data.distillLogs.length > 0) {

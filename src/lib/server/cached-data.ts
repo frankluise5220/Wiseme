@@ -114,12 +114,14 @@ async function _loadEntriesForAccount(
         include: {
           Institution: { select: { name: true, shortName: true } },
           AccountGroup: { select: { name: true } },
+          Counterparty: { select: { name: true, shortName: true } },
         },
       },
       toAccount: {
         include: {
           Institution: { select: { name: true, shortName: true } },
           AccountGroup: { select: { name: true } },
+          Counterparty: { select: { name: true, shortName: true } },
         },
       },
     },

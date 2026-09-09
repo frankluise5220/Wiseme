@@ -53,7 +53,7 @@ function mdUtcDots(date: Date) {
 }
 
 function isSettlementDebtAccount(account?: { kind?: AccountKind | null; counterpartyId?: string | null } | null) {
-  return account?.kind === AccountKind.loan && !!account.counterpartyId;
+  return account?.kind === AccountKind.settlement || (account?.kind === AccountKind.loan && !!account.counterpartyId);
 }
 
 function mapDetailEntry(
@@ -80,6 +80,7 @@ function mapDetailEntry(
         ? Math.abs(toNumber(entry.amount))
         : entry.amount,
     ),
+    currency: entry.currency ?? "CNY",
     runningBalance: null,
     type: entry.type,
     categoryId: entry.categoryId,
@@ -162,6 +163,7 @@ export async function GET(req: Request) {
         billingDay: true,
         repaymentDay: true,
         creditBillMode: true,
+        billingDayTxPeriod: true,
       },
     });
     if (!account) {
@@ -210,6 +212,7 @@ export async function GET(req: Request) {
             account.billingDay,
             account.repaymentDay ?? null,
             new Date(),
+            account.billingDayTxPeriod,
           );
           return computed
             ? {

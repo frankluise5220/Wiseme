@@ -62,7 +62,7 @@ async function resolveBankAccount(householdId: string, name: string) {
         { name },
       ],
     },
-    select: { id: true, name: true, kind: true, currency: true, billingDay: true },
+    select: { id: true, name: true, kind: true, currency: true, billingDay: true, billingDayTxPeriod: true },
     orderBy: [{ isActive: "desc" }, { createdAt: "asc" }, { id: "asc" }],
   });
 }

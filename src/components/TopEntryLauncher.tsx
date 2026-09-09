@@ -10,6 +10,7 @@ export function TopEntryLauncher({
     | "transaction"
     | "transfer"
     | "fx"
+    | "fx-sell"
     | "investment"
     | "stock"
     | "stock-transfer"
@@ -27,7 +28,14 @@ export function TopEntryLauncher({
       actions={[
         { key: "transaction", label: t("basicDetail.guide.entry.title") },
         { key: "transfer", label: t("transaction.type.transfer") },
-        { key: "fx", label: t("entry.kind.fx") },
+        {
+          key: "fx",
+          label: t("entry.kind.fxGroup"),
+          children: [
+            { key: "fx", label: t("entry.kind.fx") },
+            { key: "fx-sell", label: t("entry.kind.fxSell") },
+          ],
+        },
         { key: "investment", label: t("txForm.fund") },
         { key: "stock", label: t("investment.product.stock") },
         { key: "stock-transfer", label: t("stockPanel.transfer") },

@@ -4,6 +4,7 @@ import { ArrowLeftRight, ArrowRight, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import { CalcInput } from "./CalcInput";
+import { CurrencySmartSelect } from "./CurrencySmartSelect";
 import { DateStepper } from "./DateStepper";
 import { EntityCreateForm, NestedAddModal } from "./EntityCreateForm";
 import { EntryAttachmentButton, uploadEntryAttachmentFiles } from "./EntryAttachmentPanel";
@@ -42,8 +43,10 @@ import {
 import { filterIncomeExpenseInstitutions } from "@/lib/institution-rules";
 import { buildCategoryParentOptions, buildCategoryTreeOptions } from "@/components/categorySmartSelect";
 import { getAccountLabelFieldsPreference } from "@/lib/client/appPreferences";
+import { normalizeOptionalCurrency } from "@/lib/currency";
 
 type TxType = "expense" | "income" | "advance" | "transfer" | "fx" | "investment";
+type FxDirection = "buy" | "sell";
 type TransactionActionResult =
   | { ok: true; data?: { id?: string | null; cashEntryId?: string | null } | null }
   | { ok: false; error: string };
@@ -101,6 +104,8 @@ type OpenFromAiDetail = {
   defaultAccountId?: string;
   defaultFromAccountId?: string;
   defaultToAccountId?: string;
+  /** FX window direction: buy = CNY -> foreign (购入外汇), sell = foreign -> CNY (卖出外汇). */
+  fxDirection?: FxDirection;
   /** Locks the entry type: only this type is kept and the expense/income/advance tab switcher is hidden (e.g. stock-to-cash transfer only allows transfer). */
   lockedType?: TxType;
   /** Stock-to-cash transfer mode: the target account is fixed to the securities cash account of the current stock institution, and the source account is chosen from cash accounts of the same owner. */
@@ -581,6 +586,7 @@ export function TransactionFormModal({
   const [fxToAmount, setFxToAmount] = useState("");
   const [fxRate, setFxRate] = useState("");
   const [fxFeeAmount, setFxFeeAmount] = useState("");
+  const [fxDirection, setFxDirection] = useState<FxDirection>("buy");
   const [fxFromCurrencyDraft, setFxFromCurrencyDraft] = useState("CNY");
   const [fxToCurrencyDraft, setFxToCurrencyDraft] = useState("USD");
   const [fetchingFxRate, setFetchingFxRate] = useState(false);
@@ -600,6 +606,8 @@ export function TransactionFormModal({
   const [fixedAssetLinkLocked, setFixedAssetLinkLocked] = useState(false);
   const [fixedAssetAccountNestedOpen, setFixedAssetAccountNestedOpen] = useState(false);
   const [fixedAssetAccountAutoOpen, setFixedAssetAccountAutoOpen] = useState(false);
+  const [foreignCurrencyEnabled, setForeignCurrencyEnabled] = useState(false);
+  const [txCurrency, setTxCurrency] = useState("");
   const [counterpartyInstitutionId, setCounterpartyInstitutionId] = useState("");
   const [note, setNote] = useState("");
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
@@ -831,18 +839,26 @@ export function TransactionFormModal({
       .sort((a, b) => COMMON_CURRENCY_OPTIONS.indexOf(a) - COMMON_CURRENCY_OPTIONS.indexOf(b));
   }, [displayTransferOptions]);
   const fxFromAccountOptions = useMemo(
-    () => displayTransferOptions.filter((option) => (option as AccountOption).kind === "bank_debit"),
-    [displayTransferOptions],
+    () => displayTransferOptions.filter((option) => {
+      const account = option as AccountOption;
+      if (account.kind !== "bank_debit") return false;
+      // 卖出外汇：换出侧必须是外币账户；购入时换出侧不限币种（默认人民币账户）。
+      return fxDirection === "sell" ? isForeignCurrency(account.currency) : true;
+    }),
+    [displayTransferOptions, fxDirection],
   );
   const fxToAccountOptions = useMemo(
     () => displayTransferOptions.filter((option) => {
       const account = option as AccountOption;
+      const currencyOk = fxDirection === "sell"
+        ? !isForeignCurrency(account.currency)
+        : isForeignCurrency(account.currency);
       return account.id !== fromAccountId
         && account.kind !== "bank_credit"
         && account.kind !== "loan"
-        && isForeignCurrency(account.currency);
+        && currencyOk;
     }),
-    [displayTransferOptions, fromAccountId],
+    [displayTransferOptions, fromAccountId, fxDirection],
   );
   function formatFxAmount(value: number) {
     if (!Number.isFinite(value) || value <= 0) return "";
@@ -1067,6 +1083,7 @@ export function TransactionFormModal({
     setFxToAmount("");
     setFxRate("");
     setFxFeeAmount("");
+    setFxDirection("buy");
     setFxFromCurrencyDraft("CNY");
     setFxToCurrencyDraft("USD");
     setCreateInstallment(false);
@@ -1091,6 +1108,8 @@ export function TransactionFormModal({
     setFixedAssetLinkLocked(false);
     setFixedAssetAccountNestedOpen(false);
     setFixedAssetAccountAutoOpen(false);
+    setForeignCurrencyEnabled(false);
+    setTxCurrency("");
     setCounterpartyInstitutionId("");
     setNote("");
     setSelectedTagIds([]);
@@ -1122,6 +1141,8 @@ export function TransactionFormModal({
     setFixedAssetLinkLocked(false);
     setFixedAssetAccountNestedOpen(false);
     setFixedAssetAccountAutoOpen(false);
+    setForeignCurrencyEnabled(false);
+    setTxCurrency("");
     setPendingAttachmentFiles([]);
     setRequestId(null);
     setEditEntryId(null);
@@ -1216,6 +1237,7 @@ export function TransactionFormModal({
               ? "investment"
               : "expense";
       const effectiveType = detail.lockedType ?? mappedType;
+      const effectiveFxDirection: FxDirection = detail.fxDirection === "sell" ? "sell" : "buy";
 
       setRequestId(detail.requestId);
       setOpen(true);
@@ -1235,7 +1257,10 @@ export function TransactionFormModal({
       setFixedAssetLinkLocked(effectiveType === "expense" && detail.lockFixedAsset === true);
       setFixedAssetAccountNestedOpen(false);
       setFixedAssetAccountAutoOpen(fixedAssetRequired && !forcedFixedAssetAccountId);
+      setForeignCurrencyEnabled(false);
+      setTxCurrency("");
       setTxType(effectiveType);
+      setFxDirection(effectiveFxDirection);
 
       const dateStr = normalizeYmd(item.date) || today;
       setDate(dateStr);
@@ -1253,10 +1278,19 @@ export function TransactionFormModal({
       setFxFeeAmount("");
 
       if (effectiveType === "transfer" || effectiveType === "fx") {
-        const nextFromAccountId = findAccountIdByLabel(item.fromAccount, transferAccounts) || detail.defaultFromAccountId || detail.defaultAccountId || (defaultAccountId ?? "");
+        let nextFromAccountId = findAccountIdByLabel(item.fromAccount, transferAccounts) || detail.defaultFromAccountId || detail.defaultAccountId || (defaultAccountId ?? "");
         const rawNextToAccountId = findAccountIdByLabel(item.toAccount ?? item.account, transferAccounts) || detail.defaultToAccountId || "";
         const rawNextToAccount = transferAccounts.find((account) => account.id === rawNextToAccountId);
-        const nextToAccountId = effectiveType === "fx" && rawNextToAccount && !isForeignCurrency(rawNextToAccount.currency)
+        const fromAccountForFx = transferAccounts.find((account) => account.id === nextFromAccountId);
+        // 预填账户必须符合当前换汇方向：卖出时换出侧须为外币账户，购入时换入侧须为外币账户。
+        if (effectiveType === "fx" && effectiveFxDirection === "sell" && fromAccountForFx && !isForeignCurrency(fromAccountForFx.currency)) {
+          nextFromAccountId = "";
+        }
+        const nextToAccountId = effectiveType === "fx" && rawNextToAccount && (
+          effectiveFxDirection === "sell"
+            ? isForeignCurrency(rawNextToAccount.currency)
+            : !isForeignCurrency(rawNextToAccount.currency)
+        )
           ? ""
           : rawNextToAccountId;
         // Stock-to-cash transfer: the target account is fixed to the securities cash account of the current stock institution.
@@ -1269,10 +1303,15 @@ export function TransactionFormModal({
         setFromAccountId(effectiveFromAccountId);
         setToAccountId(effectiveToAccountId);
         if (effectiveType === "fx") {
-          const fromCurrency = transferAccounts.find((account) => account.id === nextFromAccountId)?.currency;
-          const toCurrency = transferAccounts.find((account) => account.id === nextToAccountId)?.currency;
-          setFxFromCurrencyDraft(normalizeCurrencyLabel(fromCurrency));
-          setFxToCurrencyDraft(toCurrency ? normalizeCurrencyLabel(toCurrency) : "USD");
+          const fromCurrency = transferAccounts.find((account) => account.id === effectiveFromAccountId)?.currency;
+          const toCurrency = transferAccounts.find((account) => account.id === effectiveToAccountId)?.currency;
+          if (effectiveFxDirection === "sell") {
+            setFxFromCurrencyDraft(effectiveFromAccountId ? normalizeCurrencyLabel(fromCurrency) : "USD");
+            setFxToCurrencyDraft(BASE_CASH_CURRENCY);
+          } else {
+            setFxFromCurrencyDraft(normalizeCurrencyLabel(fromCurrency));
+            setFxToCurrencyDraft(toCurrency ? normalizeCurrencyLabel(toCurrency) : "USD");
+          }
         }
         setCategoryId("");
         setAccountId("");
@@ -1353,6 +1392,7 @@ export function TransactionFormModal({
         fixedAssetAccountId?: string;
         fixedAssetAssetId?: string;
         fixedAssetLinked?: boolean;
+        currency?: string | null;
       }>).detail;
       if (!detail?.requestId || !detail.entryId) return;
       setRequestId(detail.requestId);
@@ -1374,6 +1414,14 @@ export function TransactionFormModal({
       setFixedAssetLinkLocked(false);
       setFixedAssetAccountNestedOpen(false);
       setFixedAssetAccountAutoOpen(false);
+      // Foreign-currency expense: the switch turns on when the record currency
+      // differs from the posting account's own currency (e.g. JPY spend on a CNY credit card).
+      const editRecordCurrency = normalizeCurrencyLabel(detail.currency);
+      const editAccountId = detail.type === "transfer" ? "" : (detail.accountId ?? defaultAccountId ?? "");
+      const editAccountCurrency = normalizeCurrencyLabel(accountMetaById.get(editAccountId)?.currency);
+      const editForeignTxn = detail.type === "expense" && Boolean(detail.currency) && editRecordCurrency !== editAccountCurrency;
+      setForeignCurrencyEnabled(editForeignTxn);
+      setTxCurrency(editForeignTxn ? editRecordCurrency : "");
       setOpen(true);
       setTxType(detail.type);
       setDate(detail.date || today);
@@ -1453,6 +1501,7 @@ export function TransactionFormModal({
     return () => window.removeEventListener("mmh:transaction:edit", onOpenEdit as EventListener);
   }, [
     accountList,
+    accountMetaById,
     accountSSOptions,
     defaultAccountId,
     today,
@@ -1488,8 +1537,12 @@ export function TransactionFormModal({
         setDate(conversion.date || today);
         setFromAccountId(conversion.fromAccountId ?? "");
         setToAccountId(conversion.toAccountId ?? "");
-        setFxFromCurrencyDraft(normalizeCurrencyLabel(conversion.fromCurrency));
-        setFxToCurrencyDraft(normalizeCurrencyLabel(conversion.toCurrency));
+        const fromCurrencyLabel = normalizeCurrencyLabel(conversion.fromCurrency);
+        const toCurrencyLabel = normalizeCurrencyLabel(conversion.toCurrency);
+        // 方向以换入侧币种为准：外币 -> CNY 视为卖出，其余（CNY->外币、外币->外币）沿用购入表单。
+        setFxDirection(toCurrencyLabel === BASE_CASH_CURRENCY ? "sell" : "buy");
+        setFxFromCurrencyDraft(fromCurrencyLabel);
+        setFxToCurrencyDraft(toCurrencyLabel);
         setAmount(formatFxAmount(Number(conversion.fromAmount ?? 0)));
         setFxToAmount(formatFxAmount(Number(conversion.toAmount ?? 0)));
         setFxRate(formatFxRate(Number(conversion.exchangeRate ?? 0)));
@@ -1624,17 +1677,28 @@ export function TransactionFormModal({
         window.alert(t("txForm.alert.fromAccountDebitOnly"));
         return;
       }
+      if (fxDirection === "sell" && !isForeignCurrency(accountMetaById.get(fromAccountId)?.currency)) {
+        window.alert(t("txForm.alert.sellFromAccountForeignOnly"));
+        return;
+      }
       if (toAccountId && fromAccountId === toAccountId) {
         window.alert(t("txForm.alert.accountsSame"));
         return;
       }
-      if (toAccountId && !isForeignCurrency(accountMetaById.get(toAccountId)?.currency)) {
-        window.alert(t("txForm.alert.toAccountForeignOnly"));
-        return;
-      }
-      if (!toAccountId && !isForeignCurrency(fxToCurrencyDraft)) {
-        window.alert(t("txForm.alert.toCurrencyForeignOnly"));
-        return;
+      if (fxDirection === "buy") {
+        if (toAccountId && !isForeignCurrency(accountMetaById.get(toAccountId)?.currency)) {
+          window.alert(t("txForm.alert.toAccountForeignOnly"));
+          return;
+        }
+        if (!toAccountId && !isForeignCurrency(fxToCurrencyDraft)) {
+          window.alert(t("txForm.alert.toCurrencyForeignOnly"));
+          return;
+        }
+      } else {
+        if (toAccountId && isForeignCurrency(accountMetaById.get(toAccountId)?.currency)) {
+          window.alert(t("txForm.alert.sellToAccountBaseOnly"));
+          return;
+        }
       }
       if (fxFromCurrency === fxToCurrency) {
         window.alert(t("txForm.alert.sameCurrencyUseTransfer"));
@@ -1739,6 +1803,18 @@ export function TransactionFormModal({
         } else {
           formData.set("accountId", accountId);
           formData.set("categoryId", categoryId);
+          if (foreignCurrencyEnabled) {
+            if (!txCurrency) {
+              window.alert(t("txForm.alert.selectTxCurrency"));
+              return;
+            }
+            const normalizedTxCurrency = normalizeOptionalCurrency(txCurrency);
+            if (normalizedTxCurrency) formData.set("currency", normalizedTxCurrency);
+          } else {
+            // Explicitly reset to the posting account's currency on edit;
+            // the server treats an empty value as "use account currency".
+            formData.set("currency", "");
+          }
           if (shouldLinkFixedAsset) {
             formData.set("fixedAssetAccountId", fixedAssetAccountId);
             if (fixedAssetAssetId) formData.set("fixedAssetAssetId", fixedAssetAssetId);
@@ -1801,7 +1877,14 @@ export function TransactionFormModal({
           defaultAction="transaction"
           actions={[
             { key: "transaction", label: t("txForm.record") },
-            { key: "fx", label: t("txForm.fx") },
+            {
+              key: "fx",
+              label: t("entry.kind.fxGroup"),
+              children: [
+                { key: "fx", label: t("entry.kind.fx") },
+                { key: "fx-sell", label: t("entry.kind.fxSell") },
+              ],
+            },
             { key: "investment", label: t("txForm.fundMetal"), disabled: !showInvestment },
             { key: "wealth", label: t("investment.product.wealth") },
             { key: "deposit-buy", label: t("txForm.depositIn") },
@@ -1821,7 +1904,9 @@ export function TransactionFormModal({
           <div className="app-modal-panel mobile-transaction-modal max-w-xl">
             <div className="modal-header shrink-0">
               <div className="text-sm font-semibold text-slate-800">
-                {txType === "fx" ? t("txForm.fx") : editEntryId ? t("txForm.editEntry") : t("txForm.addEntry")}
+                {txType === "fx"
+                  ? (fxDirection === "sell" ? t("txForm.fxSellTitle") : t("txForm.fxBuyTitle"))
+                  : editEntryId ? t("txForm.editEntry") : t("txForm.addEntry")}
               </div>
               <button
                 type="button"
@@ -2147,7 +2232,11 @@ export function TransactionFormModal({
                     </div>
                   </div>
 
-                  <div className={txType === "expense" ? "grid grid-cols-[4.5rem_minmax(0,1fr)] items-end gap-3" : "space-y-1"}>
+                  <div className={txType === "expense"
+                    ? foreignCurrencyEnabled
+                      ? "grid grid-cols-[4.5rem_4.5rem_8rem_minmax(0,1fr)] items-end gap-3"
+                      : "grid grid-cols-[4.5rem_4.5rem_minmax(0,1fr)] items-end gap-3"
+                    : "space-y-1"}>
                     {txType === "expense" ? (
                       <div className="space-y-1">
                         <div className="form-label">{t("txForm.fixedAssetToggle")}</div>
@@ -2192,6 +2281,61 @@ export function TransactionFormModal({
                             />
                           </span>
                         </button>
+                      </div>
+                    ) : null}
+                    {txType === "expense" ? (
+                      <div className="space-y-1">
+                        <div className="form-label">{t("txForm.foreignCurrencyToggle")}</div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={foreignCurrencyEnabled}
+                          aria-label={t("txForm.foreignCurrencyToggle")}
+                          onClick={() => {
+                            if (foreignCurrencyEnabled) {
+                              setForeignCurrencyEnabled(false);
+                              setTxCurrency("");
+                            } else {
+                              setForeignCurrencyEnabled(true);
+                              // Preselect the posting account's own currency (CNY ledger → CNY)
+                              // so the selector is never empty right after toggling on.
+                              setTxCurrency(normalizeCurrencyLabel(accountMetaById.get(accountId)?.currency));
+                            }
+                          }}
+                          className={[
+                            "flex h-9 w-12 items-center justify-center rounded-[10px] border px-2 text-xs font-medium transition",
+                            foreignCurrencyEnabled
+                              ? "border-blue-300 bg-blue-50 text-blue-700"
+                              : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50",
+                          ].join(" ")}
+                        >
+                          <span
+                            className={[
+                              "relative h-4 w-7 shrink-0 rounded-full transition",
+                              foreignCurrencyEnabled ? "bg-blue-600" : "bg-slate-300",
+                            ].join(" ")}
+                          >
+                            <span
+                              className={[
+                                "absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition",
+                                foreignCurrencyEnabled ? "left-3.5" : "left-0.5",
+                              ].join(" ")}
+                            />
+                          </span>
+                        </button>
+                      </div>
+                    ) : null}
+                    {txType === "expense" && foreignCurrencyEnabled ? (
+                      <div className="min-w-0 space-y-1">
+                        <div className="form-label">{t("txForm.txnCurrency")}</div>
+                        <CurrencySmartSelect
+                          value={txCurrency}
+                          onChange={setTxCurrency}
+                          onSubmitted={setTxCurrency}
+                          labelSystem={(code) => t(`entityForm.currency.${code.toLowerCase()}`, { defaultValue: code })}
+                          placeholder={t("txForm.txnCurrency")}
+                          density="regular"
+                        />
                       </div>
                     ) : null}
                     <div className="min-w-0 space-y-1">
@@ -2367,7 +2511,8 @@ export function TransactionFormModal({
                         if (v && v === toAccountId) setToAccountId("");
                         recordRecentAccount(v);
                       }}
-                        options={fxFromAccountOptions} placeholder={t("txForm.fxFromAccountPlaceholder")}
+                        options={fxFromAccountOptions}
+                        placeholder={fxDirection === "sell" ? t("txForm.fxSellFromAccountPlaceholder") : t("txForm.fxFromAccountPlaceholder")}
                         onCreateClick={() => { void openAccountCreate("from"); }} createLabel={t("txForm.addDebitAccount")}
                         onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
                         behavior={compactAccountSelectBehavior} />
@@ -2381,7 +2526,9 @@ export function TransactionFormModal({
                         recordRecentAccount(v);
                       }}
                         options={fxToAccountOptions}
-                        placeholder={t("txForm.fxToAccountPlaceholder", { currency: fxToCurrencyDraft })}
+                        placeholder={fxDirection === "sell"
+                          ? t("txForm.fxSellToAccountPlaceholder")
+                          : t("txForm.fxToAccountPlaceholder", { currency: fxToCurrencyDraft })}
                         onCreateClick={() => { void openAccountCreate("to"); }} createLabel={t("settings.accounts.add")}
                         onCycleOwnerFilter={cycleOwnerFilter} ownerFilterLabel={ownerFilterLabel}
                         behavior={compactAccountSelectBehavior} />
@@ -2391,13 +2538,25 @@ export function TransactionFormModal({
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
                       <div className="form-label">{t("txForm.fxFromCurrency")}</div>
-                      <div className="form-input flex h-9 items-center bg-slate-50 text-slate-700">
-                        {fromAccountId ? fxFromCurrency : t("txForm.fxCurrencyAuto")}
-                      </div>
+                      {fromAccountId || fxDirection === "buy" ? (
+                        <div className="form-input flex h-9 items-center bg-slate-50 text-slate-700">
+                          {fromAccountId ? fxFromCurrency : t("txForm.fxCurrencyAuto")}
+                        </div>
+                      ) : (
+                        <select
+                          value={fxFromCurrencyDraft}
+                          onChange={(event) => setFxFromCurrencyDraft(event.target.value)}
+                          className="form-input"
+                        >
+                          {fxCurrencyOptions.map((currency) => (
+                            <option key={`from-${currency}`} value={currency}>{currency}</option>
+                          ))}
+                        </select>
+                      )}
                     </div>
                     <div className="space-y-1">
                       <div className="form-label">{t("txForm.fxToCurrency")}</div>
-                      {toAccountId ? (
+                      {toAccountId || fxDirection === "sell" ? (
                         <div className="form-input flex h-9 items-center bg-slate-50 text-slate-700">
                           {fxToCurrency}
                         </div>
@@ -2460,7 +2619,7 @@ export function TransactionFormModal({
                     <div className="flex items-start gap-2">
                       <input
                         name="note"
-                        placeholder={t("txForm.fxNotePlaceholder")}
+                        placeholder={fxDirection === "sell" ? t("txForm.fxSellNotePlaceholder") : t("txForm.fxNotePlaceholder")}
                         value={note}
                         onChange={(e) => setNote(e.target.value)}
                         className="form-input flex-1"

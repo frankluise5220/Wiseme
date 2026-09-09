@@ -139,10 +139,10 @@ export async function POST(req: NextRequest) {
         source: true,
         accountId: true,
         accountName: true,
-        account: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } },
+        account: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, billingDayTxPeriod: true, tradingCalendar: true } },
         toAccountId: true,
         toAccountName: true,
-        toAccount: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } },
+        toAccount: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, billingDayTxPeriod: true, tradingCalendar: true } },
         categoryId: true,
         categoryName: true,
         note: true,
@@ -175,8 +175,8 @@ export async function POST(req: NextRequest) {
       ? await prisma.fundTransaction.findMany({
           where: { id: { in: directFundUpdateIds }, deletedAt: null, householdId: ctx.householdId },
           include: {
-            Account: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } },
-            CashAccount: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } },
+            Account: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, billingDayTxPeriod: true, tradingCalendar: true } },
+            CashAccount: { select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, billingDayTxPeriod: true, tradingCalendar: true } },
           },
         })
       : [];
@@ -223,7 +223,7 @@ export async function POST(req: NextRequest) {
 
     const accountIds = Array.from(new Set(updates.flatMap((item) => [item.account, item.viewAccount, item.toAccount, item.cashAccountId, item.fundAccountId].map((id) => String(id ?? "").trim()).filter(Boolean))));
     const accounts = accountIds.length > 0
-      ? await prisma.account.findMany({ where: { id: { in: accountIds }, isActive: true, ...hidFilter }, select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, tradingCalendar: true } })
+      ? await prisma.account.findMany({ where: { id: { in: accountIds }, isActive: true, ...hidFilter }, select: { id: true, name: true, kind: true, investProductType: true, billingDay: true, billingDayTxPeriod: true, tradingCalendar: true } })
       : [];
     const accountById = new Map(accounts.map((account) => [account.id, account]));
     const existingAccountById = new Map(
@@ -756,7 +756,7 @@ export async function POST(req: NextRequest) {
           : existing.postedAt;
         data.statementMonth =
           finalAccount && (finalAccount.kind === AccountKind.bank_credit || finalAccount.kind === AccountKind.loan) && finalAccount.billingDay
-            ? toStatementMonth(creditBillEffectiveDate({ type: finalType, date: finalDate, postedAt: finalPostedAt }) ?? finalDate, finalAccount.billingDay)
+            ? toStatementMonth(creditBillEffectiveDate({ type: finalType, date: finalDate, postedAt: finalPostedAt }) ?? finalDate, finalAccount.billingDay, finalAccount.billingDayTxPeriod)
             : null;
       }
       if (!skipAutoRepaymentCategory && isCreditCardRepaymentTransfer({

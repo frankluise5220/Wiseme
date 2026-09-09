@@ -9,6 +9,7 @@ const KIND_LABEL_KEYS: Record<string, string> = {
   deposit: "account.kind.deposit",
   investment: "account.kind.investment",
   fixed_asset: "account.kind.fixed_asset",
+  settlement: "account.kind.settlement",
   loan: "account.kind.loan",
   insurance: "account.kind.insurance",
   other: "account.kind.other",
@@ -25,6 +26,7 @@ const KIND_LABEL_FALLBACK: Record<string, string> = {
   deposit: "存款",
   investment: "投资",
   fixed_asset: "固定资产",
+  settlement: "往来款",
   loan: "债务/债权",
   insurance: "保险",
   other: "其他",
@@ -45,7 +47,7 @@ export function kindColor(k: string): string {
   if (k === "deposit") return "bg-cyan-50 text-cyan-700 border-cyan-200";
   if (k === "investment") return "bg-purple-50 text-purple-700 border-purple-200";
   if (k === "fixed_asset") return "bg-orange-50 text-orange-700 border-orange-200";
-  if (k === "loan") return "bg-red-50 text-red-700 border-red-200";
+  if (k === "loan" || k === "settlement") return "bg-red-50 text-red-700 border-red-200";
   if (k === "insurance") return "bg-indigo-50 text-indigo-700 border-indigo-200";
   return "bg-slate-50 text-slate-700 border-slate-200";
 }
@@ -58,7 +60,7 @@ export function kindHex(k: string): string {
   if (k === "deposit") return "#06B6D4";
   if (k === "investment") return "#8B5CF6";
   if (k === "fixed_asset") return "#F97316";
-  if (k === "loan") return "#EF4444";
+  if (k === "loan" || k === "settlement") return "#EF4444";
   if (k === "insurance") return "#6366F1";
   return "#64748B";
 }
@@ -71,7 +73,7 @@ export function kindIconName(k: string): string {
   if (k === "deposit") return "piggy-bank";
   if (k === "investment") return "piggy-bank";
   if (k === "fixed_asset") return "building-2";
-  if (k === "loan") return "building-2";
+  if (k === "loan" || k === "settlement") return "hand-coins";
   if (k === "insurance") return "shield";
   return "building-2";
 }
@@ -129,6 +131,7 @@ export const kindOrder: string[] = [
   "investment",
   "fixed_asset",
   "insurance",
+  "settlement",
   "loan",
   "other",
 ];

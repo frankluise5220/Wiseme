@@ -65,6 +65,7 @@ export const SYSTEM_INVESTMENT_LOSS_CATEGORY = "投资亏损";
 export const SYSTEM_INSURANCE_RETURN_CATEGORY = "保险回款";
 export const SYSTEM_INSURANCE_EXPENSE_CATEGORY = "保险支出";
 export const SYSTEM_SETTLEMENT_TRANSFER_CATEGORY = "借入借出";
+export const SYSTEM_MORTGAGE_FUND_CATEGORY = "资金账户";
 export const SYSTEM_BANK_INSTALLMENT_EXPENSE_CATEGORY = "银行分期";
 
 const legacySettlementTransferActionCategoryNames = new Set(["往来款", "还款", "提前还款", "贷款还款", "借入", "借出", "出借", "收回"]);
@@ -168,6 +169,12 @@ export async function ensureSettlementTransferCategory(writer: CategoryWriter, h
   const root = await ensureDefaultCategory(writer, householdId, "transfer", "转账", null, true);
   const child = await ensureDefaultCategory(writer, householdId, "transfer", SYSTEM_SETTLEMENT_TRANSFER_CATEGORY, root.id, true);
   return { id: child.id, name: SYSTEM_SETTLEMENT_TRANSFER_CATEGORY, type: "transfer" as const };
+}
+
+export async function ensureMortgageFundCategory(writer: CategoryWriter, householdId: string) {
+  const root = await ensureDefaultCategory(writer, householdId, "transfer", "转账", null, true);
+  const child = await ensureDefaultCategory(writer, householdId, "transfer", SYSTEM_MORTGAGE_FUND_CATEGORY, root.id, true);
+  return { id: child.id, name: SYSTEM_MORTGAGE_FUND_CATEGORY, type: "transfer" as const };
 }
 
 export async function ensureBankInstallmentExpenseCategory(writer: CategoryWriter, householdId: string) {

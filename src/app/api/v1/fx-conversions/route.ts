@@ -10,6 +10,7 @@ export const runtime = "nodejs";
 
 const FX_CONVERSION_SOURCE = "fx_conversion";
 const FX_CONVERSION_CATEGORY = "购汇";
+const FX_SELL_CATEGORY = "结汇";
 const BASE_CASH_CURRENCY = "CNY";
 
 function parseDateOnlyUtc(value: unknown) {
@@ -26,11 +27,7 @@ function parsePositiveAmount(value: unknown) {
 }
 
 function isFxAllowedAccountKind(kind: AccountKind) {
-  return kind !== AccountKind.bank_credit && kind !== AccountKind.loan;
-}
-
-function isForeignCurrency(currency: string) {
-  return normalizeCurrency(currency) !== BASE_CASH_CURRENCY;
+  return kind !== AccountKind.bank_credit && kind !== AccountKind.loan && kind !== AccountKind.settlement;
 }
 
 function currencyAccountName(currency: string) {
@@ -117,11 +114,10 @@ async function resolveFxAccounts(tx: FxWriter, {
   if (toAccount) {
     if (toAccount.householdId !== householdId) throw new Error("换入账户不属于当前账簿");
     if (!isFxAllowedAccountKind(toAccount.kind)) throw new Error("信用卡和往来款账户暂不支持直接换汇");
-    if (!isForeignCurrency(toAccount.currency)) throw new Error("换入账户只能选择外币账户");
+    if (normalizeCurrency(toAccount.currency) === fromCurrency) throw new Error("同币种账户请使用普通转账，不需要换汇交易");
   } else {
     const toCurrencyInput = requestedToCurrency;
     if (!toCurrencyInput) throw new Error("请选择换入币种");
-    if (!isForeignCurrency(toCurrencyInput)) throw new Error("换入币种只能选择外币");
     if (fromCurrency === toCurrencyInput) throw new Error("同币种账户请使用普通转账，不需要换汇交易");
     const targetName = currencyAccountName(toCurrencyInput);
     const existing = await tx.account.findFirst({
@@ -220,6 +216,7 @@ export async function POST(req: NextRequest) {
       const exchangeRate = explicitRate ?? toAmount / fromAmount;
       if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) throw new Error("汇率不正确");
       const noteText = note ?? `换汇：${fromCurrency} -> ${toCurrency}`;
+      const fxCategoryName = toCurrency === BASE_CASH_CURRENCY ? FX_SELL_CATEGORY : FX_CONVERSION_CATEGORY;
 
       const fromEntry = await tx.txRecord.create({
         data: {
@@ -231,7 +228,7 @@ export async function POST(req: NextRequest) {
           accountName: fromAccount.name,
           toAccountId: toAccount.id,
           toAccountName: toAccount.name,
-          categoryName: FX_CONVERSION_CATEGORY,
+          categoryName: fxCategoryName,
           currency: fromCurrency,
           source: FX_CONVERSION_SOURCE,
           note: noteText,
@@ -247,7 +244,7 @@ export async function POST(req: NextRequest) {
           accountName: toAccount.name,
           toAccountId: fromAccount.id,
           toAccountName: fromAccount.name,
-          categoryName: FX_CONVERSION_CATEGORY,
+          categoryName: fxCategoryName,
           currency: toCurrency,
           source: FX_CONVERSION_SOURCE,
           note: noteText,
@@ -358,6 +355,7 @@ export async function PATCH(req: NextRequest) {
       const exchangeRate = explicitRate ?? toAmount / fromAmount;
       if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) throw new Error("汇率不正确");
       const noteText = note ?? `换汇：${fromCurrency} -> ${toCurrency}`;
+      const fxCategoryName = toCurrency === BASE_CASH_CURRENCY ? FX_SELL_CATEGORY : FX_CONVERSION_CATEGORY;
 
       const fromEntry = await tx.txRecord.update({
         where: { id: current.fromEntryId },
@@ -370,7 +368,7 @@ export async function PATCH(req: NextRequest) {
           toAccountId: toAccount.id,
           toAccountName: toAccount.name,
           categoryId: null,
-          categoryName: FX_CONVERSION_CATEGORY,
+          categoryName: fxCategoryName,
           currency: fromCurrency,
           source: FX_CONVERSION_SOURCE,
           note: noteText,
@@ -387,7 +385,7 @@ export async function PATCH(req: NextRequest) {
           toAccountId: fromAccount.id,
           toAccountName: fromAccount.name,
           categoryId: null,
-          categoryName: FX_CONVERSION_CATEGORY,
+          categoryName: fxCategoryName,
           currency: toCurrency,
           source: FX_CONVERSION_SOURCE,
           note: noteText,

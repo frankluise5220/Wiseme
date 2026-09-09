@@ -75,9 +75,11 @@ import {
   SIDEBAR_CREDIT_CARD_LABEL_TEMPLATE,
   buildAccountDisplayOption,
   buildFlatAccountOptions,
+  counterpartyQualifiedAccountName,
   normalizeCreditCardLabelTemplate,
 } from "@/lib/account-display";
-import { getInvestmentAccountView, isDepositAccount, isPureInvestmentAccount, isSpecialCashTargetAccount } from "@/lib/account-kind-utils";
+import { getInvestmentAccountView, isDepositAccount, isLoanOrSettlementAccountKind, isPureInvestmentAccount, isSpecialCashTargetAccount } from "@/lib/account-kind-utils";
+import { normalizeLoanType, resolveLoanTypeValue } from "@/lib/loan-type";
 import { normalizeFundUnitsDecimals, roundFundUnits } from "@/lib/fund/unit-precision";
 import { resolveOrCreateDepositAccount } from "@/lib/server/deposit-account";
 import { resolveOrCreateWealthAccount } from "@/lib/server/wealth-account";
@@ -153,6 +155,7 @@ type AccountQuickEditSource = {
   counterpartyId?: string | null;
   debtDirection?: string | null;
   isConsumerLoan?: boolean | null;
+  loanType?: string | null;
   billingDay?: number | null;
   repaymentDay?: number | null;
   creditLimit?: unknown;
@@ -177,6 +180,7 @@ function toAccountQuickEditValue(account: AccountQuickEditSource): AccountQuickE
     counterpartyId: account.counterpartyId,
     debtDirection: account.debtDirection,
     isConsumerLoan: account.isConsumerLoan,
+    loanType: account.loanType,
     billingDay: account.billingDay,
     repaymentDay: account.repaymentDay,
     creditLimit: account.creditLimit == null ? null : String(account.creditLimit),
@@ -344,13 +348,16 @@ type ExportAccountLike = {
   numberMasked?: string | null;
   Institution?: { name?: string | null; shortName?: string | null } | null;
   AccountGroup?: { name?: string | null } | null;
+  Counterparty?: { name?: string | null; shortName?: string | null } | null;
 } | null | undefined;
 
 function exportAccountLabel(account: ExportAccountLike, fallbackName?: string | null) {
   const owner = account?.kind === "loan" ? "" : account?.AccountGroup?.name?.trim() || "";
   const institution = account?.Institution?.shortName?.trim() || account?.Institution?.name?.trim() || "";
   const accountName = account?.name?.trim() || fallbackName?.trim() || "";
-  const tailOrName = account?.numberMasked?.trim() || accountName;
+  const isSettlementOrLoan = account?.kind === "loan" || account?.kind === "settlement";
+  const qualifiedName = isSettlementOrLoan ? counterpartyQualifiedAccountName(accountName, account?.Counterparty) : accountName;
+  const tailOrName = account?.numberMasked?.trim() || qualifiedName;
   const accountType = account?.kind ? kindLabel(account.kind) : "";
   return [owner, institution, tailOrName, accountType].filter(Boolean).join("·");
 }
@@ -394,6 +401,7 @@ export default async function Home({
     showCleared?: string;
     fixedAssetType?: string;
     debtPerson?: string;
+    debtLoanType?: string;
     detailAll?: string;
     detailFilterDate?: string;
     detailFilterFlow?: string;
@@ -446,6 +454,7 @@ export default async function Home({
                       ? "deposit"
                       : "";
   const debtPersonParam = typeof params?.debtPerson === "string" ? params.debtPerson.trim() : "";
+  const debtLoanTypeParam = normalizeLoanType(typeof params?.debtLoanType === "string" ? params.debtLoanType : "");
   const billMonthParam = typeof params?.billMonth === "string" ? params.billMonth.trim() : "";
   const billPageParam = typeof params?.billPage === "string" ? parseInt(params.billPage, 10) : 1;
   const billPage = Number.isFinite(billPageParam) && billPageParam >= 1 ? billPageParam : 1;
@@ -554,7 +563,7 @@ export default async function Home({
     ? await getCreditBillAccountIds(prisma, selectedAccount)
     : [];
   const billStorageAccountId = billAccountIds[0] ?? selectedAccount?.id ?? "";
-  const isDebtAccount = selectedAccount?.kind === AccountKind.loan;
+  const isDebtAccount = isLoanOrSettlementAccountKind(selectedAccount?.kind);
   const isInvestAccount = selectedAccount ? isPureInvestmentAccount(selectedAccount) : false;
   const isDepositView = selectedAccount ? isDepositAccount(selectedAccount) : false;
   const missingBillingDayForBill =
@@ -685,8 +694,8 @@ export default async function Home({
   const isSettlementDebtAccountId = (id?: string | null) => {
     if (!id) return false;
     const account = accountMetaById.get(id);
-    if (!account || account.kind !== AccountKind.loan) return false;
-    return !!account.counterpartyId;
+    if (!account) return false;
+    return account.kind === AccountKind.settlement || (account.kind === AccountKind.loan && !!account.counterpartyId);
   };
   const isCreditCardRepaymentForDisplay = (e: (typeof entries)[number]) => {
     if (isSettlementDebtAccountId(e.accountId) || isSettlementDebtAccountId(e.toAccountId)) return false;
@@ -969,7 +978,7 @@ export default async function Home({
       ? investBalByAccountId.get(account.id)?.marketValue ?? toNumber(account.balance)
       : account.kind === AccountKind.insurance
         ? insuranceDisplayBalanceByAccountId.get(account.id) ?? 0
-        : account.kind === AccountKind.loan
+        : isLoanOrSettlementAccountKind(account.kind)
           ? debtDisplaySummary.balanceByAccountId.get(account.id) ?? cashDisplayBalanceByAccountId.get(account.id) ?? toNumber(account.balance)
           : cashDisplayBalanceByAccountId.get(account.id) ?? toNumber(account.balance);
     accountDisplayValueById.set(account.id, value);
@@ -1006,31 +1015,6 @@ export default async function Home({
     }
   }
 
-  const selectedAccountLabel = (() => {
-    if (tagIdParam) return tags.find((tag) => tag.id === tagIdParam)?.name || t("statistics.allAccounts");
-    if (view === "debt") return t("account.kind.loan");
-    if (view === "investproperty") return t("txForm.fixedAssetToggle");
-    if (selectedAccount) {
-      const display = buildAccountDisplayOption({
-        id: selectedAccount.id,
-        name: selectedAccount.name,
-        kind: selectedAccount.kind,
-        numberMasked: selectedAccount.numberMasked,
-        groupId: selectedAccount.groupId,
-        investProductType: selectedAccount.investProductType,
-        Institution: selectedAccount.Institution,
-        AccountGroup: selectedAccount.AccountGroup,
-      }, selectedAccount.kind === AccountKind.bank_credit ? SIDEBAR_CREDIT_CARD_LABEL_TEMPLATE : creditCardLabelTemplate, { fields: accountLabelFields });
-      const accountLabel = display.label;
-      if (isPureInvestmentAccount(selectedAccount)) return accountLabel;
-      if (isDepositAccount(selectedAccount)) return `${t("entry.kind.deposit")} / ${accountLabel}`;
-      if (selectedAccount.kind === AccountKind.insurance) return `${t("entry.kind.insurance")} / ${accountLabel}`;
-      const group = selectedAccount.kind === AccountKind.loan ? "" : (selectedAccount.AccountGroup?.name ?? "").trim();
-      return [group, accountLabel].filter(Boolean).join(" / ");
-    }
-    return accountName || "";
-  })();
-
   const accountOptions = accounts
     .filter(a => a.name !== "未指定账户")
     .map((a) => {
@@ -1043,6 +1027,7 @@ export default async function Home({
       investProductType: a.investProductType,
       Institution: a.Institution,
       AccountGroup: a.AccountGroup,
+      Counterparty: a.Counterparty,
     }, creditCardLabelTemplate, { fields: accountLabelFields });
     return {
       id: a.id,
@@ -1057,13 +1042,14 @@ export default async function Home({
       fullLabel: display.fullLabel,
       title: display.hoverTitle,
       hoverTitle: display.hoverTitle,
+      tableHoverTitle: display.tableHoverTitle,
       groupId: display.groupId,
       groupName: display.groupName,
       institutionName: display.institutionName,
       institutionId: a.institutionId ?? "",
       institutionType: a.Institution?.type ?? "",
       counterpartyId: a.counterpartyId ?? "",
-      isSettlementDebt: a.kind === AccountKind.loan ? !!a.counterpartyId : false,
+      isSettlementDebt: a.kind === AccountKind.settlement || (a.kind === AccountKind.loan && !!a.counterpartyId),
       isConsumerLoan: a.isConsumerLoan === true,
       investProductType: a.investProductType,
       debtDirection: a.debtDirection ?? null,
@@ -1207,6 +1193,9 @@ export default async function Home({
       };
     });
   const accountLabelById = new Map(accountOptions.map((a) => [a.id, a.label]));
+  // Hover titles for account-name table cells: only the fields the cell label
+  // does not already show (owner / account kind); falls back to the full label.
+  const accountTitleById = new Map(accountOptions.map((a) => [a.id, a.tableHoverTitle]));
   const investmentProductTypeByAccountId = new Map(investmentAccountOptions.map((a) => [a.id, a.investProductType]));
   const investmentProductTypeByAccountIdObj = Object.fromEntries(investmentProductTypeByAccountId);
   const defaultFundInvestmentAccountId =
@@ -1334,7 +1323,7 @@ export default async function Home({
     counterpartyId: counterparties.map(it => ({ id: it.id, name: it.shortName?.trim() || it.name, type: it.type ?? "organization" })),
   };
 
-  const debtAccounts = accounts.filter((account) => account.kind === AccountKind.loan && account.isActive);
+  const debtAccounts = accounts.filter((account) => isLoanOrSettlementAccountKind(account.kind) && account.isActive);
   const debtAccountEditData = debtAccounts.map(toAccountQuickEditValue);
   const loanRepaymentPlans =
     view === "debt" && debtAccounts.length > 0
@@ -1426,9 +1415,41 @@ export default async function Home({
     selectedAccountId: selectedAccount?.id,
     selectedAccountKind: selectedAccount?.kind,
     debtPersonParam,
+    debtLoanTypeParam,
   });
   const selectedRepaymentPlan = selectedDebtRow ? loanRepaymentPlanByAccountId.get(selectedDebtRow.accountId) ?? null : null;
   const selectedAutoDebitPlan = selectedDebtRow ? loanAutoDebitPlanByAccountId.get(selectedDebtRow.accountId) ?? null : null;
+  const selectedLoanTypeForLauncher = selectedDebtRow?.isLoan
+    ? resolveLoanTypeValue(selectedDebtRow.loanType, selectedDebtRow.isConsumerLoan)
+    : debtLoanTypeParam;
+  const isDebtLoanLauncherContext = view === "debt" && !!selectedLoanTypeForLauncher;
+  // Debt view header title: 贷款上下文显示"贷款"，往来款上下文显示"往来款"，
+  // 不再把整个负债视图硬编码成"贷款"。
+  const selectedAccountLabel = (() => {
+    if (tagIdParam) return tags.find((tag) => tag.id === tagIdParam)?.name || t("statistics.allAccounts");
+    if (view === "debt") return isDebtLoanLauncherContext ? t("account.kind.loan") : t("sidebar.section.liabilities");
+    if (view === "investproperty") return t("txForm.fixedAssetToggle");
+    if (selectedAccount) {
+      const display = buildAccountDisplayOption({
+        id: selectedAccount.id,
+        name: selectedAccount.name,
+        kind: selectedAccount.kind,
+        numberMasked: selectedAccount.numberMasked,
+        groupId: selectedAccount.groupId,
+        investProductType: selectedAccount.investProductType,
+        Institution: selectedAccount.Institution,
+        AccountGroup: selectedAccount.AccountGroup,
+        Counterparty: selectedAccount.Counterparty,
+      }, selectedAccount.kind === AccountKind.bank_credit ? SIDEBAR_CREDIT_CARD_LABEL_TEMPLATE : creditCardLabelTemplate, { fields: accountLabelFields });
+      const accountLabel = display.label;
+      if (isPureInvestmentAccount(selectedAccount)) return accountLabel;
+      if (isDepositAccount(selectedAccount)) return `${t("entry.kind.deposit")} / ${accountLabel}`;
+      if (selectedAccount.kind === AccountKind.insurance) return `${t("entry.kind.insurance")} / ${accountLabel}`;
+      const group = isLoanOrSettlementAccountKind(selectedAccount.kind) ? "" : (selectedAccount.AccountGroup?.name ?? "").trim();
+      return [group, accountLabel].filter(Boolean).join(" / ");
+    }
+    return accountName || "";
+  })();
   const repaymentScheduleRows = buildDebtRepaymentScheduleRows({ selectedDebtRow, selectedRepaymentPlan });
 
   const loanRepaymentPlanIds = loanRepaymentPlans.map((plan) => plan.id);
@@ -1489,6 +1510,7 @@ export default async function Home({
     selectedAutoDebitPlan,
     repaymentScheduleRows,
     accountLabelById,
+    accountTitleById,
     debtDirectionByAccountId,
     displayAccountId: accountId,
   });
@@ -1520,6 +1542,8 @@ export default async function Home({
     billListPageSize,
     hasCreditBillSummaries,
     showAllCreditBillDetails,
+    billingDayRules,
+    billingDayTxPeriod,
   } = await loadCreditBillPageData({
     householdId,
     selectedAccount,
@@ -1544,7 +1568,7 @@ export default async function Home({
       ? investBalByAccountId.get(selectedAccount.id)?.marketValue ?? toNumber(selectedAccount.balance)
       : selectedAccount.kind === AccountKind.bank_credit
         ? creditBillBalanceValue
-      : selectedAccount.kind === AccountKind.loan
+      : isLoanOrSettlementAccountKind(selectedAccount.kind)
         ? debtDisplaySummary.balanceByAccountId.get(selectedAccount.id) ?? cashDisplayBalanceByAccountId.get(selectedAccount.id) ?? toNumber(selectedAccount.balance)
         : cashDisplayBalanceByAccountId.get(selectedAccount.id) ?? toNumber(selectedAccount.balance)
     : 0;
@@ -2473,7 +2497,9 @@ export default async function Home({
                       : view === "regularinvest"
                         ? "regular-task"
                         : view === "debt"
-                          ? "debt"
+                          ? isDebtLoanLauncherContext
+                            ? "loan"
+                            : "debt"
                           : isInsuranceView
                             ? "insurance"
                             : isBillAccount
@@ -2511,13 +2537,35 @@ export default async function Home({
                         : "fund_regular_invest",
                 }}
                 actions={[
-                  { key: "transaction", label: t("entry.kind.transaction") },
-                  { key: "advance", label: t("entry.kind.advance") },
-                  { key: "transfer", label: isBillAccount ? t("transaction.type.creditCardRepayment") : t("entry.kind.transfer") },
-                  { key: "fx", label: t("entry.kind.fx") },
+                  {
+                    key: "transaction",
+                    label: t("entry.kind.transaction"),
+                    children: [
+                      { key: "transfer", label: isBillAccount ? t("transaction.type.creditCardRepayment") : t("entry.kind.transfer") },
+                      { key: "advance", label: t("entry.kind.advance") },
+                      { key: "income", label: t("transaction.type.income") },
+                      { key: "expense", label: t("transaction.type.expense") },
+                    ],
+                  },
+                  {
+                    key: "fx",
+                    label: t("entry.kind.fxGroup"),
+                    children: [
+                      { key: "fx", label: t("entry.kind.fx") },
+                      { key: "fx-sell", label: t("entry.kind.fxSell") },
+                    ],
+                  },
                   { key: "investment", label: t("entry.kind.investment") },
-                  { key: "stock", label: t("entry.kind.stock") },
-                  { key: "stock-transfer", label: t("entry.kind.stockTransfer") },
+                  {
+                    key: "stock",
+                    label: t("entry.kind.stock"),
+                    children: [
+                      { key: "stock", label: t("stockPanel.action.buy") },
+                      { key: "stock-sell", label: t("stockPanel.action.sell") },
+                      { key: "stock-transfer", label: t("entry.kind.stockTransfer") },
+                      { key: "stock-dividend", label: t("stockPanel.action.dividend") },
+                    ],
+                  },
                   { key: "property", label: t("entry.kind.property") },
                   { key: "metal", label: t("entry.kind.metal") },
                   { key: "wealth", label: t("entry.kind.wealth") },
@@ -2527,10 +2575,24 @@ export default async function Home({
                   {
                     key: "loan",
                     label: t("entry.kind.loan"),
+                    loanType: selectedLoanTypeForLauncher ?? "home",
                     children: [
-                      { key: "loan", label: t("entry.kind.consumerLoan"), loanType: "consumer" },
-                      { key: "loan", label: t("entry.kind.mortgageLoan"), loanType: "mortgage" },
-                      { key: "loan", label: t("debtTx.loanMode.repayment"), mode: "repay_out" },
+                      { key: "loan", label: t("loan.type.home"), loanType: "home" },
+                      { key: "loan", label: t("loan.type.mortgage"), loanType: "mortgage" },
+                      { key: "loan", label: t("loan.type.consumer"), loanType: "consumer" },
+                      { key: "loan", label: t("loan.type.other"), loanType: "other" },
+                      {
+                        key: "loan",
+                        label: t("debtShell.repayment"),
+                        mode: "repay_out",
+                        ...(selectedLoanTypeForLauncher ? { loanType: selectedLoanTypeForLauncher } : {}),
+                      },
+                      {
+                        key: "loan",
+                        label: t("debtShell.prepayment"),
+                        mode: "prepay_out",
+                        ...(selectedLoanTypeForLauncher ? { loanType: selectedLoanTypeForLauncher } : {}),
+                      },
                     ],
                   },
                   { key: "regular-task", label: t("entry.kind.regularTask") },
@@ -2844,6 +2906,8 @@ export default async function Home({
                       accountId={selectedAccount?.id ?? ""}
                       accountName={selectedAccount?.name ?? ""}
                       billingDay={selectedAccount?.billingDay ?? null}
+                      billingDayTxPeriod={billingDayTxPeriod}
+                      billingDayRules={billingDayRules}
                       rows={creditBillSummaryRows}
                       initialPage={currentPage}
                       pageSize={billListPageSize}
@@ -2891,10 +2955,13 @@ export default async function Home({
                 accountId: row.accountId,
                 institutionId: row.institutionId,
                 counterpartyId: row.counterpartyId,
+                isConsumerLoan: row.isConsumerLoan,
+                loanType: row.loanType,
                 itemType: row.itemType,
                 repaymentMethod: row.repaymentMethod,
                 repaymentCycle: row.repaymentCycle,
                 annualRate: row.annualRate,
+                baseAnnualRate: row.baseAnnualRate,
                 mortgageLprDiscount: row.mortgageLprDiscount,
                 loanStartDate: row.loanStartDate,
                 remainingRuns: row.remainingRuns,
@@ -2918,6 +2985,7 @@ export default async function Home({
                 isLoan: row.isLoan,
               }))}
               selectedKey={selectedDebtKey}
+              selectedLoanType={debtLoanTypeParam}
               entries={debtDetailEntries}
               repaymentScheduleRows={finalRepaymentScheduleRows}
               summaryRemainingTotal={debtShellRemainingTotal}
@@ -2927,6 +2995,7 @@ export default async function Home({
               accountOptions={accountOptions}
               categoryOptions={categoryBatchReplaceOptions}
               accountEditData={debtAccountEditData}
+              loanEditAction={createDebtTransaction}
             />
           ) : view === "deposit" && selectedAccount ? (
             <DepositShell
@@ -3105,7 +3174,7 @@ export default async function Home({
                   normalExportFilename={normalExportFilename}
                   normalExportRows={normalExportRows}
                   normalExportRowsByEntryId={normalExportRowsByEntryId}
-                  accountOptions={accountOptions.map((a) => ({ id: a.id, label: a.label, fullLabel: a.fullLabel, title: a.hoverTitle }))}
+                  accountOptions={accountOptions.map((a) => ({ id: a.id, label: a.label, listLabel: a.listLabel, fullLabel: a.fullLabel, title: a.hoverTitle }))}
                   categoryOptions={categoryBatchReplaceOptions}
                   tagOptions={tagBatchReplaceOptions}
                   investmentProductTypeByAccountId={investmentProductTypeByAccountIdObj}

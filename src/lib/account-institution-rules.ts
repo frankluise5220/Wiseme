@@ -10,6 +10,11 @@ export function isStockAccountInstitutionType(type: string | null | undefined) {
   return type === "brokerage";
 }
 
+// Consumer loans use financial institutions; counterparty debt units are settlement owners.
+export function isConsumerLoanInstitutionType(type: string | null | undefined) {
+  return !!type && ["bank", "debt"].includes(type);
+}
+
 export function allowedInstitutionTypesForAccount(
   kind: string | null | undefined,
   investProductType: string | null | undefined,
@@ -23,6 +28,9 @@ export function allowedInstitutionTypesForAccount(
   if (accountKind === "insurance") return ["insurance"];
   if (accountKind === "loan") {
     return options?.includeLegacyDebtInstitution ? ["bank", "payment", "other", "debt"] : ["bank", "payment", "other"];
+  }
+  if (accountKind === "settlement") {
+    return options?.includeLegacyDebtInstitution ? ["person", "organization"] : [];
   }
   if (accountKind === "investment") {
     if (productType === "stock") return ["brokerage"];

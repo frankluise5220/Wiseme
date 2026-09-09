@@ -55,7 +55,7 @@ async function updateScheduledTransferRecord(formData: FormData) {
 
       const statementMonth =
         (toAcc.kind === AccountKind.bank_credit || toAcc.kind === AccountKind.loan) && toAcc.billingDay
-          ? toStatementMonth(date, toAcc.billingDay)
+          ? toStatementMonth(date, toAcc.billingDay, toAcc.billingDayTxPeriod)
           : null;
       const repaymentCategory = isCreditCardRepaymentTransfer({
         type: TransactionType.transfer,

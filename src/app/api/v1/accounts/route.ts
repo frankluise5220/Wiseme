@@ -13,6 +13,7 @@ import { PRODUCT_TYPES, supportsCostBasisMethod } from "@/lib/investment-config"
 import {
   getCreditCardInstitutionDefaults,
   normalizeCreditBillMode,
+  normalizeCreditBillingDayTxPeriod,
   syncCreditCardInstitutionSettings,
 } from "@/lib/server/credit-card-institution-settings";
 import { invalidateCreditCardCycleCacheForAccountIds } from "@/lib/server/credit-card-cycle-cache";
@@ -41,6 +42,7 @@ import {
 import { normalizeCurrency } from "@/lib/currency";
 import { normalizeFixedAssetType } from "@/lib/fixed-asset";
 import { normalizeDebtDirection } from "@/lib/debt";
+import { normalizeLoanType } from "@/lib/loan-type";
 import { getHouseholdBaseCurrency } from "@/lib/server/fx-rates";
 import {
   ensureInitialCreditCardBillingDayRules,
@@ -111,7 +113,10 @@ export async function POST(req: NextRequest) {
     const requestedInstitutionId = String(body.institutionId ?? "").trim() || null;
     const requestedCounterpartyId = String(body.counterpartyId ?? "").trim() || null;
     const requestedUserId = String(body.userId ?? "").trim() || null;
-    const isConsumerLoan = body.isConsumerLoan === true || String(body.isConsumerLoan ?? "").trim().toLowerCase() === "true";
+    const rawIsConsumerLoan = body.isConsumerLoan === true || String(body.isConsumerLoan ?? "").trim().toLowerCase() === "true";
+    const loanType = normalizeLoanType(body.loanType)
+      ?? (kind === "loan" ? (rawIsConsumerLoan ? "consumer" : "home") : null);
+    const isConsumerLoan = kind === "loan" && loanType === "consumer";
     const isInvestment = kind === "investment";
     const isCreditLike = kind === "bank_credit";
     const investProductType = isInvestment ? normalizeFundProductType(body.investProductType) : null;
@@ -145,6 +150,9 @@ export async function POST(req: NextRequest) {
       ? await prisma.institution.findFirst({ where: { id: requestedInstitutionId, householdId } })
       : null;
     if (requestedInstitutionId && !institution) return NextResponse.json({ ok: false, code: "INSTITUTION_NOT_FOUND", error: "机构不存在或不属于当前账簿" }, { status: 400 });
+    if (kind === "settlement" && requestedInstitutionId) {
+      return NextResponse.json({ ok: false, code: "SETTLEMENT_INSTITUTION_FORBIDDEN", error: "Settlement accounts must be linked to a counterparty, not an institution" }, { status: 400 });
+    }
     if (accountRequiresInstitution(kind, investProductType) && !institution) {
       return NextResponse.json({ ok: false, code: "ACCOUNT_INSTITUTION_REQUIRED", error: ACCOUNT_INSTITUTION_REQUIRED_ERROR }, { status: 400 });
     }
@@ -163,6 +171,12 @@ export async function POST(req: NextRequest) {
     if (requestedCounterpartyId && !counterparty) return NextResponse.json({ ok: false, code: "COUNTERPARTY_NOT_FOUND", error: "往来对象不存在或不属于当前账簿" }, { status: 400 });
     if (isConsumerLoan && requestedCounterpartyId) {
       return NextResponse.json({ ok: false, code: "CONSUMER_LOAN_COUNTERPARTY_FORBIDDEN", error: "Consumer loan accounts must not be linked to a counterparty" }, { status: 400 });
+    }
+    if (kind === "settlement" && !counterparty) {
+      return NextResponse.json({ ok: false, code: "SETTLEMENT_COUNTERPARTY_REQUIRED", error: "Settlement accounts must be linked to a counterparty" }, { status: 400 });
+    }
+    if (kind === "loan" && requestedCounterpartyId) {
+      return NextResponse.json({ ok: false, code: "LOAN_COUNTERPARTY_FORBIDDEN", error: "Loan accounts must not be linked to a counterparty" }, { status: 400 });
     }
 
     const owner = requestedUserId
@@ -189,6 +203,11 @@ export async function POST(req: NextRequest) {
         ? normalizeCreditBillMode(body.creditBillMode)
         : creditDefaults?.creditBillMode ?? normalizeCreditBillMode(null)
       : normalizeCreditBillMode(null);
+    const billingDayTxPeriod = isCreditLike
+      ? body.billingDayTxPeriod !== undefined
+        ? normalizeCreditBillingDayTxPeriod(body.billingDayTxPeriod)
+        : creditDefaults?.billingDayTxPeriod ?? normalizeCreditBillingDayTxPeriod(null)
+      : normalizeCreditBillingDayTxPeriod(null);
     const numberMasked = accountSupportsNumberMasked(kind)
       ? String(body.numberMasked ?? "").trim() || null
       : null;
@@ -197,8 +216,8 @@ export async function POST(req: NextRequest) {
     await assertAccountIdentityUnique(prisma, {
       householdId,
       groupId: ensuredGroup.id,
-      institutionId: institution?.id ?? null,
-      counterpartyId: counterparty?.id ?? null,
+      institutionId: kind === "settlement" ? null : institution?.id ?? null,
+      counterpartyId: kind === "settlement" ? counterparty?.id ?? null : null,
       kind,
       name,
       numberMasked,
@@ -217,12 +236,15 @@ export async function POST(req: NextRequest) {
             ? "payable"
             : kind === "loan" && !isConsumerLoan && (counterparty?.id || institution?.id)
               ? requestedDebtDirection ?? (institution?.id ? "payable" : "receivable")
-              : null,
+              : kind === "settlement" && counterparty?.id
+                ? requestedDebtDirection ?? "receivable"
+                : null,
           isConsumerLoan,
+          loanType,
           currency,
           groupId: ensuredGroup.id,
-          institutionId: institution?.id ?? null,
-          counterpartyId: isConsumerLoan ? null : counterparty?.id ?? null,
+          institutionId: kind === "settlement" ? null : institution?.id ?? null,
+          counterpartyId: kind === "settlement" ? counterparty?.id ?? null : isConsumerLoan ? null : counterparty?.id ?? null,
           userId: owner?.id ?? null,
           householdId,
           isActive: true,
@@ -230,6 +252,7 @@ export async function POST(req: NextRequest) {
           repaymentDay,
           creditLimit,
           creditBillMode,
+          billingDayTxPeriod,
           numberMasked,
           note,
           investProductType: investProductType as any,
@@ -248,7 +271,7 @@ export async function POST(req: NextRequest) {
 
       if (shouldCreateInitialBalance && initialBalanceDate) {
         const initialBalanceValue = initialBalance ?? 0;
-        const isLiability = kind === "bank_credit" || kind === "loan";
+        const isLiability = kind === "bank_credit" || kind === "loan" || kind === "settlement";
         const targetBalance = isLiability ? -Math.abs(initialBalanceValue) : initialBalanceValue;
         await tx.txRecord.create({
           data: {
@@ -290,6 +313,7 @@ export async function POST(req: NextRequest) {
         billingDay: account.billingDay,
         repaymentDay: account.repaymentDay,
         creditBillMode: account.creditBillMode,
+        billingDayTxPeriod: account.billingDayTxPeriod,
       });
       const institutionCards = account.institutionId
         ? await prisma.account.findMany({
@@ -351,15 +375,36 @@ export async function PUT(req: NextRequest) {
     }
 
     const nextKind = String(data.kind ?? existing.kind);
-    const nextIsConsumerLoan = data.isConsumerLoan === undefined ? existing.isConsumerLoan : data.isConsumerLoan === true;
-    if (nextIsConsumerLoan && nextKind !== "loan") {
-      return NextResponse.json({ ok: false, code: "CONSUMER_LOAN_KIND_REQUIRED", error: "Consumer loan accounts must use loan account kind" }, { status: 400 });
+    const rawNextIsConsumerLoan = data.isConsumerLoan === undefined ? existing.isConsumerLoan === true : data.isConsumerLoan === true;
+    let nextIsConsumerLoan = false;
+    if (nextKind === "loan") {
+      const nextLoanType = normalizeLoanType(body.loanType)
+        ?? normalizeLoanType(existing.loanType)
+        ?? (rawNextIsConsumerLoan ? "consumer" : "home");
+      data.loanType = nextLoanType;
+      nextIsConsumerLoan = nextLoanType === "consumer";
+      data.isConsumerLoan = nextIsConsumerLoan;
+    } else {
+      data.loanType = null;
+      data.isConsumerLoan = false;
     }
-    const nextCounterpartyId = data.counterpartyId === undefined ? existing.counterpartyId : (data.counterpartyId ? String(data.counterpartyId) : null);
+    const nextCounterpartyId = nextKind === "settlement"
+      ? data.counterpartyId === undefined
+        ? existing.counterpartyId
+        : data.counterpartyId
+          ? String(data.counterpartyId)
+          : null
+      : null;
     const nextCounterparty = nextCounterpartyId
       ? await prisma.counterparty.findFirst({ where: { id: nextCounterpartyId, householdId } })
       : null;
     if (nextCounterpartyId && !nextCounterparty) return NextResponse.json({ ok: false, code: "COUNTERPARTY_NOT_FOUND", error: "往来对象不存在或不属于当前账簿" }, { status: 400 });
+    if (nextKind === "settlement" && !nextCounterparty) {
+      return NextResponse.json({ ok: false, code: "SETTLEMENT_COUNTERPARTY_REQUIRED", error: "Settlement accounts must be linked to a counterparty" }, { status: 400 });
+    }
+    if (nextKind === "loan" && body.counterpartyId !== undefined && String(body.counterpartyId ?? "").trim()) {
+      return NextResponse.json({ ok: false, code: "LOAN_COUNTERPARTY_FORBIDDEN", error: "Loan accounts must not be linked to a counterparty" }, { status: 400 });
+    }
     const requestedDebtDirection = body.debtDirection !== undefined ? normalizeDebtDirection(nextKind, body.debtDirection) : null;
     if (nextKind === "bank_credit") {
       data.billingDay = body.billingDay !== undefined ? parseDay(body.billingDay) : existing.billingDay;
@@ -379,11 +424,13 @@ export async function PUT(req: NextRequest) {
           : existing.numberMasked
         : null;
       data.creditBillMode = normalizeCreditBillMode(null);
+      data.billingDayTxPeriod = normalizeCreditBillingDayTxPeriod(null);
     }
-    if (nextKind !== "loan" || nextIsConsumerLoan) {
+    if (nextKind === "settlement") {
+      data.institutionId = null;
+      data.counterpartyId = nextCounterparty?.id ?? null;
+    } else {
       data.counterpartyId = null;
-    } else if (data.counterpartyId === undefined) {
-      data.counterpartyId = nextCounterparty?.id ?? existing.counterpartyId ?? null;
     }
     if (nextKind === "investment") {
       if (body.investProductType !== undefined || existing.kind !== "investment") data.investProductType = normalizeFundProductType(body.investProductType ?? existing.investProductType) as any;
@@ -421,7 +468,13 @@ export async function PUT(req: NextRequest) {
 
     const nextGroupId = data.groupId === undefined ? existing.groupId : String(data.groupId ?? "");
     if (!nextGroupId) return NextResponse.json({ ok: false, code: "OWNER_REQUIRED", error: "请选择所有人" }, { status: 400 });
-    const nextInstitutionId = data.institutionId === undefined ? existing.institutionId : (data.institutionId ? String(data.institutionId) : null);
+    const nextInstitutionId = nextKind === "settlement"
+      ? null
+      : data.institutionId === undefined
+        ? existing.institutionId
+        : data.institutionId
+          ? String(data.institutionId)
+          : null;
     if (nextGroupId) {
       const group = await prisma.accountGroup.findFirst({ where: { id: nextGroupId, householdId } });
       if (!group) return NextResponse.json({ ok: false, code: "OWNER_NOT_FOUND", error: "所有人不存在或不属于当前账簿" }, { status: 400 });
@@ -449,14 +502,14 @@ export async function PUT(req: NextRequest) {
       ? "payable"
       : nextKind === "loan" && hasDebtOwner
         ? requestedDebtDirection ?? existing.debtDirection ?? (nextInstitution?.id ? "payable" : "receivable")
-        : null;
+        : nextKind === "settlement" && nextCounterparty?.id
+          ? requestedDebtDirection ?? existing.debtDirection ?? "receivable"
+          : null;
     await assertAccountIdentityUnique(prisma, {
       householdId,
       groupId: nextGroupId,
       institutionId: nextInstitutionId,
-      counterpartyId: (nextIsConsumerLoan
-        ? null
-        : data.counterpartyId === undefined ? existing.counterpartyId : data.counterpartyId) as string | null,
+      counterpartyId: nextKind === "settlement" ? nextCounterparty?.id ?? null : null,
       kind: nextKind,
       name: nextName,
       numberMasked: nextNumberMasked,
@@ -498,6 +551,7 @@ export async function PUT(req: NextRequest) {
         billingDay: updated.billingDay,
         repaymentDay: updated.repaymentDay,
         creditBillMode: updated.creditBillMode,
+        billingDayTxPeriod: updated.billingDayTxPeriod,
       });
       const institutionCards = updated.institutionId
         ? await prisma.account.findMany({
@@ -762,7 +816,7 @@ export async function GET(req: Request) {
       debtDirection: account.debtDirection,
       note: account.note,
       currency: account.currency,
-      groupName: account.kind === AccountKind.loan ? "" : account.AccountGroup?.name ?? "",
+      groupName: account.kind === AccountKind.loan || account.kind === AccountKind.settlement ? "" : account.AccountGroup?.name ?? "",
       institutionName: account.Institution?.name ?? "",
       usageCount: account.usageCount,
       lastUsedAt: account.lastUsedAt ? account.lastUsedAt.toISOString() : null,

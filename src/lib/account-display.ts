@@ -11,6 +11,12 @@ export type AccountDisplaySource = {
   investProductType?: string | null;
   Institution?: { name: string | null; shortName?: string | null } | null;
   AccountGroup?: { id: string; name: string | null } | null;
+  /**
+   * Linked counterparty of a loan/settlement account. Used to qualify
+   * list/table labels when the account name does not already contain the
+   * counterparty name; dropdown selectors keep the raw name.
+   */
+  Counterparty?: { name?: string | null; shortName?: string | null } | null;
 };
 
 export type CreditCardLabelMode = "short_last4" | "full_name";
@@ -181,6 +187,13 @@ export type AccountDisplayOption = {
   subLabel: string;
   fullLabel: string;
   hoverTitle: string;
+  /**
+   * Hover title for table cells that render `listLabel`. It follows the
+   * "hover shows what the cell does not show" rule: only the fields hidden by
+   * the configured label (owner / account kind) are appended, and the full
+   * label is used only when every configured field is already visible.
+   */
+  tableHoverTitle: string;
 };
 
 export type AccountTableDisplaySource = {
@@ -196,6 +209,7 @@ export type AccountTableDisplaySource = {
   selectorLabel?: string | null;
   fullLabel?: string | null;
   hoverTitle?: string | null;
+  tableHoverTitle?: string | null;
   title?: string | null;
   numberMasked?: string | null;
   Institution?: { name?: string | null; shortName?: string | null } | null;
@@ -252,6 +266,35 @@ export function formatAccountDisplayName(accountName: string, institutionName?: 
   if (!institution) return account;
   if (!account || account === institution || account.includes(institution)) return account;
   return `${institution}·${account}`;
+}
+
+/**
+ * Qualifies a loan/settlement account name with its linked counterparty name
+ * when the account name does not already contain it, e.g. an account named
+ * "current-account" with counterparty "Li Si" renders as "Li Si·current-account".
+ * The containment check is case-insensitive and covers both the short and the
+ * full counterparty names. Returns the trimmed account name unchanged when
+ * there is no counterparty or the name already contains one of its names.
+ */
+export function counterpartyQualifiedAccountName(
+  accountName: string,
+  counterparty?: { name?: string | null; shortName?: string | null } | null,
+): string {
+  const name = accountName.trim();
+  if (!name) return name;
+  const counterpartyShort = counterparty?.shortName?.trim() || "";
+  const counterpartyFull = counterparty?.name?.trim() || "";
+  const counterpartyName = counterpartyShort || counterpartyFull;
+  if (!counterpartyName) return name;
+  const lowerName = name.toLocaleLowerCase();
+  const contained = [counterpartyShort, counterpartyFull]
+    .filter(Boolean)
+    .some((candidate) => {
+      const lowerCandidate = candidate.toLocaleLowerCase();
+      return lowerCandidate.length > 0 && (lowerName === lowerCandidate || lowerName.includes(lowerCandidate));
+    });
+  if (contained) return name;
+  return `${counterpartyName}${ACCOUNT_LABEL_SEPARATOR}${name}`;
 }
 
 export function formatDisplayInstitutionName(
@@ -325,7 +368,7 @@ export function formatAccountTableTitle(
   fields?: AccountLabelField[] | null,
 ) {
   const visibleLabel = formatAccountTableLabel(account, fallback, fields);
-  return firstTrimmedText([account.hoverTitle, account.title, account.fullLabel, visibleLabel]);
+  return firstTrimmedText([account.tableHoverTitle, account.hoverTitle, account.title, account.fullLabel, visibleLabel]);
 }
 
 export function formatOwnerQualifiedAccountLabel(input: {
@@ -424,12 +467,20 @@ export function buildAccountDisplayOption(
 
   // Insurance policies and fixed assets keep their product-name-only shape; the
   // institution/card-last-four expansion does not apply to them.
+  // Loan/settlement accounts linked to a counterparty get the counterparty name
+  // prefixed in list/table labels when the account name does not already
+  // contain it. Dropdown selectors keep the raw name because the counterparty
+  // is already rendered as a group header there.
+  const accountDisplayName =
+    (account.kind === "loan" || account.kind === "settlement")
+      ? counterpartyQualifiedAccountName(account.name, account.Counterparty)
+      : account.name.trim();
   const label =
     account.kind === "insurance" || isFixedAsset
       ? account.name.trim()
       : labelFields
         ? renderAccountLabel({
-            accountName: account.name,
+            accountName: accountDisplayName,
             institution: isFixedAsset ? null : account.Institution,
             numberMasked: account.numberMasked,
             ownerName: groupName,
@@ -442,7 +493,7 @@ export function buildAccountDisplayOption(
               institution: account.Institution,
               numberMasked: account.numberMasked,
             })
-          : formatAccountDisplayName(account.name, institutionName);
+          : formatAccountDisplayName(accountDisplayName, institutionName);
 
   const selectorLabel = formatAccountSelectorLabel({
     accountName: account.name,
@@ -468,7 +519,7 @@ export function buildAccountDisplayOption(
               labelFields.includes("kind") ? "" : kindLabel(account.kind),
             ])
           : formatOwnerQualifiedAccountLabel({
-              accountName: account.name,
+              accountName: accountDisplayName,
               kind: account.kind,
               institution: account.Institution,
               numberMasked: account.numberMasked,
@@ -481,6 +532,22 @@ export function buildAccountDisplayOption(
     label: selectorLabel || label,
     subLabel,
   });
+  // Table hover: show only what the configured label does not already show
+  // (owner first, then the account kind). Loan/settlement accounts have no
+  // AccountGroup owner — their counterparty is already merged into the
+  // rendered account name. When both fields are already visible, fall back to
+  // the full label so a truncated cell still reveals its whole text.
+  const tableLabelFields = labelFields ?? DEFAULT_ACCOUNT_LABEL_FIELDS;
+  const tableHoverParts: string[] = [];
+  if (!tableLabelFields.includes("owner") && showOwner && groupName) {
+    tableHoverParts.push(groupName);
+  }
+  if (!tableLabelFields.includes("kind") && subLabel) {
+    tableHoverParts.push(subLabel);
+  }
+  const tableHoverTitle = tableHoverParts.length > 0
+    ? joinAccountSubLabel(tableHoverParts)
+    : (label || selectorLabel);
 
   return {
     id: account.id,
@@ -499,6 +566,7 @@ export function buildAccountDisplayOption(
     subLabel,
     fullLabel: ownerQualifiedLabel,
     hoverTitle,
+    tableHoverTitle,
   };
 }
 

@@ -92,7 +92,7 @@ export async function GET(req: Request) {
           ? insuranceDisplayBalanceByAccountId.get(a.id) ?? 0
           : a.kind === AccountKind.bank_credit && a.billingDay
             ? currentCreditBalanceByAccountId.get(a.id) ?? toNumber(a.balance)
-          : a.kind === AccountKind.loan
+          : a.kind === AccountKind.loan || a.kind === AccountKind.settlement
             ? debtDisplaySummary.balanceByAccountId.get(a.id) ?? displayBalanceByAccountId.get(a.id) ?? toNumber(a.balance)
             : displayBalanceByAccountId.get(a.id) ?? toNumber(a.balance),
       kind: a.kind,

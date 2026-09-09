@@ -43,7 +43,7 @@ export async function computeDebtDisplaySummary(
   const debtAccounts = await prisma.account.findMany({
     where: {
       ...ctx.hidFilter,
-      kind: AccountKind.loan,
+      kind: { in: [AccountKind.settlement, AccountKind.loan] },
       isActive: true,
     },
     select: {

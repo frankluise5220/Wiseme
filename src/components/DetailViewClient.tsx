@@ -205,6 +205,7 @@ function buildBasicEntryEditPayload(entry: DetailEntry, currentAccountId?: strin
     toAccountId: entry.toAccountId ?? undefined,
     toAccountName: entry.toAccountName ?? undefined,
     tagIds: entry.entryTags?.map((item) => item.tagId) ?? [],
+    currency: entry.currency ?? null,
     tags: entry.entryTags?.map((item) => ({
       id: item.tagId,
       name: item.Tag?.name ?? "",
@@ -259,6 +260,8 @@ type DebtMode = "borrow_in" | "repay_out" | "prepay_out" | "lend_out" | "collect
 type DetailAccountOption = {
   id: string;
   label: string;
+  listLabel?: string | null;
+  selectorLabel?: string | null;
   fullLabel?: string | null;
   title?: string | null;
   kind?: string | null;

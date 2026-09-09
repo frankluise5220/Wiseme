@@ -77,10 +77,15 @@ function getUpdaterConfig() {
   return { url, token, enabled: Boolean(url && token) };
 }
 
+/** Actionable guidance shown when the host updater cannot be reached due to missing configuration. */
+function getUpdaterSetupHint() {
+  return "未配置宿主机更新执行器：请在 docker-compose.yml 同目录的 .env 中设置 MMH_UPDATE_TOKEN（任意长随机字符串，app 与 updater 两个容器取值需一致），然后执行 docker compose up -d app updater 使配置生效，再回到本页重试。";
+}
+
 async function callUpdater(path: string, init?: RequestInit, timeoutMs = UPDATER_DEFAULT_TIMEOUT_MS) {
   const { url, token } = getUpdaterConfig();
   if (!url || !token) {
-    throw new Error("未配置宿主机更新执行器");
+    throw new Error(getUpdaterSetupHint());
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -96,7 +101,8 @@ async function callUpdater(path: string, init?: RequestInit, timeoutMs = UPDATER
     });
     const data = await res.json().catch(() => null) as any;
     if (!res.ok) {
-      throw new Error(data?.error ?? `更新执行器请求失败：${res.status}`);
+      const detail = String(data?.error ?? `更新执行器请求失败：${res.status}`);
+      throw new Error(res.status === 401 ? `${detail}（鉴权失败：请检查 .env 中 MMH_UPDATE_TOKEN 是否与 updater 容器所用 token 一致，改后需 docker compose up -d app updater）` : detail);
     }
     return data;
   } catch (error) {
@@ -522,7 +528,9 @@ export async function GET(req: NextRequest) {
           remoteCommitDate: github.githubCommitDate,
           needsUpdate: canCheck ? localComparable !== githubCommit : false,
           canCheckUpdate: canCheck,
-          fetchError: github.githubFetchError,
+          fetchError: github.githubFetchError
+            ? `${github.githubFetchError}；GitHub 直连检查失败。未配置宿主机更新执行器（MMH_UPDATE_TOKEN 为空）时无法通过镜像源检查版本，请按提示配置后重试`
+            : undefined,
         };
       }
     } else if (checkRemote && !managedPackageEnvironment) {

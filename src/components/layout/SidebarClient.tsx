@@ -48,8 +48,9 @@ import {
 import { useI18n } from "@/lib/i18n";
 import { recordRecentAccount, sortByAccountUsage, useAccountUsage } from "@/lib/client/recentAccounts";
 import { UndoLastOperationButton } from "@/components/UndoLastOperationButton";
-import { getInvestmentAccountView } from "@/lib/account-kind-utils";
+import { getInvestmentAccountView, resolveLoanType } from "@/lib/account-kind-utils";
 import { FIXED_ASSET_TYPES } from "@/lib/fixed-asset";
+import { LOAN_TYPES, type LoanTypeValue } from "@/lib/loan-type";
 import { dispatchFirstUseGuideOpen } from "@/lib/client/onboardingGuide";
 
 type AccountItem = {
@@ -69,9 +70,27 @@ type AccountItem = {
   institutionId?: string | null;
   institutionType?: string | null;
   counterpartyId?: string | null;
+  isConsumerLoan?: boolean;
+  loanType?: string | null;
   investProductType?: string;
   fixedAssetType?: string | null;
   children?: AccountItem[];
+};
+
+type SidebarSubgroup = {
+  key: string;
+  label: string;
+  accounts: AccountItem[];
+  total: number;
+  href?: string;
+};
+
+type SidebarSection = {
+  kind: string;
+  label: string;
+  accounts: AccountItem[];
+  total: number;
+  subgroups: SidebarSubgroup[];
 };
 
 function normalizeSidebarItemKind(item: Pick<AccountItem, "kind" | "investProductType">) {
@@ -97,9 +116,12 @@ const INVEST_KINDS = ["investment", "investment_fund", "investment_money", "inve
 const FIXED_ASSET_SUMMARY_KIND = "fixed_asset_summary";
 const FIXED_ASSET_SUMMARY_ID = "__fixed_assets__";
 const FIXED_ASSET_SECTION = "fixed_assets";
+const LOAN_SECTION = "loans";
+const LIABILITY_SECTION = "liabilities";
 const FIXED_ASSET_KINDS = [FIXED_ASSET_SUMMARY_KIND];
 const INSURANCE_KINDS = ["insurance"];
-const LIABILITY_KINDS = ["loan_summary", "loan"];
+const LOAN_KINDS = ["loan"];
+const LIABILITY_KINDS = ["loan_summary"];
 const ASSET_SUBGROUPS: Array<{ key: string; label: string; kinds: string[] }> = [
   { key: "cash_like", label: "现金", kinds: ["cash"] },
   { key: "bank_debit_like", label: "借记卡", kinds: ["bank_debit"] },
@@ -112,7 +134,8 @@ const SECTION_ICON: Record<string, React.ElementType> = {
   投资: BarChart3,
   [FIXED_ASSET_SECTION]: Home,
   保险: Shield,
-  往来款: Landmark,
+  [LOAN_SECTION]: Landmark,
+  [LIABILITY_SECTION]: Users,
 };
 const KIND_SORT_ORDER = new Map<string, number>([
   ["cash", 10],
@@ -129,17 +152,34 @@ const KIND_SORT_ORDER = new Map<string, number>([
   ["insurance", 55],
   ["bank_credit", 60],
   ["loan_summary", 70],
+  ["settlement", 71],
   ["loan", 71],
   ["other", 99],
 ]);
 const SIDEBAR_USAGE_SORT_MIN_GROUP_SIZE = 10;
 
 function isSidebarSettlementLoan(item: AccountItem) {
-  return item.kind === "loan" && (!!item.counterpartyId || item.institutionType !== "bank");
+  return item.kind === "settlement" || (item.kind === "loan" && !!item.counterpartyId);
+}
+
+function isSidebarLoanItem(item: AccountItem) {
+  return item.kind === "loan" && !isSidebarSettlementLoan(item);
+}
+
+function loanSubgroupKey(loanType: LoanTypeValue) {
+  return `debt_loan_${loanType}`;
+}
+
+function loanTypeForSidebarItem(item: AccountItem): LoanTypeValue {
+  return resolveLoanType(item) ?? "home";
+}
+
+function isLoanTypeSidebarItem(type: LoanTypeValue) {
+  return (item: AccountItem) => isSidebarLoanItem(item) && loanTypeForSidebarItem(item) === type;
 }
 
 function isOwnerScopedSidebarItem(item: AccountItem) {
-  return item.kind !== "loan_summary" && item.kind !== FIXED_ASSET_SUMMARY_KIND && item.kind !== "investment_property" && !isSidebarSettlementLoan(item);
+  return item.kind !== "loan" && item.kind !== "loan_summary" && item.kind !== FIXED_ASSET_SUMMARY_KIND && item.kind !== "investment_property" && !isSidebarSettlementLoan(item);
 }
 
 function fixedAssetTypeLabel(type: string, t: (key: string, params?: Record<string, string | number>) => string) {
@@ -183,36 +223,32 @@ function normalizeSidebarItems(items: AccountItem[], t: (key: string, params?: R
   const normalized = fixedAssetGroups.length > 0
     ? [...normalizedItems.filter((item) => item.kind !== "investment_property"), ...fixedAssetGroups]
     : normalizedItems;
-  const loanItems = normalized
-    .filter(isSidebarSettlementLoan)
-    .map((item) => ({
-      ...item,
-      groupName: undefined,
-      hoverTitle: [item.label, t("debtShell.title")].filter(Boolean).join(" · "),
-      children: undefined,
-    }))
-    .sort((a, b) => {
-      return a.label.localeCompare(b.label, "zh-Hans-CN");
-    });
-  const otherItems = normalized.filter((item) => !isSidebarSettlementLoan(item));
-
-  if (loanItems.length === 0) return otherItems;
-
-  const loanBalance = loanItems.reduce((sum, item) => sum + item.balance, 0);
-  return [
-    ...otherItems,
-    {
-      id: "__debt__",
-      name: t("debtShell.title"),
-      label: t("debtShell.title"),
-      hoverTitle: `${t("sidebar.section.liabilities")} · ${t("debtShell.title")}`,
-      balance: loanBalance,
-      kind: "loan_summary",
-      groupName: undefined,
-      institution: t("sidebar.section.liabilities"),
-      children: loanItems,
-    },
-  ];
+  const settlementChildren = normalized.filter(isSidebarSettlementLoan);
+  if (settlementChildren.length === 0) return normalized;
+  const normalizedWithoutSettlementChildren = normalized.filter((item) => !isSidebarSettlementLoan(item));
+  const convertedValues = settlementChildren
+    .map((item) => item.convertedBalance)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const allConverted = convertedValues.length === settlementChildren.length;
+  const convertedBalance = allConverted ? convertedValues.reduce((sum, value) => sum + value, 0) : null;
+  const baseCurrency = settlementChildren.find((item) => item.baseCurrency)?.baseCurrency ?? settlementChildren[0]?.currency ?? null;
+  const settlementSummary: AccountItem = {
+    id: "__settlement_summary__",
+    name: t("sidebar.section.liabilities"),
+    label: t("sidebar.section.liabilities"),
+    shortLabel: t("sidebar.section.liabilities"),
+    hoverTitle: t("sidebar.debt.counterpartySummary"),
+    balance: convertedBalance ?? settlementChildren.reduce((sum, item) => sum + item.balance, 0),
+    convertedBalance,
+    currency: convertedBalance == null ? settlementChildren[0]?.currency ?? baseCurrency : baseCurrency,
+    baseCurrency,
+    fxRateMissing: convertedBalance == null && settlementChildren.some((item) => item.fxRateMissing),
+    kind: "loan_summary",
+    groupName: undefined,
+    institution: t("sidebar.debt.counterpartySummary"),
+    children: settlementChildren,
+  };
+  return [...normalizedWithoutSettlementChildren, settlementSummary];
 }
 
 function getSidebarItemSignature(item: AccountItem): string {
@@ -234,6 +270,8 @@ function getSidebarItemSignature(item: AccountItem): string {
     item.institutionId ?? "",
     item.institutionType ?? "",
     item.counterpartyId ?? "",
+    item.isConsumerLoan ? "1" : "0",
+    item.loanType ?? "",
     item.investProductType ?? "",
     item.fixedAssetType ?? "",
     childSignature,
@@ -251,6 +289,7 @@ function toSidebarAccountItem(a: any, t: (key: string, params?: Record<string, s
     investProductType: a.investProductType ?? null,
     Institution: a.Institution ?? null,
     AccountGroup: a.AccountGroup ?? null,
+    Counterparty: a.Counterparty ?? null,
   }, creditCardSidebarLabelTemplate);
   return {
     id: a.id,
@@ -269,6 +308,8 @@ function toSidebarAccountItem(a: any, t: (key: string, params?: Record<string, s
     institutionId: a.institutionId ?? null,
     institutionType: a.Institution?.type ?? a.institutionType ?? null,
     counterpartyId: a.counterpartyId ?? null,
+    isConsumerLoan: a.isConsumerLoan === true,
+    loanType: a.loanType ?? null,
     investProductType: a.investProductType || undefined,
     fixedAssetType: a.fixedAssetType ?? null,
   };
@@ -306,6 +347,10 @@ export function SidebarClient({
   const selectedAccount = (searchParams.get("account") ?? "").trim();
   const selectedView = (searchParams.get("view") ?? "").trim();
   const selectedFixedAssetType = (searchParams.get("fixedAssetType") ?? "").trim();
+  const selectedDebtLoanTypeRaw = (searchParams.get("debtLoanType") ?? "").trim();
+  const selectedDebtLoanType = LOAN_TYPES.includes(selectedDebtLoanTypeRaw as LoanTypeValue)
+    ? selectedDebtLoanTypeRaw as LoanTypeValue
+    : null;
   const isRootInvestmentView =
     pathname === "/" &&
     (selectedView === "investfund" ||
@@ -650,7 +695,8 @@ export function SidebarClient({
     if (label === "投资") return t("sidebar.section.investments");
     if (label === FIXED_ASSET_SECTION) return t("sidebar.section.fixedAssets");
     if (label === "保险") return t("sidebar.section.insurance");
-    if (label === "往来款") return t("sidebar.section.liabilities");
+    if (label === LOAN_SECTION) return t("sidebar.section.loans");
+    if (label === LIABILITY_SECTION) return t("sidebar.section.liabilities");
     return label;
   };
   const assetSubgroupLabel = (label: string) => {
@@ -674,7 +720,9 @@ export function SidebarClient({
     if (kind === FIXED_ASSET_SUMMARY_KIND) return t("sidebar.section.fixedAssets");
     if (kind === "insurance") return t("sidebar.kind.insurance");
     if (kind === "bank_credit") return t("sidebar.kind.creditCard");
-    if (kind === "loan_summary" || kind === "loan") return t("sidebar.kind.loan");
+    if (kind === "loan_summary") return t("sidebar.section.liabilities");
+    if (kind === "settlement") return t("account.kind.settlement");
+    if (kind === "loan") return t("account.kind.loan");
     return t("sidebar.kind.other");
   };
   const collapsedNavCls = (active: boolean) =>
@@ -750,9 +798,47 @@ export function SidebarClient({
       if (recencyDiff !== 0) return recencyDiff;
       return a.label.localeCompare(b.label, "zh-Hans-CN");
     };
+    const buildLoanSubgroups = (loanItems: AccountItem[]): SidebarSubgroup[] => {
+      return LOAN_TYPES.map((loanType) => {
+        const accounts = sortAccountsByUsage(loanItems.filter(isLoanTypeSidebarItem(loanType)));
+        return {
+          key: loanSubgroupKey(loanType),
+          label: t(`loan.type.${loanType}`),
+          accounts,
+          total: accounts.reduce((sum, account) => sum + displayBalance(account), 0),
+          href: `/?view=debt&debtLoanType=${loanType}`,
+        };
+      }).filter((subgroup) => subgroup.accounts.length > 0);
+    };
+    const buildDebtSections = (): SidebarSection[] => {
+      const loanItems = visibleItems.filter(isSidebarLoanItem);
+      const liabilityItems = visibleItems.filter((item) => item.kind === "loan_summary");
+      const debtSections: SidebarSection[] = [];
+      if (liabilityItems.length > 0) {
+        debtSections.push({
+          kind: LIABILITY_SECTION,
+          label: LIABILITY_SECTION,
+          accounts: sortAccountsByUsage(liabilityItems),
+          total: liabilityItems.reduce((sum, account) => sum + displayBalance(account), 0),
+          subgroups: [],
+        });
+      }
+      if (loanItems.length > 0) {
+        debtSections.push({
+          kind: LOAN_SECTION,
+          label: LOAN_SECTION,
+          accounts: sortAccountsByUsage(loanItems),
+          total: loanItems.reduce((sum, account) => sum + displayBalance(account), 0),
+          subgroups: buildLoanSubgroups(loanItems),
+        });
+      }
+      return debtSections;
+    };
     if (sidebarGroupBy === "institution") {
-      const map = new Map<string, { kind: string; label: string; accounts: AccountItem[]; total: number; subgroups: never[] }>();
+      const debtKinds = new Set(["loan", "loan_summary"]);
+      const map = new Map<string, SidebarSection>();
       for (const item of visibleItems) {
+        if (debtKinds.has(item.kind)) continue;
         const label = item.kind === FIXED_ASSET_SUMMARY_KIND
           ? FIXED_ASSET_SECTION
           : item.institution?.trim() || t("insurance.noInstitution");
@@ -771,7 +857,7 @@ export function SidebarClient({
           });
         }
       }
-      return Array.from(map.values())
+      const institutionSections = Array.from(map.values())
         .map((section) => ({
           ...section,
           accounts: section.accounts.length >= SIDEBAR_USAGE_SORT_MIN_GROUP_SIZE
@@ -783,6 +869,7 @@ export function SidebarClient({
             : section.accounts,
         }))
         .sort((a, b) => a.label.localeCompare(b.label, "zh-Hans-CN"));
+      return [...institutionSections, ...buildDebtSections()];
     }
 
     const groups = [
@@ -791,7 +878,8 @@ export function SidebarClient({
       { label: "投资", kinds: INVEST_KINDS },
       { label: FIXED_ASSET_SECTION, kinds: FIXED_ASSET_KINDS },
       { label: "保险", kinds: INSURANCE_KINDS },
-      { label: "往来款", kinds: LIABILITY_KINDS }
+      { label: LIABILITY_SECTION, kinds: LIABILITY_KINDS },
+      { label: LOAN_SECTION, kinds: LOAN_KINDS },
     ];
     return groups.map(g => {
       const filtered = visibleItems.filter(it => g.kinds.includes(it.kind) || (g.label === "投资" && it.kind.startsWith("investment_") && it.kind !== "investment_property"));
@@ -819,6 +907,8 @@ export function SidebarClient({
               }
               return subgroupItems;
             })()
+          : g.label === LOAN_SECTION
+            ? buildLoanSubgroups(filtered)
           : [];
       return {
         kind: g.label, label: g.label, accounts: sortAccountsByUsage(filtered),
@@ -838,7 +928,7 @@ export function SidebarClient({
     if (item.kind === "loan_summary") {
       return selectedView === "debt" && (!selectedDebtPerson || (item.children?.some(isDebtAccountSelected) ?? false));
     }
-    if (item.kind === "loan") return isDebtAccountSelected(item) || (!!item.id && selectedAccountId === item.id && selectedView === "debt");
+    if (item.kind === "loan" || item.kind === "settlement") return isDebtAccountSelected(item) || (!!item.id && selectedAccountId === item.id && selectedView === "debt");
     if (item.kind === FIXED_ASSET_SUMMARY_KIND) {
       if (selectedFixedAssetType) {
         const itemType = item.id?.startsWith(`${FIXED_ASSET_SUMMARY_ID}:`)
@@ -851,13 +941,29 @@ export function SidebarClient({
     return item.id ? selectedAccountId === item.id : !selectedAccountId && selectedAccount === item.name;
   }
 
-  const activeSectionKind = sections.find((section) => section.accounts.some(isAccountItemActive))?.kind ?? sections[0]?.kind ?? "";
+  const activeSectionKind = sections.find((section) => {
+    if (
+      pathname === "/" &&
+      selectedView === "debt" &&
+      selectedDebtLoanType &&
+      section.kind === LOAN_SECTION &&
+      section.subgroups.some((subgroup) => subgroup.key === loanSubgroupKey(selectedDebtLoanType))
+    ) {
+      return true;
+    }
+    return section.accounts.some(isAccountItemActive);
+  })?.kind ?? sections[0]?.kind ?? "";
 
-  const activeAssetSubgroupKey = (() => {
+  const activeSubgroupKey = (() => {
     if (sidebarGroupBy !== "kind") return "";
-    const assetSection = sections.find((section) => section.kind === "资产");
-    if (!assetSection?.subgroups?.length) return "";
-    return assetSection.subgroups.find((subgroup) => subgroup.accounts.some(isAccountItemActive))?.key ?? assetSection.subgroups[0]?.key ?? "";
+    if (pathname === "/" && selectedView === "debt" && selectedDebtLoanType) {
+      const key = loanSubgroupKey(selectedDebtLoanType);
+      const loanSection = sections.find((section) => section.kind === LOAN_SECTION);
+      if (loanSection?.subgroups.some((subgroup) => subgroup.key === key)) return key;
+    }
+    const groupedSection = sections.find((section) => section.accounts.some(isAccountItemActive) && section.subgroups?.length);
+    if (!groupedSection?.subgroups?.length) return "";
+    return groupedSection.subgroups.find((subgroup) => subgroup.accounts.some(isAccountItemActive))?.key ?? groupedSection.subgroups[0]?.key ?? "";
   })();
 
   useEffect(() => {
@@ -874,19 +980,26 @@ export function SidebarClient({
       initializedAssetSubgroupsRef.current = false;
       return;
     }
-    const assetSection = sections.find((section) => section.kind === "资产");
-    if (!assetSection?.subgroups?.length) {
+    const groupedSections = sections.filter((section) => section.subgroups?.length);
+    if (groupedSections.length === 0) {
       if (collapsedAssetSubgroupKeys.size > 0) setCollapsedAssetSubgroupKeys(new Set());
       initializedAssetSubgroupsRef.current = false;
       return;
     }
     if (!initializedAssetSubgroupsRef.current) {
       initializedAssetSubgroupsRef.current = true;
-      const openKey = activeAssetSubgroupKey || assetSection.subgroups[0]?.key || "";
-      setCollapsedAssetSubgroupKeys(new Set(assetSection.subgroups.map((subgroup) => subgroup.key).filter((key) => key !== openKey)));
+      const openKeys = new Set(
+        groupedSections.flatMap((section) => {
+          const openKey = section.kind === activeSectionKind
+            ? activeSubgroupKey
+            : section.subgroups?.[0]?.key ?? "";
+          return openKey ? [openKey] : [];
+        }),
+      );
+      setCollapsedAssetSubgroupKeys(new Set(groupedSections.flatMap((section) => section.subgroups?.map((subgroup) => subgroup.key) ?? []).filter((key) => !openKeys.has(key))));
       return;
     }
-    const subgroupKeys = new Set(assetSection.subgroups.map((subgroup) => subgroup.key));
+    const subgroupKeys = new Set(groupedSections.flatMap((section) => section.subgroups?.map((subgroup) => subgroup.key) ?? []));
     let changed = false;
     const nextCollapsed = new Set<string>();
     for (const key of collapsedAssetSubgroupKeys) {
@@ -894,7 +1007,7 @@ export function SidebarClient({
       else changed = true;
     }
     if (changed) setCollapsedAssetSubgroupKeys(nextCollapsed);
-  }, [sections, activeAssetSubgroupKey, collapsedAssetSubgroupKeys, sidebarGroupBy]);
+  }, [sections, activeSubgroupKey, activeSectionKind, collapsedAssetSubgroupKeys, sidebarGroupBy]);
 
   function toggleAssetSubgroup(key: string) {
     setCollapsedAssetSubgroupKeys((prev) => {
@@ -1154,6 +1267,9 @@ export function SidebarClient({
               {sections.map((sec) => {
                 const collapsed = collapsedSections.has(sec.kind);
                 const SectionIcon = SECTION_ICON[sec.label] ?? Landmark;
+                const sidebarGroups: SidebarSubgroup[] = sec.subgroups?.length
+                  ? sec.subgroups
+                  : [{ key: `${sec.kind}_default`, label: "", accounts: sec.accounts, total: sec.total }];
                 return (
                   <div key={sec.kind}>
                     <div
@@ -1186,92 +1302,121 @@ export function SidebarClient({
                     </div>
                     {!collapsed && (
                       <div className="mt-1 space-y-1">
-                        {(sec.subgroups?.length ? sec.subgroups : [{ key: `${sec.kind}_default`, label: "", accounts: sec.accounts, total: sec.total }]).map((group) => (
-                          <div key={group.key} className="space-y-1">
-                            {group.label ? (
-                              <button
-                                type="button"
-                                onClick={() => focusAssetSubgroup(group.key, sec.subgroups?.map((subgroup) => subgroup.key) ?? [group.key])}
-                                className="flex w-full items-center gap-1.5 rounded-md px-3 py-0.5 text-left hover:bg-slate-50/80"
-                              >
-                                <div className="text-[10px] font-medium text-slate-400">{assetSubgroupLabel(group.label)}</div>
-                                <div className="h-px flex-1 bg-slate-100" />
-                                <div className={`text-[10px] font-medium tabular-nums ${sectionBalanceCls(sec.kind, group.total)}`}>
-                                  {formatCurrencyMoney(displaySectionTotal(sec.kind, group.total), baseCurrency)}
-                                </div>
-                                <ChevronDown
-                                  size={14}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    toggleAssetSubgroup(group.key);
-                                  }}
-                                  className={`shrink-0 text-slate-300 transition-transform ${sec.kind === "资产" && collapsedAssetSubgroupKeys.has(group.key) ? "-rotate-90" : ""}`}
-                                />
-                              </button>
-                            ) : null}
-                            {(sec.kind !== "资产" || !group.label || !collapsedAssetSubgroupKeys.has(group.key)) && group.accounts.map((it, index) => {
-                              const active = isAccountItemActive(it);
-                              const href = (() => {
-                                if (it.kind === FIXED_ASSET_SUMMARY_KIND) {
-                                  const type = it.id?.startsWith(`${FIXED_ASSET_SUMMARY_ID}:`)
-                                    ? it.id.slice(FIXED_ASSET_SUMMARY_ID.length + 1)
-                                    : "";
-                                  const q = new URLSearchParams();
-                                  q.set("view", "investproperty");
-                                  if (type) q.set("fixedAssetType", type);
-                                  return `/?${q.toString()}`;
-                                }
-                                if (it.kind === "loan_summary") return "/?view=debt";
-                                if (it.kind === "loan") {
-                                  const q = new URLSearchParams();
-                                  q.set("view", "debt");
-                                  const debtPersonKey = debtPersonKeyFor(it);
-                                  if (debtPersonKey) q.set("debtPerson", debtPersonKey);
-                                  return `/?${q.toString()}`;
-                                }
-                                const q = new URLSearchParams();
-                                if (it.id) q.set("accountId", it.id);
-                                else q.set("account", it.name);
-                                const view = it.kind.startsWith("investment")
-                                  ? getInvestmentAccountView(it)
-                                  : it.kind === "deposit"
-                                    ? "deposit"
-                                    : it.kind === "insurance"
-                                      ? "insurance"
-                                      : (it.kind === "bank_credit" ? "bill" : "detail");
-                                q.set("view", view);
-                                return `/?${q.toString()}`;
-                              })();
-                              const itemTitle = it.hoverTitle ?? [it.kind === "loan" ? "" : it.groupName, it.label, inlineKindLabel(it.kind)].filter(Boolean).join(" · ");
-                              return (
+                        {sidebarGroups.map((group) => {
+                          const hasSubgroups = !!sec.subgroups?.length;
+                          const isLoanTypeNode = sec.kind === LOAN_SECTION && !!group.href;
+                          const subgroupCollapsed = !isLoanTypeNode && hasSubgroups && collapsedAssetSubgroupKeys.has(group.key);
+                          const loanTypeActive = isLoanTypeNode && pathname === "/" && selectedView === "debt" && group.key === (selectedDebtLoanType ? loanSubgroupKey(selectedDebtLoanType) : "");
+                          const subgroupLabel = sec.kind === "资产" ? assetSubgroupLabel(group.label) : group.label;
+                          return (
+                            <div key={group.key} className="space-y-1">
+                              {isLoanTypeNode && group.href ? (
                                 <Link
-                                  key={`${group.key}:${it.id}:${it.name}`}
-                                  href={href}
+                                  href={group.href}
                                   prefetch={false}
                                   scroll={false}
-                                  title={itemTitle}
-                                  onMouseEnter={() => prefetchRoute(href)}
-                                  onFocus={() => prefetchRoute(href)}
-                                  onTouchStart={() => prefetchRoute(href)}
-                                  className={`${accountLinkCls(active)} ${group.label ? "ml-3 pl-2.5 border-l border-slate-100 rounded-l-none" : ""} ${index > 0 ? "border-t border-slate-100/90" : ""}`}
+                                  title={group.label}
+                                  onMouseEnter={() => prefetchRoute(group.href ?? "")}
+                                  onFocus={() => prefetchRoute(group.href ?? "")}
+                                  onTouchStart={() => prefetchRoute(group.href ?? "")}
+                                  className={`ml-3 flex items-center justify-between rounded-lg border-l px-3 py-1.5 pl-2.5 text-xs transition-all duration-200 ${
+                                    loanTypeActive
+                                      ? "border-blue-100 bg-blue-50/80 text-slate-900 shadow-sm"
+                                      : "border-slate-100 text-slate-600 hover:border-slate-200 hover:bg-white hover:text-slate-900"
+                                  }`}
                                 >
-                                  <span className="min-w-0 flex-1 pr-2">
-                                    <span className="text-fade-right block min-w-0" title={itemTitle}>
-                                    {sidebarGroupBy === "institution" && it.kind !== "loan_summary"
-                                      ? it.kind === FIXED_ASSET_SUMMARY_KIND
-                                        ? it.label
-                                      : it.kind === "insurance"
-                                        ? (it.shortLabel || it.label)
-                                        : `${inlineKindLabel(it.kind)}·${it.shortLabel || it.label}`
-                                      : it.label}
-                                    </span>
+                                  <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
+                                  <span className={`shrink-0 pl-2 text-[11px] font-medium tabular-nums ${sectionBalanceCls(sec.kind, group.total)}`}>
+                                    {formatCurrencyMoney(displaySectionTotal(sec.kind, group.total), baseCurrency)}
                                   </span>
-                                  <span className={`shrink-0 pl-2 text-[11px] font-medium tabular-nums ${itemBalanceCls(it)}`}>{formatSidebarBalance(it)}</span>
                                 </Link>
-                              );
-                            })}
-                          </div>
-                        ))}
+                              ) : group.label ? (
+                                <button
+                                  type="button"
+                                  onClick={() => focusAssetSubgroup(group.key, sec.subgroups?.map((subgroup) => subgroup.key) ?? [group.key])}
+                                  className="flex w-full items-center gap-1.5 rounded-md px-3 py-0.5 text-left hover:bg-slate-50/80"
+                                >
+                                  <div className="text-[10px] font-medium text-slate-400">{subgroupLabel}</div>
+                                  <div className="h-px flex-1 bg-slate-100" />
+                                  <div className={`text-[10px] font-medium tabular-nums ${sectionBalanceCls(sec.kind, group.total)}`}>
+                                    {formatCurrencyMoney(displaySectionTotal(sec.kind, group.total), baseCurrency)}
+                                  </div>
+                                  {hasSubgroups ? (
+                                    <ChevronDown
+                                      size={14}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        toggleAssetSubgroup(group.key);
+                                      }}
+                                      className={`shrink-0 text-slate-300 transition-transform ${subgroupCollapsed ? "-rotate-90" : ""}`}
+                                    />
+                                  ) : null}
+                                </button>
+                              ) : null}
+                              {!isLoanTypeNode && (!hasSubgroups || !group.label || !subgroupCollapsed) && group.accounts.map((it, index) => {
+                                const active = isAccountItemActive(it);
+                                const href = (() => {
+                                  if (it.kind === FIXED_ASSET_SUMMARY_KIND) {
+                                    const type = it.id?.startsWith(`${FIXED_ASSET_SUMMARY_ID}:`)
+                                      ? it.id.slice(FIXED_ASSET_SUMMARY_ID.length + 1)
+                                      : "";
+                                    const q = new URLSearchParams();
+                                    q.set("view", "investproperty");
+                                    if (type) q.set("fixedAssetType", type);
+                                    return `/?${q.toString()}`;
+                                  }
+                                  if (it.kind === "loan_summary") return "/?view=debt";
+                                  if (it.kind === "loan" || it.kind === "settlement") {
+                                    const q = new URLSearchParams();
+                                    q.set("view", "debt");
+                                    const debtPersonKey = debtPersonKeyFor(it);
+                                    if (debtPersonKey) q.set("debtPerson", debtPersonKey);
+                                    return `/?${q.toString()}`;
+                                  }
+                                  const q = new URLSearchParams();
+                                  if (it.id) q.set("accountId", it.id);
+                                  else q.set("account", it.name);
+                                  const view = it.kind.startsWith("investment")
+                                    ? getInvestmentAccountView(it)
+                                    : it.kind === "deposit"
+                                      ? "deposit"
+                                      : it.kind === "insurance"
+                                        ? "insurance"
+                                        : (it.kind === "bank_credit" ? "bill" : "detail");
+                                  q.set("view", view);
+                                  return `/?${q.toString()}`;
+                                })();
+                                const itemTitle = it.hoverTitle ?? [isSidebarSettlementLoan(it) ? "" : it.groupName, it.label, inlineKindLabel(it.kind)].filter(Boolean).join(" · ");
+                                return (
+                                  <Link
+                                    key={`${group.key}:${it.id}:${it.name}`}
+                                    href={href}
+                                    prefetch={false}
+                                    scroll={false}
+                                    title={itemTitle}
+                                    onMouseEnter={() => prefetchRoute(href)}
+                                    onFocus={() => prefetchRoute(href)}
+                                    onTouchStart={() => prefetchRoute(href)}
+                                    className={`${accountLinkCls(active)} ${group.label ? "ml-3 pl-2.5 border-l border-slate-100 rounded-l-none" : ""} ${index > 0 ? "border-t border-slate-100/90" : ""}`}
+                                  >
+                                    <span className="min-w-0 flex-1 pr-2">
+                                      <span className="text-fade-right block min-w-0" title={itemTitle}>
+                                      {sidebarGroupBy === "institution" && it.kind !== "loan_summary"
+                                        ? it.kind === FIXED_ASSET_SUMMARY_KIND
+                                          ? it.label
+                                        : it.kind === "insurance"
+                                          ? (it.shortLabel || it.label)
+                                          : `${inlineKindLabel(it.kind)}·${it.shortLabel || it.label}`
+                                        : it.label}
+                                      </span>
+                                    </span>
+                                    <span className={`shrink-0 pl-2 text-[11px] font-medium tabular-nums ${itemBalanceCls(it)}`}>{formatSidebarBalance(it)}</span>
+                                  </Link>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>

@@ -251,6 +251,7 @@ export default async function ReportsPage({
       investProductType: account.investProductType,
       Institution: account.Institution,
       AccountGroup: account.AccountGroup,
+      Counterparty: account.Counterparty,
     }, creditCardLabelTemplate, { fields: accountLabelFields }),
   );
   const allAccountDisplayById = new Map(allAccountDisplayOptions.map((account) => [account.id, account]));

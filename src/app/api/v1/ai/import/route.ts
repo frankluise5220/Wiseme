@@ -572,7 +572,7 @@ export async function POST(req: NextRequest) {
         const productType = fundContext.fundProductType ?? (fundContext.fundCode?.startsWith("5") ? "money_fund" : "fund");
 
         const statementMonth =
-          (fundAcc.kind === "bank_credit" || fundAcc.kind === "loan") && fundAcc.billingDay ? toStatementMonth(date, fundAcc.billingDay) : null;
+          (fundAcc.kind === "bank_credit" || fundAcc.kind === "loan") && fundAcc.billingDay ? toStatementMonth(date, fundAcc.billingDay, fundAcc.billingDayTxPeriod) : null;
 
         await createFundTransactionWithCashFlows(prisma, {
           householdId,
@@ -618,7 +618,7 @@ export async function POST(req: NextRequest) {
           continue;
         }
         const fromStatementMonth =
-          (from.kind === "bank_credit" || from.kind === "loan") && from.billingDay ? toStatementMonth(date, from.billingDay) : null;
+          (from.kind === "bank_credit" || from.kind === "loan") && from.billingDay ? toStatementMonth(date, from.billingDay, from.billingDayTxPeriod) : null;
         const transferCurrency = resolveSameCurrencyTransfer(from, to);
         await prisma.txRecord.create({
           data: {
@@ -676,7 +676,7 @@ export async function POST(req: NextRequest) {
             continue;
           }
           const statementMonth =
-            (single.kind === "bank_credit" || single.kind === "loan") && single.billingDay ? toStatementMonth(date, single.billingDay) : null;
+            (single.kind === "bank_credit" || single.kind === "loan") && single.billingDay ? toStatementMonth(date, single.billingDay, single.billingDayTxPeriod) : null;
 
           await prisma.txRecord.create({
             data: {
@@ -700,7 +700,7 @@ export async function POST(req: NextRequest) {
           didCreate = true;
         } else {
           const fromStatementMonth =
-            (from.kind === "bank_credit" || from.kind === "loan") && from.billingDay ? toStatementMonth(date, from.billingDay) : null;
+            (from.kind === "bank_credit" || from.kind === "loan") && from.billingDay ? toStatementMonth(date, from.billingDay, from.billingDayTxPeriod) : null;
 
           await prisma.txRecord.create({
             data: {
@@ -771,7 +771,7 @@ export async function POST(req: NextRequest) {
           : findCounterpartyInstitution(normalizedInstitution);
         const statementMonth =
           (account.kind === "bank_credit" || account.kind === "loan") && account.billingDay
-            ? toStatementMonth(creditBillEffectiveDate({ type: item.type, date, postedAt }) ?? date, account.billingDay)
+            ? toStatementMonth(creditBillEffectiveDate({ type: item.type, date, postedAt }) ?? date, account.billingDay, account.billingDayTxPeriod)
             : null;
         const entryData: Record<string, unknown> = {
           type: item.type as any,

@@ -27,12 +27,16 @@ model Account {
   isActive                                                   Boolean                     @default(true)
   isPlaceholder                                              Boolean                     @default(false)
   isConsumerLoan                                             Boolean                     @default(false)
+  loanType                                                   LoanType?
+  collateralAssetId                                          String?
   investProductType                                          FundProductType?
   fixedAssetType                                            FixedAssetType?
   creditLimit                                                Decimal?                    @db.Decimal(18, 2)
   billingDay                                                 Int?
   repaymentDay                                               Int?
+  repaymentOffsetDays                                        Int?
   creditBillMode                                             CreditBillMode              @default(separate)
+  billingDayTxPeriod                                         CreditBillingDayTxPeriod    @default(current)
   numberMasked                                               String?
   routeKey                                                   String?                     @unique
   note                                                       String?
@@ -84,6 +88,7 @@ model Account {
   StockTransaction                                           StockTransaction[]          @relation("StockTransaction_stockAccount")
   StockTransactionCashAccount                                StockTransaction[]          @relation("StockTransaction_cashAccount")
   PropertyAsset                                              PropertyAsset[]
+  MortgagedPropertyAssets                                    PropertyAsset[]             @relation("MortgageLoanAccountToPropertyAsset")
   PropertyTransaction                                        PropertyTransaction[]       @relation("PropertyTransaction_propertyAccount")
   PropertyTransactionCashAccount                             PropertyTransaction[]       @relation("PropertyTransaction_cashAccount")
   RegularInvestPlan_RegularInvestPlan_accountIdToAccount     RegularInvestPlan[]         @relation("RegularInvestPlan_accountIdToAccount")
@@ -856,6 +861,7 @@ model PropertyAsset {
   id                  String                @id @default(cuid())
   householdId         String
   accountId           String
+  mortgageLoanAccountId String?
   name                String
   assetType           FixedAssetType        @default(property)
   propertyType        String?
@@ -874,10 +880,12 @@ model PropertyAsset {
   updatedAt           DateTime              @default(now()) @updatedAt
   Household           Household             @relation(fields: [householdId], references: [id], onDelete: Cascade)
   Account             Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  MortgageLoanAccount Account?              @relation("MortgageLoanAccountToPropertyAsset", fields: [mortgageLoanAccountId], references: [id], onDelete: SetNull)
   Valuations          PropertyValuation[]
   Transactions        PropertyTransaction[]
 
   @@index([householdId, accountId])
+  @@index([householdId, mortgageLoanAccountId])
   @@index([householdId, status])
   @@index([accountId])
   @@index([deletedAt])
@@ -1611,9 +1619,17 @@ enum AccountKind {
   ewallet
   deposit
   investment
+  settlement
   loan
   other
   insurance
+}
+
+enum LoanType {
+  home
+  mortgage
+  consumer
+  other
 }
 
 enum DebtDirection {
@@ -1624,6 +1640,11 @@ enum DebtDirection {
 enum CreditBillMode {
   separate
   consolidated
+}
+
+enum CreditBillingDayTxPeriod {
+  current
+  next
 }
 
 enum CostBasisMethod {
@@ -1813,4 +1834,42 @@ enum CreditCardInstallmentStatus {
   active
   completed
   cancelled
+}
+
+model ApprovedCurrency {
+  id         String   @id @default(cuid())
+  code       String   @unique // ISO 4217 code, e.g. "KRW", "SGD"
+  nameZh     String   // 中文名称
+  nameEn     String   // English name
+  countryZh  String?  // 中文国家名（用于自动联想）
+  countryEn  String?  // English country name
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+  createdBy  String?  // userId of the approver
+}
+
+model CustomCurrencyRequest {
+  id          String                      @id @default(cuid())
+  code        String                      // ISO 4217 code, e.g. "KRW"
+  nameZh      String                      // 用户填写的中文名称
+  nameEn      String                      // 用户填写的英文名称
+  countryZh   String                      // 用户填写的中文国家名
+  countryEn   String?
+  status      CustomCurrencyRequestStatus @default(pending)
+  requesterId String                      // userId of the requester
+  householdId String?                     // optional household context
+  approverId  String?
+  rejectReason String?
+  createdAt   DateTime                    @default(now())
+  updatedAt   DateTime                    @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([requesterId])
+  @@index([code])
+}
+
+enum CustomCurrencyRequestStatus {
+  pending
+  approved
+  rejected
 }

@@ -77,7 +77,7 @@ type AccountLookupRow = {
 };
 type ImportContext = {
   householdId: string;
-  accountMetaById: Map<string, { name: string; kind: AccountKind; billingDay: number | null; currency: string | null }>;
+  accountMetaById: Map<string, { name: string; kind: AccountKind; billingDay: number | null; billingDayTxPeriod?: string | null; currency: string | null }>;
   accountLookupRows: AccountLookupRow[];
   accountIdentityConflictFor: (
     selectedAccount: AccountLookupRow | null | undefined,
@@ -259,6 +259,7 @@ async function resolveAccountId(ctx: ImportContext, tx: Db, accountName?: string
       name: true,
       kind: true,
       billingDay: true,
+      billingDayTxPeriod: true,
       currency: true,
       numberMasked: true,
       Institution: {
@@ -273,7 +274,7 @@ async function resolveAccountId(ctx: ImportContext, tx: Db, accountName?: string
   });
 
   for (const account of accounts) {
-    ctx.accountMetaById.set(account.id, { name: account.name, kind: account.kind, billingDay: account.billingDay, currency: account.currency });
+    ctx.accountMetaById.set(account.id, { name: account.name, kind: account.kind, billingDay: account.billingDay, billingDayTxPeriod: account.billingDayTxPeriod, currency: account.currency });
   }
   ctx.accountLookupRows = accounts;
 
@@ -331,7 +332,7 @@ async function ensureAccountId(ctx: ImportContext, tx: Db, accountName?: string)
         isActive: true,
       },
     });
-    ctx.accountMetaById.set(created.id, { name: created.name, kind: created.kind, billingDay: created.billingDay, currency: created.currency });
+    ctx.accountMetaById.set(created.id, { name: created.name, kind: created.kind, billingDay: created.billingDay, billingDayTxPeriod: created.billingDayTxPeriod, currency: created.currency });
     ctx.accountLookupRows.push({ id: created.id, name: created.name, kind: created.kind, billingDay: created.billingDay, currency: created.currency, numberMasked: created.numberMasked, Institution: null, AccountGroup: null });
     return created.id;
   } catch {
@@ -454,7 +455,7 @@ function statementMonthForAccountMeta(
   if (!meta) return null;
   if (meta.kind !== AccountKind.bank_credit && meta.kind !== AccountKind.loan) return null;
   if (!meta.billingDay) return null;
-  return toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, meta.billingDay);
+  return toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, meta.billingDay, meta.billingDayTxPeriod);
 }
 
 async function accountMetaFor(ctx: ImportContext, tx: Db, accountId: string | null) {
@@ -463,10 +464,16 @@ async function accountMetaFor(ctx: ImportContext, tx: Db, accountId: string | nu
   if (cached) return cached;
   const account = await tx.account.findUnique({
     where: { id: accountId },
-    select: { name: true, kind: true, billingDay: true, currency: true },
+    select: { name: true, kind: true, billingDay: true, billingDayTxPeriod: true, currency: true },
   });
   if (!account) return null;
-  const meta = { name: account.name, kind: account.kind, billingDay: account.billingDay, currency: account.currency };
+  const meta = {
+    name: account.name,
+    kind: account.kind,
+    billingDay: account.billingDay,
+    billingDayTxPeriod: account.billingDayTxPeriod,
+    currency: account.currency,
+  };
   ctx.accountMetaById.set(accountId, meta);
   return meta;
 }
@@ -502,6 +509,7 @@ async function buildImportContext(): Promise<ImportContext> {
         name: true,
         kind: true,
         billingDay: true,
+        billingDayTxPeriod: true,
         currency: true,
         numberMasked: true,
         Institution: {
@@ -550,7 +558,7 @@ async function buildImportContext(): Promise<ImportContext> {
   };
 
   for (const account of accounts) {
-    ctx.accountMetaById.set(account.id, { name: account.name, kind: account.kind, billingDay: account.billingDay, currency: account.currency });
+    ctx.accountMetaById.set(account.id, { name: account.name, kind: account.kind, billingDay: account.billingDay, billingDayTxPeriod: account.billingDayTxPeriod, currency: account.currency });
   }
   for (const tag of tags) {
     ctx.tagIdByName.set(tag.name, tag.id);
@@ -1052,7 +1060,7 @@ export async function POST(req: Request) {
       // Find or create loan accounts
       const cpIds = [...new Set(cpByName.values())];
       const existingLoans = cpIds.length > 0 ? await prisma.account.findMany({
-        where: { householdId: ctx.householdId, counterpartyId: { in: cpIds }, kind: "loan", isPlaceholder: { not: true } },
+        where: { householdId: ctx.householdId, counterpartyId: { in: cpIds }, kind: { in: ["settlement", "loan"] }, isPlaceholder: { not: true } },
         select: { id: true, name: true, counterpartyId: true, billingDay: true, currency: true },
       }) : [];
       const loanByCpId = new Map<string, string>();
@@ -1065,13 +1073,13 @@ export async function POST(req: Request) {
         let loanId = loanByCpId.get(cpId);
         if (!loanId && defaultGroup) {
           try {
-            const nl = await prisma.account.create({ data: { name, kind: "loan", debtDirection: "receivable", currency: "CNY", groupId: defaultGroup, counterpartyId: cpId, householdId: ctx.householdId, isActive: true } });
+            const nl = await prisma.account.create({ data: { name, kind: "settlement", debtDirection: "receivable", currency: "CNY", groupId: defaultGroup, counterpartyId: cpId, householdId: ctx.householdId, isActive: true } });
             loanId = nl.id; loanByCpId.set(cpId, loanId);
           } catch {}
         }
         if (loanId) {
-          ctx.accountMetaById.set(loanId, { name, kind: "loan", billingDay: null, currency: "CNY" });
-          ctx.accountLookupRows.push({ id: loanId, name, kind: "loan", billingDay: null, currency: "CNY", numberMasked: null, Institution: null, AccountGroup: null, AccountAlias: null });
+          ctx.accountMetaById.set(loanId, { name, kind: "settlement", billingDay: null, billingDayTxPeriod: "current", currency: "CNY" });
+          ctx.accountLookupRows.push({ id: loanId, name, kind: "settlement", billingDay: null, currency: "CNY", numberMasked: null, Institution: null, AccountGroup: null, AccountAlias: null });
         }
       }
     }

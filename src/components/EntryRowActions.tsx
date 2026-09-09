@@ -75,6 +75,7 @@ export type EditPayload = {
     amount?: number;
   }>;
   tagIds?: string[];
+  currency?: string | null;
   tags?: Array<{
     id?: string;
     tagId?: string;

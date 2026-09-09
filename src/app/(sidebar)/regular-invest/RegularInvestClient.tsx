@@ -1401,7 +1401,14 @@ export function RegularInvestClient({
                   { key: "transaction", label: t("entry.kind.transaction") },
                   { key: "advance", label: t("entry.kind.advance") },
                   { key: "transfer", label: t("entry.kind.transfer") },
-                  { key: "fx", label: t("entry.kind.fx") },
+                  {
+                    key: "fx",
+                    label: t("entry.kind.fxGroup"),
+                    children: [
+                      { key: "fx", label: t("entry.kind.fx") },
+                      { key: "fx-sell", label: t("entry.kind.fxSell") },
+                    ],
+                  },
                   { key: "investment", label: t("entry.kind.investment") },
                   { key: "stock", label: t("entry.kind.stock") },
                   { key: "stock-transfer", label: t("entry.kind.stockTransfer") },

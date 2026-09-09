@@ -63,7 +63,7 @@ import { getFundFeeRateByDate } from "@/lib/fund/feeRate";
 import { toNumber, addWorkdaysUtc, toStatementMonth, startOfDayUtc, formatDateLocal } from "@/lib/date-utils";
 import { logger } from "@/lib/logger";
 import { compareDetailEntriesAsc, compareDetailEntriesDesc } from "@/lib/detail-entry-order";
-import { isDepositAccount, isInsuranceAccount, isPureInvestmentAccount, isSpecialCashTargetAccount } from "@/lib/account-kind-utils";
+import { isDepositAccount, isInsuranceAccount, isLoanOrSettlementAccountKind, isPureInvestmentAccount, isSpecialCashTargetAccount } from "@/lib/account-kind-utils";
 import { getOrCreateInsuranceAccount } from "@/lib/insurance/autoAccount";
 import { normalizeInsuranceAction } from "@/lib/insurance/transaction";
 import { resolveOrCreateDepositAccount } from "@/lib/server/deposit-account";
@@ -116,7 +116,7 @@ import { DETAIL_ALL_PAGE_SIZE } from "@/lib/detail-pagination-preference";
 export const runtime = "nodejs";
 
 function isSettlementDebtAccountForDetail(account?: { kind?: string | null; counterpartyId?: string | null } | null) {
-  return account?.kind === AccountKind.loan && !!account.counterpartyId;
+  return account?.kind === AccountKind.settlement || (account?.kind === AccountKind.loan && !!account.counterpartyId);
 }
 
 function accountDisplayName(
@@ -1880,8 +1880,8 @@ export async function POST(req: Request) {
           tx.account.findUnique({ where: { id: toAccountId }, include: { Institution: true } }),
         ]);
         if (!fromAcc || !toAcc) throw new Error("账户不存在");
-        const isDebtTransfer = fromAcc.kind === AccountKind.loan || toAcc.kind === AccountKind.loan;
-        if (fromAcc.kind === AccountKind.loan && toAcc.kind === AccountKind.loan) {
+        const isDebtTransfer = isLoanOrSettlementAccountKind(fromAcc.kind) || isLoanOrSettlementAccountKind(toAcc.kind);
+        if (isLoanOrSettlementAccountKind(fromAcc.kind) && isLoanOrSettlementAccountKind(toAcc.kind)) {
           throw new Error("往来款账户之间不能保存为普通转账");
         }
         if (!isDebtTransfer && (isSpecialCashTargetAccount(fromAcc) || isSpecialCashTargetAccount(toAcc))) {
@@ -1889,7 +1889,7 @@ export async function POST(req: Request) {
         }
         const transferCurrency = resolveSameCurrencyTransfer(fromAcc, toAcc);
         const debtMode = isDebtTransfer
-          ? fromAcc.kind === AccountKind.loan
+          ? isLoanOrSettlementAccountKind(fromAcc.kind)
             ? fromAcc.debtDirection === "receivable" ? "collect_in" : "borrow_in"
             : toAcc.debtDirection === "receivable" ? "lend_out" : "repay_out"
           : null;
@@ -1972,7 +1972,7 @@ export async function POST(req: Request) {
 
         const statementMonth =
           (acc.kind === AccountKind.bank_credit || acc.kind === AccountKind.loan) && acc.billingDay
-            ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay)
+            ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay, acc.billingDayTxPeriod)
             : null;
         const duplicate = await findRecentManualTransactionDuplicate(tx, {
           householdId,
@@ -2041,7 +2041,7 @@ export async function POST(req: Request) {
 
         const statementMonth =
           acc && (acc.kind === AccountKind.bank_credit || acc.kind === AccountKind.loan) && acc.billingDay
-            ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay)
+            ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay, acc.billingDayTxPeriod)
             : null;
         if (acc) {
           const duplicate = await findRecentManualTransactionDuplicate(tx, {
@@ -3000,8 +3000,8 @@ export async function PUT(req: Request) {
           tx.account.findUnique({ where: { id: toAccountId } }),
         ]);
         if (!fromAcc || !toAcc) throw new Error("账户不存在");
-        const isDebtTransfer = fromAcc.kind === AccountKind.loan || toAcc.kind === AccountKind.loan;
-        if (fromAcc.kind === AccountKind.loan && toAcc.kind === AccountKind.loan) {
+        const isDebtTransfer = isLoanOrSettlementAccountKind(fromAcc.kind) || isLoanOrSettlementAccountKind(toAcc.kind);
+        if (isLoanOrSettlementAccountKind(fromAcc.kind) && isLoanOrSettlementAccountKind(toAcc.kind)) {
           throw new Error("往来款账户之间不能保存为普通转账");
         }
         if (!isDebtTransfer && (isSpecialCashTargetAccount(fromAcc) || isSpecialCashTargetAccount(toAcc))) {
@@ -3009,7 +3009,7 @@ export async function PUT(req: Request) {
         }
         const transferCurrency = resolveSameCurrencyTransfer(fromAcc, toAcc);
         const debtMode = isDebtTransfer
-          ? fromAcc.kind === AccountKind.loan
+          ? isLoanOrSettlementAccountKind(fromAcc.kind)
             ? fromAcc.debtDirection === "receivable" ? "collect_in" : "borrow_in"
             : toAcc.debtDirection === "receivable" ? "lend_out" : "repay_out"
           : null;
@@ -3656,7 +3656,7 @@ return;
 
       const statementMonth =
         (acc.kind === AccountKind.bank_credit || acc.kind === AccountKind.loan) && acc.billingDay
-          ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay)
+          ? toStatementMonth(creditBillEffectiveDate({ type, date, postedAt }) ?? date, acc.billingDay, acc.billingDayTxPeriod)
           : null;
 
       await tx.txRecord.update({

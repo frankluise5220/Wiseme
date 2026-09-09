@@ -49,6 +49,7 @@ export const SIDEBAR_SHOW_FIXED_ASSETS_KEY = "sidebar_show_fixed_assets";
 export const DETAIL_DATE_BACKGROUND_KEY = "detail_date_background";
 export const ROW_HEIGHT_MODE_KEY = "advanced_data_table_row_height_mode";
 export const ACCOUNT_LABEL_FIELDS_COOKIE = "mmh_account_label_fields";
+export const ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE = "mmh_account_dropdown_restrict_type";
 export const SIDEBAR_COLLAPSED_KEY = "sidebar_collapsed";
 export const SIDEBAR_OWNER_FILTER_KEY = "sidebar_owner_filter";
 export const AI_PANEL_COLLAPSED_KEY = "mmh_ai_panel_collapsed";
@@ -82,6 +83,7 @@ export type AppPreferencesSnapshot = {
   rowHeightMode: RowHeightMode;
   sidebarCollapsed: boolean;
   accountLabelFields: AccountLabelField[];
+  accountDropdownRestrictType: boolean;
 };
 
 const DEFAULT_SESSION_DAYS = 30;
@@ -455,5 +457,25 @@ export function getAppPreferences(): AppPreferencesSnapshot {
     rowHeightMode: getRowHeightModePreference(),
     sidebarCollapsed: getSidebarCollapsedPreference(),
     accountLabelFields: getAccountLabelFieldsPreference(),
+    accountDropdownRestrictType: getAccountDropdownRestrictTypePreference(),
   };
+}
+
+const DEFAULT_ACCOUNT_DROPDOWN_RESTRICT_TYPE = true;
+
+export function getAccountDropdownRestrictTypePreference(): boolean {
+  try {
+    const value = localStorage.getItem(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE) ?? parseCookieValue(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE);
+    return value === "false" ? false : DEFAULT_ACCOUNT_DROPDOWN_RESTRICT_TYPE;
+  } catch {
+    return parseCookieValue(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE) === "false" ? false : DEFAULT_ACCOUNT_DROPDOWN_RESTRICT_TYPE;
+  }
+}
+
+export function setAccountDropdownRestrictTypePreference(value: boolean) {
+  try {
+    localStorage.setItem(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE, String(value));
+  } catch {}
+  setCookieValue(ACCOUNT_DROPDOWN_RESTRICT_TYPE_COOKIE, String(value));
+  emitPreferencesChanged();
 }

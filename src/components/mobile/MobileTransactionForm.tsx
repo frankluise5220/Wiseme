@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { ArrowLeftRight, X } from "lucide-react";
 import { buildGroupedAccountOptions, buildAccountDisplayOption, type AccountDisplaySource } from "@/lib/account-display";
 import { SmartSelect } from "@/components/SmartSelect";
+import { buildCategoryTreeOptions } from "@/components/categorySmartSelect";
 import { dispatchFinanceDataChanged } from "@/lib/client/refresh";
 import { useI18n } from "@/lib/i18n";
 import { getAccountLabelFieldsPreference } from "@/lib/client/appPreferences";
@@ -56,6 +57,13 @@ export function MobileTransactionForm({ accounts, categories, defaultAccountId =
   const transferAccountOptions = useMemo(
     () => accountOptions.filter((option) => option.isHeader || option.id !== draft.accountId),
     [accountOptions, draft.accountId],
+  );
+  const categoryOptions = useMemo(
+    () => [
+      { id: "", label: t("mobileTxForm.uncategorized") },
+      ...buildCategoryTreeOptions(availableCategories, t),
+    ],
+    [availableCategories, t],
   );
 
   useEffect(() => {
@@ -130,6 +138,10 @@ export function MobileTransactionForm({ accounts, categories, defaultAccountId =
 
   function update<K extends keyof TransactionDraft>(key: K, value: TransactionDraft[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  function swapTransferAccounts() {
+    setDraft((current) => ({ ...current, accountId: current.toAccountId, toAccountId: current.accountId }));
   }
 
   async function save() {
@@ -231,7 +243,22 @@ export function MobileTransactionForm({ accounts, categories, defaultAccountId =
         </label>
 
         {draft.type === "transfer" ? (
-          <label className="mt-3 block">
+          <div className="mt-1.5 flex justify-center">
+            <button
+              type="button"
+              onClick={swapTransferAccounts}
+              disabled={!draft.accountId && !draft.toAccountId}
+              title={t("txForm.swapAccounts")}
+              aria-label={t("txForm.swapAccounts")}
+              className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 active:bg-slate-100 disabled:opacity-40"
+            >
+              <ArrowLeftRight size={15} />
+            </button>
+          </div>
+        ) : null}
+
+        {draft.type === "transfer" ? (
+          <label className="mt-1.5 block">
             <span className="text-xs text-slate-500">{t("mobileTxForm.transferToAccount")}</span>
             <div className="mt-1 rounded-[10px] ring-1 ring-rose-200/80 [&>[role=button]]:h-11">
               <SmartSelect
@@ -247,10 +274,16 @@ export function MobileTransactionForm({ accounts, categories, defaultAccountId =
         ) : (
           <label className="mt-3 block">
             <span className="text-xs text-slate-500">{t("mobileTxForm.category")}</span>
-            <select className="form-input mt-1" value={draft.categoryId} onChange={(event) => update("categoryId", event.target.value)}>
-              <option value="">{t("mobileTxForm.uncategorized")}</option>
-              {availableCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-            </select>
+            <div className="mt-1 rounded-[10px] ring-1 ring-rose-200/80 [&>[role=button]]:h-11">
+              <SmartSelect
+                mode="single"
+                value={draft.categoryId}
+                onChange={(value) => update("categoryId", value)}
+                options={categoryOptions}
+                placeholder={t("mobileTxForm.uncategorized")}
+                behavior={{ search: true, density: "regular", minDropdownWidth: 340, dropdownMaxHeight: 320 }}
+              />
+            </div>
           </label>
         )}
 

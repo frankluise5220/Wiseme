@@ -50,6 +50,7 @@ const RECONCILABLE_ACCOUNT_KINDS: AccountKind[] = [
   AccountKind.cash,
   AccountKind.bank_debit,
   AccountKind.ewallet,
+  AccountKind.settlement,
   AccountKind.loan,
 ];
 

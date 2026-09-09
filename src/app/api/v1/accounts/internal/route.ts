@@ -141,7 +141,7 @@ export async function GET(request: Request) {
         const creditDisplayBalance = currentCreditBalanceByAccountId.get(a.id);
         if (creditDisplayBalance != null) return { ...a, balance: creditDisplayBalance };
       }
-      if (a.kind === AccountKind.loan) {
+      if (a.kind === AccountKind.loan || a.kind === AccountKind.settlement) {
         const debtDisplayBalance = debtDisplaySummary.balanceByAccountId.get(a.id);
         if (debtDisplayBalance != null) return { ...a, balance: debtDisplayBalance };
       }

@@ -1,8 +1,9 @@
 import { prisma } from "@/lib/db/prisma";
-import { AccountKind, TransactionType } from "@prisma/client";
+import { AccountKind, Prisma, TransactionType } from "@prisma/client";
 import { toNumber } from "@/lib/date-utils";
 import { compareDetailEntriesAsc, getDetailEntryDisplayDate } from "@/lib/detail-entry-order";
 import { applyBalanceReconcileEntry, getBalanceReconcileTarget } from "@/lib/balance-reconcile";
+import { isLoanOrSettlementAccountKind } from "@/lib/debt";
 import { debtPrincipalForAccountSide } from "@/lib/debt";
 import { txRecordAccountScopeWhere } from "@/lib/transaction-account-scope";
 
@@ -201,7 +202,7 @@ export async function computeAccountDisplayBalances(
         .sort((a, b) => compareDetailEntriesAsc(a, b, account.id));
       let runningBalance = 0;
       for (const entry of orderedRows) {
-        if (account.kind === AccountKind.loan) {
+        if (isLoanOrSettlementAccountKind(account.kind)) {
           if (getBalanceReconcileTarget(entry) != null) {
             runningBalance = applyBalanceReconcileEntry(runningBalance, entry, account.id);
             continue;
@@ -223,10 +224,15 @@ export async function computeLoanPrincipalBalancesAsOf(
   accounts: AccountBalanceLike[],
   hidFilter: { householdId?: string } | undefined,
   asOfDate: Date,
-  options?: { excludeEntryId?: string | null },
+  options?: {
+    excludeEntryId?: string | null;
+    // 传入事务 client 时，余额计算能看到同一事务里尚未提交的借还款流水
+    client?: Prisma.TransactionClient | typeof prisma;
+  },
 ) {
+  const db = options?.client ?? prisma;
   const accountIds = accounts
-    .filter((account) => account.kind === AccountKind.loan)
+    .filter((account) => isLoanOrSettlementAccountKind(account.kind))
     .map((account) => account.id)
     .filter(Boolean);
   const result = new Map<string, number>();
@@ -236,7 +242,7 @@ export async function computeLoanPrincipalBalancesAsOf(
   if (accountIds.length === 0 || !Number.isFinite(asOfDate.getTime())) return result;
 
   const asOfDateKey = asOfDate.toISOString().slice(0, 10);
-  const txRows = await prisma.txRecord.findMany({
+  const txRows = await db.txRecord.findMany({
     where: {
       deletedAt: null,
       ...(hidFilter ?? {}),
@@ -305,6 +311,18 @@ export async function recalcAndSaveAccountBalance(accountId: string) {
     select: { kind: true, investProductType: true, billingDay: true },
   });
   if (!acc) return;
+
+  // Credit-bill accounts (bank_credit with a billing day) always fold to a
+  // display balance of 0 — computeAccountDisplayBalances discards the folded
+  // sum for them because the shown balance is derived from the
+  // CreditCardCycle cache. Skip the full transaction-history scan entirely so
+  // saving entries on a credit card does not pull its entire ledger.
+  if (acc.kind === AccountKind.bank_credit && acc.billingDay) {
+    await prisma.account
+      .update({ where: { id: accountId }, data: { balance: "0" } })
+      .catch(() => {});
+    return;
+  }
 
   const balanceMap = await computeAccountDisplayBalances([
     { id: accountId, kind: acc.kind, investProductType: acc.investProductType, billingDay: acc.billingDay },

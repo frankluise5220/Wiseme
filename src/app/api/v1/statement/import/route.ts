@@ -188,11 +188,11 @@ function formatDateUtc(date?: Date | null) {
 
 async function statementMonthForAccountId(tx: Db, accountId: string | null, date: Date) {
   if (!accountId) return null;
-  const acc = await tx.account.findUnique({ where: { id: accountId }, select: { kind: true, billingDay: true } });
+  const acc = await tx.account.findUnique({ where: { id: accountId }, select: { kind: true, billingDay: true, billingDayTxPeriod: true } });
   if (!acc) return null;
   if (acc.kind !== AccountKind.bank_credit && acc.kind !== AccountKind.loan) return null;
   if (!acc.billingDay) return null;
-  return toStatementMonth(date, acc.billingDay);
+  return toStatementMonth(date, acc.billingDay, acc.billingDayTxPeriod);
 }
 
 type StatementBillLock = {
@@ -260,7 +260,7 @@ async function detectManualRecordConflicts(
     const periodStart = parseDateOnlyUtc(meta?.statementPeriodStart);
     const periodEnd = parseDateOnlyUtc(meta?.statementPeriodEnd);
     const statementDate = periodEnd ?? postedDateForStatement(item, parseDate(item.date));
-    const statementMonth = toStatementMonth(statementDate, account.billingDay);
+    const statementMonth = toStatementMonth(statementDate, account.billingDay, account.billingDayTxPeriod);
     const key = `${account.id}:${statementMonth}`;
     const scope = scopeByCardMonth.get(key) ?? {
       accountIds: [],
@@ -338,6 +338,7 @@ async function statementBillLockForImportedRecord(tx: Db, householdId: string, i
       institutionId: true,
       kind: true,
       billingDay: true,
+      billingDayTxPeriod: true,
       creditBillMode: true,
     },
   });
@@ -346,7 +347,7 @@ async function statementBillLockForImportedRecord(tx: Db, householdId: string, i
   if (!account?.billingDay) return null;
 
   const billAccountIds = await getCreditBillAccountIds(tx, account);
-  const statementMonth = toStatementMonth(periodEnd ?? postedDateForStatement(item, parseDate(item.date)), account.billingDay);
+  const statementMonth = toStatementMonth(periodEnd ?? postedDateForStatement(item, parseDate(item.date)), account.billingDay, account.billingDayTxPeriod);
   return {
     storageAccountId: billAccountIds[0] ?? account.id,
     billAccountIds,
@@ -649,6 +650,7 @@ async function findCreditAccount(tx: Db, householdId: string, accountName: strin
       currency: true,
       creditLimit: true,
       billingDay: true,
+      billingDayTxPeriod: true,
       repaymentDay: true,
       updatedAt: true,
       Institution: { select: { name: true, shortName: true } },
@@ -686,6 +688,7 @@ async function findCreditAccount(tx: Db, householdId: string, accountName: strin
         currency: true,
         creditLimit: true,
         billingDay: true,
+        billingDayTxPeriod: true,
         repaymentDay: true,
         updatedAt: true,
       },
@@ -714,6 +717,7 @@ async function findCreditAccount(tx: Db, householdId: string, accountName: strin
         numberMasked: true,
         creditLimit: true,
         billingDay: true,
+        billingDayTxPeriod: true,
         repaymentDay: true,
         updatedAt: true,
       },
@@ -748,6 +752,7 @@ async function findCreditAccount(tx: Db, householdId: string, accountName: strin
         numberMasked: true,
         creditLimit: true,
         billingDay: true,
+        billingDayTxPeriod: true,
         repaymentDay: true,
         updatedAt: true,
       },
@@ -777,6 +782,7 @@ async function findCreditAccount(tx: Db, householdId: string, accountName: strin
       currency: true,
       creditLimit: true,
       billingDay: true,
+      billingDayTxPeriod: true,
       repaymentDay: true,
       updatedAt: true,
     },
@@ -798,6 +804,7 @@ async function updateCreditAccountMeta(tx: Db, householdId: string, accountId: s
       currency: true,
       creditLimit: true,
       billingDay: true,
+      billingDayTxPeriod: true,
       repaymentDay: true,
     },
   });

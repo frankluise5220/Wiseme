@@ -11,7 +11,7 @@ import { computeInsuranceAccountDisplayBalances } from "@/lib/insurance/balance"
 import { computeAccountDisplayBalances } from "@/lib/server/account-balance";
 import { computeDebtDisplaySummary } from "@/lib/server/debt-display-summary";
 import { getCachedHouseholdScope } from "@/lib/server/household-scope";
-import { isDepositAccount, isPureInvestmentAccount } from "@/lib/account-kind-utils";
+import { isDepositAccount, isLoanOrSettlementAccountKind, isPureInvestmentAccount } from "@/lib/account-kind-utils";
 import type { SidebarGroupMode } from "@/lib/client/appPreferences";
 import { creditCardDisplayBalanceFromCurrentCycle } from "@/lib/credit/billing";
 import { convertCurrencyAmounts } from "@/lib/server/fx-rates";
@@ -44,7 +44,7 @@ async function getSidebarData() {
     }),
     prisma.account.findMany({
       where: { isPlaceholder: { not: true }, name: { not: "未指定账户" }, ...hidFilter, isActive: true },
-      include: { AccountGroup: true, Institution: true },
+      include: { AccountGroup: true, Institution: true, Counterparty: true },
       orderBy: [{ name: "asc" }],
     }),
     computeInvestBalances(ctx),
@@ -97,7 +97,7 @@ async function getSidebarData() {
         ? (cashDisplayBalanceByAccountId.get(account.id) ?? Number(account.balance))
       : account.kind === AccountKind.bank_credit && account.billingDay
         ? (currentCreditBalanceByAccountId.get(account.id) ?? cashDisplayBalanceByAccountId.get(account.id) ?? Number(account.balance))
-      : account.kind === AccountKind.loan
+      : isLoanOrSettlementAccountKind(account.kind)
         ? (debtDisplaySummary.balanceByAccountId.get(account.id) ?? cashDisplayBalanceByAccountId.get(account.id) ?? Number(account.balance))
         : (cashDisplayBalanceByAccountId.get(account.id) ?? Number(account.balance));
     const display = buildAccountDisplayOption({
@@ -109,6 +109,7 @@ async function getSidebarData() {
       investProductType: account.investProductType,
       Institution: account.Institution,
       AccountGroup: account.AccountGroup,
+      Counterparty: account.Counterparty,
     }, creditCardSidebarLabelTemplate);
 
     return {
@@ -120,11 +121,13 @@ async function getSidebarData() {
       balance,
       currency: normalizeCurrency(account.currency),
       kind: account.kind as string,
-      groupName: display.groupName || (account.kind === AccountKind.loan ? "" : "未设置所有人"),
+      groupName: display.groupName || (isLoanOrSettlementAccountKind(account.kind) ? "" : "未设置所有人"),
       institution: display.institutionName || undefined,
       institutionId: account.institutionId ?? null,
       institutionType: account.Institution?.type ?? null,
       counterpartyId: account.counterpartyId ?? null,
+      isConsumerLoan: account.isConsumerLoan === true,
+      loanType: account.loanType ?? null,
       investProductType: account.investProductType || undefined,
       fixedAssetType: account.fixedAssetType ?? null,
     };

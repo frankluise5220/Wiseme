@@ -32,12 +32,23 @@ export function addMonthsUtc(date: Date, months: number) {
   return d;
 }
 
-export function toStatementMonth(date: Date, billingDay: number) {
+/**
+ * Statement month for a transaction date. With txPeriod="next" (billing-day
+ * transactions count into the next statement) the boundary shifts one day
+ * earlier: day < billingDay belongs to this month's statement, day >= billing
+ * day to the next one. Defaults to "current" (day <= billingDay).
+ *
+ * Uses pure month arithmetic — addMonthsUtc would overflow month-end dates
+ * (e.g. 2026-08-31 + 1 month rolled into October instead of September).
+ */
+export function toStatementMonth(date: Date, billingDay: number, txPeriod?: string | null) {
+  const effectiveBillingDay = txPeriod === "next" ? billingDay - 1 : billingDay;
   const day = date.getUTCDate();
-  const monthBase = day <= billingDay ? date : addMonthsUtc(date, 1);
-  const y = monthBase.getUTCFullYear();
-  const m = String(monthBase.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
+  const monthOffset = day <= effectiveBillingDay ? 0 : 1;
+  const absoluteMonth = date.getUTCFullYear() * 12 + date.getUTCMonth() + monthOffset;
+  const year = Math.floor(absoluteMonth / 12);
+  const monthIndex = absoluteMonth % 12;
+  return `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
 }
 
 export function lastDayOfMonthUtc(y: number, m: number) {

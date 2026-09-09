@@ -12,6 +12,9 @@
  * Response:
  * - { ok: true, data: [{ accountId, balance }] }
  *   balance uses the debt account display sign; negative means payable debt.
+ * - Consumer loans (loanType=consumer) additionally carry prepay interest
+ *   preview fields: prepayInterest（自计息起点到该日期的按日应计利息）、
+ *   prepayInterestFromDate、prepayInterestDays、prepayAnnualRate。
  */
 import { AccountKind } from "@prisma/client";
 import { NextResponse } from "next/server";
@@ -21,6 +24,7 @@ import { parseDateInputToUtc } from "@/lib/date-utils";
 import { ACTIVE_DEBT_EPSILON } from "@/lib/server/debt-view-data";
 import { getHouseholdScope } from "@/lib/server/household-scope";
 import { computeLoanPrincipalBalancesAsOf } from "@/lib/server/account-balance";
+import { computeLoanPrepayInterestPreview } from "@/lib/server/loan-prepay-interest";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,7 +40,7 @@ export async function GET(request: Request) {
   }
 
   try {
-    const { hidFilter } = await getHouseholdScope();
+    const { hidFilter, householdId } = await getHouseholdScope();
     const accounts = await prisma.account.findMany({
       where: {
         ...hidFilter,
@@ -59,7 +63,30 @@ export async function GET(request: Request) {
     const data = accounts
       .map((account) => ({ accountId: account.id, balance: balanceByAccountId.get(account.id) ?? 0 }))
       .filter((row) => row.balance < -ACTIVE_DEBT_EPSILON)
-      .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
+      .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance)) as Array<{
+        accountId: string;
+        balance: number;
+        prepayInterest?: number;
+        prepayInterestFromDate?: string;
+        prepayInterestDays?: number;
+        prepayAnnualRate?: number | null;
+      }>;
+
+    if (householdId) {
+      for (const row of data) {
+        const preview = await computeLoanPrepayInterestPreview({
+          householdId,
+          accountId: row.accountId,
+          asOfDate,
+          excludeEntryId: excludeEntryId || null,
+        });
+        if (!preview) continue;
+        row.prepayInterest = preview.interest;
+        row.prepayInterestFromDate = preview.fromDate;
+        row.prepayInterestDays = preview.days;
+        row.prepayAnnualRate = preview.annualRate;
+      }
+    }
 
     return NextResponse.json({ ok: true, data });
   } catch (error) {

@@ -34,7 +34,7 @@ type BasicDetailPanelProps = {
   normalExportFilename: string;
   normalExportRows?: string[][];
   normalExportRowsByEntryId?: Record<string, string[]>;
-  accountOptions: Array<{ id: string; label: string; fullLabel?: string | null; title?: string | null }>;
+  accountOptions: Array<{ id: string; label: string; listLabel?: string | null; fullLabel?: string | null; title?: string | null }>;
   categoryOptions?: BasicDetailBatchCategoryOption[];
   tagOptions?: BasicDetailBatchCategoryOption[];
   investmentProductTypeByAccountId: Record<string, string | undefined | null>;

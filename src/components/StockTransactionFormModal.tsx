@@ -161,6 +161,7 @@ type StockCreateEventDetail = {
   defaultCashAccountId?: string;
   defaultDate?: string;
   defaultAmount?: number;
+  defaultAction?: StockModalAction;
 };
 
 type StockEditEventDetail = {
@@ -748,7 +749,7 @@ export function StockTransactionFormModal({
     });
     setRequestId(detail?.requestId ?? null);
     setEditingId(null);
-    setAction("buy");
+    setAction(STOCK_ACTIONS.find((item) => item.key === detail?.defaultAction)?.key ?? "buy");
     setDividendMode("cash");
     setMarket("CN");
     setStockCode("");

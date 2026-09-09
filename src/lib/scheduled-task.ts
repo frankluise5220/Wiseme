@@ -24,6 +24,8 @@ export type ScheduledTaskPayload = {
   repaymentMethod?: string | null;
   repaymentIntervalMonths?: number | null;
   originalTotalRuns?: number | null;
+  firstBillDate?: string | null;
+  firstRepaymentDate?: string | null;
   /**
    * Loan scheduled plans can be split into two roles:
    * - bill: generate the installment/bill on the loan account.
@@ -155,6 +157,12 @@ export function decodeScheduledTaskMemo(memo?: string | null): ScheduledTaskPayl
         originalTotalRuns: typeof parsed.originalTotalRuns === "number" && Number.isFinite(parsed.originalTotalRuns) && parsed.originalTotalRuns > 0
           ? Math.floor(parsed.originalTotalRuns)
           : null,
+        firstBillDate: typeof parsed.firstBillDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(parsed.firstBillDate)
+          ? parsed.firstBillDate
+          : null,
+        firstRepaymentDate: typeof parsed.firstRepaymentDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(parsed.firstRepaymentDate)
+          ? parsed.firstRepaymentDate
+          : null,
         loanPlanRole: type === "loan_repayment" ? normalizeLoanScheduledPlanRole(parsed.loanPlanRole, autoDebit) : null,
         autoDebit,
         loanRateAdjustments: Array.isArray(parsed.loanRateAdjustments)
@@ -163,7 +171,7 @@ export function decodeScheduledTaskMemo(memo?: string | null): ScheduledTaskPayl
                 effectiveDate: typeof item?.effectiveDate === "string" ? item.effectiveDate.slice(0, 10) : "",
                 annualRate: typeof item?.annualRate === "number" && Number.isFinite(item.annualRate) ? item.annualRate : NaN,
               }))
-              .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) && Number.isFinite(item.annualRate) && item.annualRate > 0)
+              .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) && Number.isFinite(item.annualRate) && item.annualRate >= 0)
               .sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate))
           : [],
       };

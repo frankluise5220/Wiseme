@@ -46,6 +46,7 @@ export async function GET(request: Request) {
         billingDay: true,
         repaymentDay: true,
         creditBillMode: true,
+        billingDayTxPeriod: true,
       },
     });
     if (!account) {

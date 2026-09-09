@@ -29,6 +29,7 @@ export type CreateCreditCardInstallmentInput = {
   billingDay: number;
   firstPaymentDate: Date;
   firstPaymentStatementMonth: string;
+  billingDayTxPeriod?: string | null;
   category?: { id: string; name: string } | null;
   label: string;
   tagIds?: string[];
@@ -40,6 +41,7 @@ export async function normalizeCreditCardInstallmentStatementMonths(
     householdId: string;
     accountIds: string[];
     billingDay: number;
+    billingDayTxPeriod?: string | null;
   },
 ) {
   const accountIds = Array.from(new Set(input.accountIds.map((id) => String(id ?? "").trim()).filter(Boolean)));
@@ -83,7 +85,7 @@ export async function normalizeCreditCardInstallmentStatementMonths(
   const firstPaymentMonthByPlanId = new Map<string, string>();
 
   for (const entry of entries) {
-    const expectedMonth = toStatementMonth(entry.date, input.billingDay);
+    const expectedMonth = toStatementMonth(entry.date, input.billingDay, input.billingDayTxPeriod);
     if (entry.statementMonth !== expectedMonth) {
       await tx.txRecord.updateMany({
         where: {
@@ -272,7 +274,7 @@ export async function materializeDueInstallmentPayments(
       tagIds: true,
       categoryId: true,
       categoryName: true,
-      Account: { select: { name: true, billingDay: true } },
+      Account: { select: { name: true, billingDay: true, billingDayTxPeriod: true } },
     },
   });
   if (plans.length === 0) return { materialized: 0 };
@@ -296,7 +298,7 @@ export async function materializeDueInstallmentPayments(
       .map((row) => ({
         installmentNo: row.installmentNo,
         date: row.date,
-        statementMonth: toStatementMonth(row.date, billingDay),
+        statementMonth: toStatementMonth(row.date, billingDay, plan.Account?.billingDayTxPeriod),
         principal: row.principal,
         interest: row.interest,
       }));

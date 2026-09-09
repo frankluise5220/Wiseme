@@ -1405,6 +1405,47 @@ const MIGRATIONS = [
     },
   },
   {
+    version: "20260905_add_account_loan_type",
+    description: "Add Account.loanType to classify loan accounts",
+    apply(db) {
+      addColumnIfMissing(db, "Account", "loanType", "TEXT");
+      db.prepare(
+        "UPDATE \\"Account\\" SET \\"loanType\\" = CASE WHEN \\"isConsumerLoan\\" = 1 THEN 'consumer' ELSE 'home' END WHERE \\"kind\\" = 'loan'",
+      ).run();
+    },
+  },
+  {
+    version: "20260905_split_settlement_account_kind",
+    description: "Split counterparty settlement accounts from institution loans",
+    apply(db) {
+      db.prepare("UPDATE Account SET kind = 'settlement', loanType = NULL, isConsumerLoan = 0 WHERE kind = 'loan' AND counterpartyId IS NOT NULL AND institutionId IS NULL").run();
+      db.prepare("UPDATE Account SET loanType = NULL, isConsumerLoan = 0 WHERE kind = 'settlement'").run();
+    },
+  },
+  {
+    version: "20260906_restore_counterparty_settlement_kind",
+    description: "Restore counterparty-owned settlement accounts after loan split",
+    apply(db) {
+      db.prepare("UPDATE Account SET kind = 'settlement', loanType = NULL, isConsumerLoan = 0 WHERE kind = 'loan' AND counterpartyId IS NOT NULL AND institutionId IS NULL").run();
+      db.prepare("UPDATE Account SET loanType = NULL, isConsumerLoan = 0 WHERE kind = 'settlement'").run();
+    },
+  },
+  {
+    version: "20260907_normalize_counterparty_settlement_accounts",
+    description: "Normalize all legacy counterparty-owned loan accounts to settlement",
+    apply(db) {
+      db.prepare("UPDATE Account SET kind = 'settlement', institutionId = NULL, loanType = NULL, isConsumerLoan = 0 WHERE kind = 'loan' AND counterpartyId IS NOT NULL").run();
+      db.prepare("UPDATE Account SET institutionId = NULL, loanType = NULL, isConsumerLoan = 0 WHERE kind = 'settlement'").run();
+    },
+  },
+  {
+    version: "20260909_add_billing_day_tx_period",
+    description: "Add Account.billingDayTxPeriod: billing-day transactions count into current or next statement",
+    apply(db) {
+      addColumnIfMissing(db, "Account", "billingDayTxPeriod", "TEXT NOT NULL DEFAULT 'current'");
+    },
+  },
+  {
     version: "20260903_add_fund_profile_trading_calendar",
     description: "Add fund-level NAV trading calendar to fund profiles",
     apply(db) {

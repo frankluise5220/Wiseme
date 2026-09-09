@@ -227,7 +227,15 @@ export type AdvancedDataTableProps<T> = {
   summaryRow?: AdvancedDataTableSummaryRow;
   resetKey?: string;
   resetDisplayStateOnMount?: boolean;
+  scrollToRowKey?: string | null;
 };
+
+// Center a row inside the table viewport without scrolling ancestor containers.
+function scrollViewportToRowCenter(viewport: HTMLElement, target: HTMLElement) {
+  const viewportRect = viewport.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  viewport.scrollTop += targetRect.top - viewportRect.top - Math.max(0, (viewportRect.height - targetRect.height) / 2);
+}
 
 function alignClass(align?: "left" | "center" | "right") {
   if (align === "right") return "text-right";
@@ -402,6 +410,7 @@ export function AdvancedDataTable<T>({
   summaryRow,
   resetKey,
   resetDisplayStateOnMount = false,
+  scrollToRowKey,
 }: AdvancedDataTableProps<T>) {
   const { t } = useI18n();
   const tf = (key: string, values: Record<string, string | number>) => {
@@ -848,6 +857,31 @@ export function AdvancedDataTable<T>({
   const virtualPaddingBottom = shouldVirtualizeRows
     ? Math.max(0, rowVirtualizer.getTotalSize() - (virtualRows[virtualRows.length - 1]?.end ?? 0))
     : 0;
+
+  const scrolledAnchorKeyRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (!scrollToRowKey) {
+      scrolledAnchorKeyRef.current = null;
+      return;
+    }
+    // Scroll once per anchor key; later row-data refreshes must not yank the viewport back.
+    if (scrolledAnchorKeyRef.current === scrollToRowKey) return;
+    const targetIndex = displayRowItems.findIndex((item) => item.key === scrollToRowKey);
+    if (targetIndex < 0) return;
+    scrolledAnchorKeyRef.current = scrollToRowKey;
+    const viewport = viewportRef.current;
+    if (shouldVirtualizeRows) {
+      rowVirtualizer.scrollToIndex(targetIndex, { align: "center" });
+      // Dynamic row measurement can leave the estimate-based scroll off; fine-tune once the row is mounted.
+      const frame = window.requestAnimationFrame(() => {
+        const target = viewport?.querySelector<HTMLElement>(`[data-advanced-row-key="${CSS.escape(scrollToRowKey)}"]`);
+        if (viewport && target) scrollViewportToRowCenter(viewport, target);
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+    const target = viewport?.querySelector<HTMLElement>(`[data-advanced-row-key="${CSS.escape(scrollToRowKey)}"]`);
+    if (viewport && target) scrollViewportToRowCenter(viewport, target);
+  }, [displayRowItems, rowVirtualizer, scrollToRowKey, shouldVirtualizeRows]);
 
   const layout = useMemo(() => {
     const controlWidth = selectable ? (draggableRows ? 58 : 38) : (draggableRows ? 30 : 0);
@@ -1428,6 +1462,7 @@ export function AdvancedDataTable<T>({
               </>
             ) : (
               <>
+                {toolbarLeftContent}
                 {selectedCount > 0 ? batchActionSlot : null}
                 {selectable && selectedCount > 0 ? <span className="font-medium text-slate-600">{tf("table.selectedCount", { count: selectedCount })}</span> : null}
                 {selectedCount > 0 ? batchActions.map((action) => {

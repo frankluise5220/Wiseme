@@ -994,7 +994,7 @@ async function createBankTransfer(
   const bankAccount = item.bankAccountId
     ? await tx.account.findFirst({
         where: { id: item.bankAccountId, householdId: ctx.householdId },
-        select: { id: true, name: true, kind: true, currency: true, billingDay: true },
+        select: { id: true, name: true, kind: true, currency: true, billingDay: true, billingDayTxPeriod: true },
       })
     : null;
   if (!bankAccount) throw new Error("Bank account was not found");

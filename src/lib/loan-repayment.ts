@@ -54,7 +54,7 @@ export function normalizeLoanRateAdjustments(adjustments?: LoanRateAdjustment[] 
       effectiveDate: String(item.effectiveDate ?? "").slice(0, 10),
       annualRate: Number(item.annualRate),
     }))
-    .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) && Number.isFinite(item.annualRate) && item.annualRate > 0)
+    .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.effectiveDate) && Number.isFinite(item.annualRate) && item.annualRate >= 0)
     .sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate));
 }
 
@@ -123,6 +123,57 @@ export type LoanPrincipalAdjustmentInPeriod = {
   date: string;
   amount: number;
 };
+
+/**
+ * 计算窗口 (startDateExclusive, endDateInclusive] 内的按日应计利息（rate/360，
+ * 与 calcLoanPeriodInterestByDailyRate 同口径），并支持窗口内本金递减事件：
+ * 事件在其发生日计息后生效（当天仍按事件前的本金计息）。
+ * 用于消费贷提前还款：从借款日（或最近一次已结息日）到提前还款日的利息。
+ */
+export function calcLoanAccruedInterestBetweenDates(params: {
+  principal: number;
+  baseAnnualRate?: number | null;
+  adjustments?: LoanRateAdjustment[] | null;
+  principalReductions?: LoanPrincipalAdjustmentInPeriod[] | null;
+  startDateExclusive: string;
+  endDateInclusive: string;
+}) {
+  const startMs = dateOnlyToUtcMs(params.startDateExclusive);
+  const endMs = dateOnlyToUtcMs(params.endDateInclusive);
+  let principal = Math.max(0, params.principal);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs || principal <= 0) return 0;
+
+  const dayMs = 24 * 60 * 60 * 1000;
+  // 封顶约 10 年，避免异常数据导致超长循环。
+  if (endMs - startMs > 3700 * dayMs) return 0;
+
+  const reductions = [...(params.principalReductions ?? [])]
+    .map((item) => ({
+      date: String(item.date ?? "").slice(0, 10),
+      amount: Math.max(0, Number(item.amount)),
+    }))
+    .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item.date) && item.amount > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  let interest = 0;
+  let eventIndex = 0;
+  for (let day = startMs + dayMs; day <= endMs; day += dayMs) {
+    const date = formatDateOnlyFromUtcMs(day);
+    const rate = getEffectiveLoanAnnualRate({
+      baseAnnualRate: params.baseAnnualRate,
+      adjustments: params.adjustments,
+      date,
+    });
+    if (rate != null && Number.isFinite(rate) && rate > 0 && principal > 0) {
+      interest += principal * (rate / 100) / 360;
+    }
+    while (eventIndex < reductions.length && reductions[eventIndex]!.date === date) {
+      principal = Math.max(0, principal - reductions[eventIndex]!.amount);
+      eventIndex += 1;
+    }
+  }
+  return roundLoanMoney(interest);
+}
 
 export function calcLoanPeriodInterestByDailyRateWithPrincipalAdjustments(params: {
   principal: number;
@@ -267,22 +318,24 @@ export function estimateLoanEqualPaymentRemainingRuns(params: {
   intervalMonths?: number | null;
   scheduledAmount: number;
   remainingPrincipal: number;
-  maxRemainingRuns?: number | null;
 }) {
+  // Dependency chain for reduce-term prepayment:
+  // remaining principal + effective rate + carried scheduled amount -> natural payoff runs -> plan.totalRuns.
   const principal = Math.max(0, params.remainingPrincipal);
   const scheduledAmount = Math.max(0, params.scheduledAmount);
-  const maxRemainingRuns = Math.min(Math.max(1, params.maxRemainingRuns ?? 600), 600);
   if (principal <= 0.005) return 0;
+  if (scheduledAmount <= 0.005) return null;
   const periodRate =
     params.annualRate != null && Number.isFinite(params.annualRate) && params.annualRate > 0
       ? (params.annualRate / 100 / 12) * Math.max(1, params.intervalMonths || 1)
       : 0;
-  if (periodRate <= 0) return maxRemainingRuns;
+  if (periodRate <= 0) return Math.max(1, Math.ceil(principal / scheduledAmount));
   const denominator = scheduledAmount - principal * periodRate;
-  if (scheduledAmount <= 0 || denominator <= 0) return maxRemainingRuns;
+  if (denominator <= 0.005) return null;
   const runs = Math.log(scheduledAmount / denominator) / Math.log(1 + periodRate);
-  if (!Number.isFinite(runs) || runs <= 0) return maxRemainingRuns;
-  return Math.min(maxRemainingRuns, Math.max(1, Math.ceil(runs)));
+  if (!Number.isFinite(runs) || runs <= 0) return null;
+  const naturalRuns = Math.max(1, Math.ceil(runs - 1e-10));
+  return naturalRuns <= 1200 ? naturalRuns : null;
 }
 
 export function calcLoanRunParts(params: {
@@ -358,6 +411,11 @@ export function calcLoanScheduledAmountForPeriodStart(params: {
     adjustments,
     date: params.periodStartDate,
   });
+  // 生效利率与基础利率相同（如放款日初始利率行）不构成重定价：
+  // 保持原月供，禁止用 annuity(期初余额, 剩余期数) 自算跳变。
+  if (annualRate == null || (params.baseAnnualRate != null && Math.abs(annualRate - params.baseAnnualRate) < 1e-9)) {
+    return params.scheduledAmount;
+  }
   return (
     calcLoanScheduledAmount({
       repaymentMethod: params.repaymentMethod,
@@ -572,6 +630,7 @@ export function buildLoanRepaymentSchedulePreview(params: {
       intervalMonths,
       scheduledAmount,
       scheduledAmountExact,
+      preserveScheduledAmount: true,
       remainingPrincipal: exactRemainingPrincipal,
       remainingRuns: remainingRunsForThisRun,
       previousRunDate: formatDateUtc(previousRunDate),

@@ -106,9 +106,17 @@ export function calcMortgageAnnualRateFromLprDiscount(params: {
   return roundRate(params.lprRate + calcMortgageLprSpreadFromDiscount(params.discount));
 }
 
-export function inferMortgageLprDiscountFromRateAdjustments(adjustments: LoanRateAdjustment[]) {
+export function inferMortgageLprDiscountFromRateAdjustments(
+  adjustments: LoanRateAdjustment[],
+  options?: { skipOnOrBefore?: string | null },
+) {
+  // 放款日行（及其之前的行）是"执行利率×折扣"，不是"LPR+加点"，
+  // 不能用来反推折扣，否则 LPR 时代放款行会推错折扣。
+  const skipOnOrBeforeRaw = options?.skipOnOrBefore?.slice(0, 10) ?? "";
+  const skipOnOrBefore = /^\d{4}-\d{2}-\d{2}$/.test(skipOnOrBeforeRaw) ? skipOnOrBeforeRaw : null;
   const normalized = normalizeLoanRateAdjustments(adjustments);
   for (const adjustment of normalized) {
+    if (skipOnOrBefore && adjustment.effectiveDate <= skipOnOrBefore) continue;
     const effectiveDate = dateOnlyToUtcDate(adjustment.effectiveDate);
     if (!effectiveDate || !Number.isFinite(adjustment.annualRate) || adjustment.annualRate <= 0) continue;
 
@@ -147,21 +155,20 @@ export function buildMortgageLprRateAdjustments(params: {
   const repriceMonth = Math.min(12, Math.max(1, Math.trunc(params.repriceMonth ?? 1)));
   const repriceDay = Math.min(31, Math.max(1, Math.trunc(params.repriceDay ?? 1)));
   const from = params.fromDate ? dateOnlyToUtcDate(params.fromDate) : null;
-  const basis = params.basis ?? (from ? "lpr_quote" : "annual_reprice");
-  const firstRepriceYearFromDate = from
-    ? (() => {
-        const fromYear = from.getUTCFullYear();
-        const sameYearRepriceDate = new Date(Date.UTC(fromYear, repriceMonth - 1, repriceDay));
-        return sameYearRepriceDate <= from ? fromYear + 1 : fromYear;
-      })()
-    : 2021;
-  const firstRepriceYear = Math.max(2020, Math.trunc(params.firstRepriceYear ?? firstRepriceYearFromDate));
+  const basis = params.basis ?? "annual_reprice";
+  const firstRepriceYear = Math.max(2020, Math.trunc(params.firstRepriceYear ?? 2021));
   const throughYear = through.getUTCFullYear();
   const spread = calcMortgageLprSpreadFromDiscount(params.discount);
   let previousRate = roundRate((from && params.fromDate
     ? (getMortgageBankExecutionRate(params.fromDate)?.rate ?? MORTGAGE_BASE_BENCHMARK_RATE)
     : MORTGAGE_BASE_BENCHMARK_RATE) * params.discount);
   const rows: LoanRateAdjustment[] = [];
+
+  // 利率调整历史从放款日开始：第一条是放款日当天的执行利率
+  // （基准/LPR × 折扣），之后才是各次重定价的变动。
+  if (from && params.fromDate) {
+    rows.push({ effectiveDate: params.fromDate.slice(0, 10), annualRate: previousRate });
+  }
 
   if (basis === "lpr_quote") {
     for (const quote of FIVE_YEAR_LPR_HISTORY) {
@@ -198,4 +205,95 @@ export function buildMortgageLprRateAdjustments(params: {
   }
 
   return normalizeLoanRateAdjustments(rows);
+}
+
+function isAnnualRepriceDate(params: {
+  effectiveDate: string;
+  repriceMonth?: number;
+  repriceDay?: number;
+  firstRepriceYear?: number;
+}) {
+  const effectiveDate = dateOnlyToUtcDate(params.effectiveDate);
+  if (!effectiveDate) return false;
+  const repriceMonth = Math.min(12, Math.max(1, Math.trunc(params.repriceMonth ?? 1)));
+  const repriceDay = Math.min(31, Math.max(1, Math.trunc(params.repriceDay ?? 1)));
+  const firstRepriceYear = Math.max(2020, Math.trunc(params.firstRepriceYear ?? 2021));
+  return (
+    effectiveDate.getUTCFullYear() >= firstRepriceYear &&
+    effectiveDate.getUTCMonth() === repriceMonth - 1 &&
+    effectiveDate.getUTCDate() === repriceDay
+  );
+}
+
+function isLegacyLprQuoteDateGeneratedAdjustment(params: {
+  adjustment: LoanRateAdjustment;
+  discount: number;
+  repriceMonth?: number;
+  repriceDay?: number;
+  firstRepriceYear?: number;
+}) {
+  if (isAnnualRepriceDate({
+    effectiveDate: params.adjustment.effectiveDate,
+    repriceMonth: params.repriceMonth,
+    repriceDay: params.repriceDay,
+    firstRepriceYear: params.firstRepriceYear,
+  })) {
+    return false;
+  }
+  const quote = FIVE_YEAR_LPR_HISTORY.find((item) => item.date === params.adjustment.effectiveDate);
+  if (!quote) return false;
+  const expectedRate = calcMortgageAnnualRateFromLprDiscount({
+    discount: params.discount,
+    lprRate: quote.fiveYearRate,
+  });
+  return Math.abs(expectedRate - params.adjustment.annualRate) <= 0.005;
+}
+
+export function normalizeMortgageLprAdjustmentHistory(params: {
+  adjustments?: LoanRateAdjustment[] | null;
+  discount?: number | null;
+  throughDate: string;
+  fromDate?: string | null;
+  repriceMonth?: number;
+  repriceDay?: number;
+  firstRepriceYear?: number;
+}) {
+  const adjustments = normalizeLoanRateAdjustments(params.adjustments);
+  const discount = Number(params.discount);
+  if (!Number.isFinite(discount) || discount <= 0) return adjustments;
+
+  const hasLegacyQuoteRows = adjustments.some((adjustment) =>
+    isLegacyLprQuoteDateGeneratedAdjustment({
+      adjustment,
+      discount,
+      repriceMonth: params.repriceMonth,
+      repriceDay: params.repriceDay,
+      firstRepriceYear: params.firstRepriceYear,
+    }),
+  );
+  if (!hasLegacyQuoteRows) return adjustments;
+
+  const annualRows = buildMortgageLprRateAdjustments({
+    discount,
+    throughDate: params.throughDate,
+    fromDate: params.fromDate ?? undefined,
+    repriceMonth: params.repriceMonth,
+    repriceDay: params.repriceDay,
+    firstRepriceYear: params.firstRepriceYear,
+  });
+  const byDate = new Map(annualRows.map((item) => [item.effectiveDate, item]));
+  for (const adjustment of adjustments) {
+    if (isLegacyLprQuoteDateGeneratedAdjustment({
+      adjustment,
+      discount,
+      repriceMonth: params.repriceMonth,
+      repriceDay: params.repriceDay,
+      firstRepriceYear: params.firstRepriceYear,
+    })) {
+      continue;
+    }
+    byDate.set(adjustment.effectiveDate, adjustment);
+  }
+
+  return normalizeLoanRateAdjustments(Array.from(byDate.values()));
 }

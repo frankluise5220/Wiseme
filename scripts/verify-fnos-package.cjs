@@ -366,6 +366,10 @@ expect(/20260902_add_regular_invest_plan_name/.test(buildScript) && /addColumnIf
 expect(/20260903_normalize_ewallet_institution_type/.test(buildScript) && /SET \\+"type\\+" = 'payment' WHERE \\+"type\\+" = 'ewallet'/.test(buildScript), "fnOS SQLite migrations must normalize legacy ewallet institutions to the payment type for existing databases.");
 expect(/20260903_add_fund_profile_trading_calendar/.test(buildScript) && /addColumnIfMissing\(db, "FundProfile", "tradingCalendar", "TEXT"\)/.test(buildScript) && /jp_fund/.test(buildScript), "fnOS SQLite migrations must add FundProfile.tradingCalendar and Japan fund calendar support for existing databases.");
 expect(/20260903_restore_fund_profile_company_code/.test(buildScript) && /addColumnIfMissing\(db, "FundProfile", "fundCompanyCode", "TEXT"\)/.test(buildScript), "fnOS SQLite migrations must restore FundProfile.fundCompanyCode for existing databases.");
+expect(/20260905_add_account_loan_type/.test(buildScript) && /addColumnIfMissing\(db, "Account", "loanType", "TEXT"\)/.test(buildScript) && /'consumer'/.test(buildScript), "fnOS SQLite migrations must add Account.loanType for existing databases.");
+expect(/20260906_restore_counterparty_settlement_kind/.test(buildScript) && /counterparty-owned settlement accounts/.test(buildScript) && /counterpartyId IS NOT NULL AND institutionId IS NULL/.test(buildScript), "fnOS SQLite migrations must restore counterparty settlement accounts misclassified as loans.");
+expect(/20260907_normalize_counterparty_settlement_accounts/.test(buildScript) && /WHERE kind = 'loan' AND counterpartyId IS NOT NULL/.test(buildScript) && /institutionId = NULL/.test(buildScript), "fnOS SQLite migrations must normalize all legacy counterparty loan accounts to settlement and clear institution links.");
+expect(/20260909_add_billing_day_tx_period/.test(buildScript) && /addColumnIfMissing\(db, "Account", "billingDayTxPeriod", "TEXT NOT NULL DEFAULT 'current'"\)/.test(buildScript), "fnOS SQLite migrations must add Account.billingDayTxPeriod for existing databases.");
 for (const tableName of [
   "transactions",
   "fund_transactions",
